@@ -123,25 +123,34 @@ function closeSheet() {
 
 // ── Trail drawing ─────────────────────────────────────────────────────────────
 
-// Catmull-Rom spline: passes through every data point with smooth tangents.
-// Phantom endpoints mirror the first/last segment so the curve exits cleanly
-// without curling back — gives zero curvature at both ends of the trail.
+// Centripetal Catmull-Rom spline (α=0.5): passes through every data point and
+// weights tangents by √distance between points. This prevents the overshoot/zigzag
+// artifacts that uniform Catmull-Rom produces when AIS points are unevenly spaced.
 function catmullRomPoints(pts, samples = 8) {
   if (pts.length < 2) return pts;
+
+  function knot(t, a, b) {
+    const dx = b[0] - a[0], dy = b[1] - a[1];
+    return Math.pow(Math.max(Math.sqrt(dx * dx + dy * dy), 1e-10), 0.5) + t;
+  }
+
   const result = [];
   for (let i = 0; i < pts.length - 1; i++) {
     const p0 = i > 0 ? pts[i - 1] : [2 * pts[0][0] - pts[1][0], 2 * pts[0][1] - pts[1][1]];
     const p1 = pts[i];
     const p2 = pts[i + 1];
     const p3 = i < pts.length - 2 ? pts[i + 2] : [2 * pts[pts.length - 1][0] - pts[pts.length - 2][0], 2 * pts[pts.length - 1][1] - pts[pts.length - 2][1]];
+
+    const t0 = 0, t1 = knot(t0, p0, p1), t2 = knot(t1, p1, p2), t3 = knot(t2, p2, p3);
+
     for (let j = 0; j < samples; j++) {
-      const t = j / samples;
-      const t2 = t * t;
-      const t3 = t2 * t;
-      result.push([
-        0.5 * ((2 * p1[0]) + (-p0[0] + p2[0]) * t + (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * t2 + (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * t3),
-        0.5 * ((2 * p1[1]) + (-p0[1] + p2[1]) * t + (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2 + (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3),
-      ]);
+      const t = t1 + (t2 - t1) * (j / samples);
+      const A1 = [p0[0] + (p1[0] - p0[0]) * (t - t0) / (t1 - t0), p0[1] + (p1[1] - p0[1]) * (t - t0) / (t1 - t0)];
+      const A2 = [p1[0] + (p2[0] - p1[0]) * (t - t1) / (t2 - t1), p1[1] + (p2[1] - p1[1]) * (t - t1) / (t2 - t1)];
+      const A3 = [p2[0] + (p3[0] - p2[0]) * (t - t2) / (t3 - t2), p2[1] + (p3[1] - p2[1]) * (t - t2) / (t3 - t2)];
+      const B1 = [A1[0] + (A2[0] - A1[0]) * (t - t0) / (t2 - t0), A1[1] + (A2[1] - A1[1]) * (t - t0) / (t2 - t0)];
+      const B2 = [A2[0] + (A3[0] - A2[0]) * (t - t1) / (t3 - t1), A2[1] + (A3[1] - A2[1]) * (t - t1) / (t3 - t1)];
+      result.push([B1[0] + (B2[0] - B1[0]) * (t - t1) / (t2 - t1), B1[1] + (B2[1] - B1[1]) * (t - t1) / (t2 - t1)]);
     }
   }
   result.push(pts[pts.length - 1]);
