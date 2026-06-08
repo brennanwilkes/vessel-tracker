@@ -153,8 +153,9 @@ function preSmooth(pts) {
   }
 
   let cur = pts.slice();
-  cur = laplacianPass(cur, +1, 0.2); // inward: denoise
-  cur = laplacianPass(cur, -1, 0.5); // outward: expand past data
+  cur = laplacianPass(cur, +1, 0.2); // inward: denoise (pass 1)
+  cur = laplacianPass(cur, +1, 0.2); // inward: denoise (pass 2)
+  cur = laplacianPass(cur, -1, 0.8); // outward: expand past data
   return cur;
 }
 
