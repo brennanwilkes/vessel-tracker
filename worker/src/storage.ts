@@ -173,6 +173,14 @@ export async function enrichStaticData(env: Env, updates: StaticUpdate[]): Promi
            WHEN (?3 >= 60 AND ?3 <= 69 AND COALESCE(?4, length) >= 50) THEN 1
            WHEN COALESCE(?4, length) >= 50 THEN 1
            ELSE of_interest
+         END,
+         max_extent = CASE
+           WHEN max_extent = 'direct' AND (
+             (?3 >= 70 AND ?3 <= 89)
+             OR (?3 >= 60 AND ?3 <= 69 AND COALESCE(?4, length) >= 50)
+             OR COALESCE(?4, length) >= 50
+           ) THEN 'local'
+           ELSE max_extent
          END
        WHERE mmsi = ?1
          AND (vessel_type IS NULL OR length IS NULL OR destination IS NULL)`

@@ -56,6 +56,15 @@ function tierOf(lat: number, lon: number): Tier {
   return 'global';
 }
 
+// Provenance for a brand-new vessel. We default to 'direct' (a local resident), but a large
+// vessel (cargo/tanker/>=50m) is always transiting — if its first sighting is already inside
+// the direct box, it slipped in between local scans, not because it lives here. Seeding 'local'
+// keeps a 250m tanker out of the local-boat bucket. (Vessels typed only after first sighting are
+// handled by the matching max_extent upgrade in enrichStaticData.)
+function initialExtent(v: Vessel): MaxExtent {
+  return isLargeVessel(v.vesselType, v.length) ? 'local' : 'direct';
+}
+
 function computeDirectEntryCount(prev: VesselState | undefined, currentTier: Tier): number {
   const prevCount = prev?.direct_entry_count ?? 0;
   if (currentTier !== 'direct') return prevCount;
@@ -95,7 +104,7 @@ export async function runDirectScan(env: Env): Promise<void> {
 
     const firstDirect = (prev === undefined || prev.of_interest === 0) ? nowMs : null;
     const direct_entry_count = computeDirectEntryCount(prev, 'direct');
-    const max_extent: MaxExtent = prev?.max_extent ?? 'direct';
+    const max_extent: MaxExtent = prev?.max_extent ?? initialExtent(v);
 
     upserts.push({
       mmsi: v.mmsi,
@@ -168,7 +177,7 @@ export async function runLocalScan(env: Env): Promise<void> {
     const of_interest = inDirect || (prev !== undefined && prev.of_interest === 1) ? 1 : 0;
     const firstDirect = inDirect && (prev === undefined || prev.of_interest === 0) ? nowMs : null;
 
-    const prevExtent: MaxExtent = prev?.max_extent ?? 'direct';
+    const prevExtent: MaxExtent = prev?.max_extent ?? initialExtent(v);
     const max_extent = inDirect ? prevExtent : widenExtent(prevExtent, 'local');
 
     const tier: Tier = inDirect ? 'direct' : 'local';
@@ -256,7 +265,7 @@ export async function runGlobalScan(env: Env): Promise<void> {
     const tier = tierOf(v.lat, v.lon);
     tierCounts[tier]++;
 
-    const prevExtent: MaxExtent = prev?.max_extent ?? 'direct';
+    const prevExtent: MaxExtent = prev?.max_extent ?? initialExtent(v);
     const max_extent = tier === 'global' ? widenExtent(prevExtent, 'global') : prevExtent;
 
     const inDirect = tier === 'direct';
