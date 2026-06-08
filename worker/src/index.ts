@@ -17,7 +17,6 @@ export default {
 
     if (url.pathname === '/current') {
       const vessels = await getCurrentVessels(env, LIVE_TTL_MS);
-      console.log(`[fetch] GET /current → ${vessels.length} vessels`);
       return json(req, env, 200, { vessels }, { 'Cache-Control': 'no-store' });
     }
 
@@ -30,7 +29,6 @@ export default {
         : [];
 
       const points = await getTrack(env, mmsi, tiers, TRACK_LIMIT);
-      console.log(`[fetch] GET /vessel/${mmsi}/track?tier=${tierParam ?? ''} → ${points.length} points`);
 
       return json(
         req, env, 200,
