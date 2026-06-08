@@ -32,10 +32,10 @@ export const MOVE_THRESHOLD_NM: Record<string, number> = {
 // their last-known speed after anchoring/docking. We call BS when:
 //   - reported speed >= PHANTOM_SPEED_MIN_KN
 //   - no new position row has been written in >= PHANTOM_STALL_MS
-// A genuine 1.5-kn vessel crosses MOVE_THRESHOLD_NM.direct every ~2 min, so 5 min gives
-// 2.5× headroom before we'd incorrectly flag a legitimately slow vessel.
+// A genuine 1.5-kn vessel crosses MOVE_THRESHOLD_NM.direct every ~2 min, so 20 min is a
+// 10× safety margin — a moving vessel cannot go this long without a position row.
 export const PHANTOM_SPEED_MIN_KN = 1.5;
-export const PHANTOM_STALL_MS     = 15 * 60 * 1000;
+export const PHANTOM_STALL_MS     = 20 * 60 * 1000;
 
 // How long a stationary vessel can go without a heartbeat last_seen update (ms)
 export const HEARTBEAT_MS = 10 * 60 * 1000;
