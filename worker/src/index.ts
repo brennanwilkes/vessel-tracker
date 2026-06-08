@@ -1,7 +1,7 @@
 import type { Env } from './types';
 import { handleOptions } from './cors';
 import { json, errorJson } from './http';
-import { readFreshVessels, getVesselRow, getVesselSightings } from './storage';
+import { readSnapshot, getVesselRow, getVesselSightings } from './storage';
 import { runLiveIngest, runEnrichment } from './ingest';
 
 export default {
@@ -12,7 +12,7 @@ export default {
     if (req.method !== 'GET') return errorJson(req, env, 405, 'Method not allowed');
 
     if (url.pathname === '/vessels') {
-      const vessels = await readFreshVessels(env);
+      const vessels = await readSnapshot(env);
       console.log(`[fetch] GET /vessels → ${vessels.length} fresh vessels`);
       return json(req, env, 200, { vessels });
     }

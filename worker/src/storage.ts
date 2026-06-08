@@ -1,14 +1,19 @@
 import type { Env, Vessel, Snapshot, VesselRow, SightingRow } from './types';
 import { SNAPSHOT_KEY, STALE_THRESHOLD_MS } from './constants';
 
-// Merge new positions into the existing snapshot rather than overwriting.
-// Vessels not heard this run stay until they age past STALE_THRESHOLD_MS.
-export async function mergeSnapshot(env: Env, freshVessels: Vessel[]): Promise<void> {
+export async function readSnapshot(env: Env): Promise<Vessel[]> {
   const raw = await env.SNAPSHOT_KV.get(SNAPSHOT_KEY);
-  const existing: Vessel[] = raw ? (JSON.parse(raw) as Snapshot).vessels : [];
+  if (!raw) return [];
+  const snapshot: Snapshot = JSON.parse(raw);
+  const cutoff = Date.now() - STALE_THRESHOLD_MS;
+  return snapshot.vessels.filter(v => v.updated >= cutoff);
+}
 
+// Takes the already-read existing vessels to avoid a second KV read.
+// Merges fresh positions in, drops entries older than STALE_THRESHOLD_MS, writes back.
+export async function mergeSnapshot(env: Env, existing: Vessel[], fresh: Vessel[]): Promise<void> {
   const byMmsi = new Map(existing.map(v => [v.mmsi, v]));
-  for (const v of freshVessels) byMmsi.set(v.mmsi, v);
+  for (const v of fresh) byMmsi.set(v.mmsi, v);
 
   const cutoff = Date.now() - STALE_THRESHOLD_MS;
   const merged = [...byMmsi.values()].filter(v => v.updated >= cutoff);
@@ -17,14 +22,7 @@ export async function mergeSnapshot(env: Env, freshVessels: Vessel[]): Promise<v
   await env.SNAPSHOT_KV.put(SNAPSHOT_KEY, JSON.stringify(snapshot));
 }
 
-export async function readFreshVessels(env: Env): Promise<Vessel[]> {
-  const raw = await env.SNAPSHOT_KV.get(SNAPSHOT_KEY);
-  if (!raw) return [];
-  const snapshot: Snapshot = JSON.parse(raw);
-  const cutoff = Date.now() - STALE_THRESHOLD_MS;
-  return snapshot.vessels.filter(v => v.updated >= cutoff);
-}
-
+// Only called for vessels not already in the KV snapshot (true new arrivals).
 export async function upsertVessels(env: Env, vessels: Vessel[]): Promise<void> {
   if (vessels.length === 0) return;
   const stmts = vessels.map(v =>
@@ -42,55 +40,18 @@ export async function upsertVessels(env: Env, vessels: Vessel[]): Promise<void> 
   await env.VESSELS_DB.batch(stmts);
 }
 
-// Diff current vessels against active sightings and emit enter/continue/exit events.
-// Generates UPDATEs for continuing/exiting vessels and INSERTs for new arrivals —
-// all in one D1 batch, so row count stays proportional to unique vessels, not poll count.
-export async function updateSightings(env: Env, vessels: Vessel[]): Promise<void> {
+// Records one arrival event per new vessel. FK on mmsi requires upsertVessels first.
+export async function insertSightings(env: Env, vessels: Vessel[]): Promise<void> {
+  if (vessels.length === 0) return;
   const nowMs = Date.now();
-
-  const active = await env.VESSELS_DB
-    .prepare(`SELECT id, mmsi FROM vessel_sightings WHERE exited_at IS NULL`)
-    .all<{ id: number; mmsi: number }>();
-
-  const activeById = new Map(active.results.map(r => [r.mmsi, r.id]));
-  const currentMmsis = new Set(vessels.map(v => v.mmsi));
-
-  const stmts: D1PreparedStatement[] = [];
-
-  for (const vessel of vessels) {
-    const existingId = activeById.get(vessel.mmsi);
-    if (existingId !== undefined) {
-      // Vessel still visible — update last_seen_at, no new row
-      stmts.push(
-        env.VESSELS_DB.prepare(
-          `UPDATE vessel_sightings SET last_seen_at = ?1 WHERE id = ?2`
-        ).bind(nowMs, existingId)
-      );
-    } else {
-      // New arrival — open a sighting
-      stmts.push(
-        env.VESSELS_DB.prepare(
-          `INSERT INTO vessel_sightings (mmsi, entered_at, last_seen_at) VALUES (?1, ?2, ?2)`
-        ).bind(vessel.mmsi, nowMs)
-      );
-    }
-  }
-
-  // Close sightings for vessels no longer in the snapshot
-  for (const [mmsi, id] of activeById) {
-    if (!currentMmsis.has(mmsi)) {
-      stmts.push(
-        env.VESSELS_DB.prepare(
-          `UPDATE vessel_sightings SET exited_at = ?1 WHERE id = ?2`
-        ).bind(nowMs, id)
-      );
-    }
-  }
-
-  if (stmts.length > 0) await env.VESSELS_DB.batch(stmts);
+  const stmts = vessels.map(v =>
+    env.VESSELS_DB.prepare(
+      `INSERT INTO vessel_sightings (mmsi, entered_at) VALUES (?1, ?2)`
+    ).bind(v.mmsi, nowMs)
+  );
+  await env.VESSELS_DB.batch(stmts);
 }
 
-// Update the last-known enrichment position for vessels heard by the weekly cron.
 export async function updateEnrichmentPositions(env: Env, vessels: Vessel[]): Promise<void> {
   if (vessels.length === 0) return;
   const stmts = vessels.map(v =>

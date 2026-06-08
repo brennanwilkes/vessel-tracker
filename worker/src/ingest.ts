@@ -1,33 +1,41 @@
 import type { Env } from './types';
 import { LOCAL_BOUNDING_BOX, GLOBAL_BOUNDING_BOX, DRAIN_WINDOW_MS, ENRICHMENT_DRAIN_MS } from './constants';
 import { drainAisStream } from './aisstream';
-import { mergeSnapshot, upsertVessels, updateSightings, updateEnrichmentPositions, getAllKnownMmsis } from './storage';
+import { readSnapshot, mergeSnapshot, upsertVessels, insertSightings, updateEnrichmentPositions, getAllKnownMmsis } from './storage';
 
 export async function runLiveIngest(env: Env): Promise<void> {
   console.log('[ingest] live ingest starting');
   const start = Date.now();
 
-  const vessels = await drainAisStream({
-    apiKey: env.AISSTREAM_API_KEY,
-    boundingBox: LOCAL_BOUNDING_BOX,
-    drainMs: DRAIN_WINDOW_MS,
-  });
+  // Read current KV snapshot in parallel with the AIS drain.
+  // The existing snapshot tells us which MMSIs are already known — no D1 write needed for those.
+  const [existing, vessels] = await Promise.all([
+    readSnapshot(env),
+    drainAisStream({ apiKey: env.AISSTREAM_API_KEY, boundingBox: LOCAL_BOUNDING_BOX, drainMs: DRAIN_WINDOW_MS }),
+  ]);
   const tDrain = Date.now() - start;
 
   if (vessels.length === 0) {
     console.warn('[ingest] live drain returned 0 vessels — check API key and bounding box');
   }
 
-  // KV snapshot and D1 upsert run in parallel; sightings wait for upsert so the
-  // FK on vessel_sightings(mmsi) → vessels(mmsi) is always satisfied.
+  const existingMmsis = new Set(existing.map(v => v.mmsi));
+  const newArrivals = vessels.filter(v => !existingMmsis.has(v.mmsi));
+
   const tWrite = Date.now();
-  await Promise.all([
-    mergeSnapshot(env, vessels),
-    upsertVessels(env, vessels).then(() => updateSightings(env, vessels)),
-  ]);
+
+  // KV merge always runs to keep positions fresh.
+  // D1 only written when vessels appear that weren't already in the snapshot.
+  await mergeSnapshot(env, existing, vessels);
+
+  if (newArrivals.length > 0) {
+    console.log(`[ingest] ${newArrivals.length} new arrivals — writing to D1`);
+    await upsertVessels(env, newArrivals);
+    await insertSightings(env, newArrivals);
+  }
 
   console.log(
-    `[ingest] live ingest done — ${vessels.length} vessels | drain ${tDrain}ms | write ${Date.now() - tWrite}ms | total ${Date.now() - start}ms`
+    `[ingest] done — ${vessels.length} vessels (${newArrivals.length} new) | drain ${tDrain}ms | write ${Date.now() - tWrite}ms | total ${Date.now() - start}ms`
   );
 }
 

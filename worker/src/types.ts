@@ -41,6 +41,4 @@ export interface SightingRow {
   id: number;
   mmsi: number;
   entered_at: number;
-  last_seen_at: number;
-  exited_at: number | null;
 }
