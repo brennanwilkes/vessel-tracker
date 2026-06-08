@@ -31,9 +31,9 @@ export const TRAIL_TTL_MS = 120_000;
 export const EXTENTS = ['direct', 'local', 'global'];
 
 export const TIER_STYLE = {
-  direct: { opacity: 0.30, weight: 1 },
-  local:  { opacity: 0.15, weight: 1 },
-  global: { opacity: 0.10, weight: 0.75 },
+  direct: { opacity: 0.25, weight: 1 },
+  local:  { opacity: 0.25, weight: 1 },
+  global: { opacity: 0.25, weight: 1 },
 };
 
 export const DEFAULT_EXTENT_FILTERS = { direct: true, local: true, global: true };

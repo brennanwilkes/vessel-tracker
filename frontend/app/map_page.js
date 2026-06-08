@@ -346,7 +346,7 @@ export function mount(root) {
 
   L.rectangle(
     [DIRECT_BOUNDING_BOX.sw, DIRECT_BOUNDING_BOX.ne],
-    { color: '#17c3d4', weight: 1, opacity: 0.35, fill: true, fillOpacity: 0.04, interactive: false, dashArray: '6 4' }
+    { color: '#17c3d4', weight: 1, opacity: 0.35, fill: false, interactive: false, dashArray: '6 4' }
   ).addTo(map);
 
   const homeIcon = L.divIcon({

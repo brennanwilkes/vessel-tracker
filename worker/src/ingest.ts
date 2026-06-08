@@ -3,6 +3,7 @@ import {
   DIRECT_BOUNDING_BOX, LOCAL_BOUNDING_BOX, GLOBAL_BOUNDING_BOX,
   MOVE_THRESHOLD_NM, HEARTBEAT_MS,
   DIRECT_DRAIN_MS, LOCAL_DRAIN_MS, GLOBAL_DRAIN_MS,
+  PHANTOM_SPEED_THRESHOLD_NM,
 } from './constants';
 import { drainAisStream } from './aisstream';
 import { pointInBox, isLargeVessel } from './ais';
@@ -21,10 +22,20 @@ function haversineNm(lat1: number, lon1: number, lat2: number, lon2: number): nu
   return 2 * R_NM * Math.asin(Math.sqrt(a));
 }
 
-function hasMoved(v: Vessel, prev: VesselState | undefined, tier: Tier): boolean {
-  if (prev === undefined || prev.last_lat === null || prev.last_lon === null) return true;
-  if (tier === 'direct' && v.speed !== null && v.speed > 0) return true;
-  return haversineNm(prev.last_lat, prev.last_lon, v.lat, v.lon) >= MOVE_THRESHOLD_NM[tier];
+function assessMovement(v: Vessel, prev: VesselState | undefined, tier: Tier): { moved: boolean; effectiveSpeed: number | null } {
+  if (prev === undefined || prev.last_lat === null || prev.last_lon === null) {
+    return { moved: true, effectiveSpeed: v.speed };
+  }
+  const dist = haversineNm(prev.last_lat, prev.last_lon, v.lat, v.lon);
+  if (tier === 'direct' && v.speed !== null && v.speed > 0) {
+    // Some AIS transponders keep broadcasting their last-known speed after anchoring.
+    // If the position hasn't changed beyond GPS noise level, the reported speed is phantom.
+    if (dist < PHANTOM_SPEED_THRESHOLD_NM) {
+      return { moved: false, effectiveSpeed: 0 };
+    }
+    return { moved: true, effectiveSpeed: v.speed };
+  }
+  return { moved: dist >= MOVE_THRESHOLD_NM[tier], effectiveSpeed: v.speed };
 }
 
 function tierOf(lat: number, lon: number): Tier {
@@ -57,7 +68,7 @@ export async function runDirectScan(env: Env): Promise<void> {
 
   for (const v of vessels) {
     const prev = existing.get(v.mmsi);
-    const moved = hasMoved(v, prev, 'direct');
+    const { moved, effectiveSpeed } = assessMovement(v, prev, 'direct');
     const heartbeat = !moved && (prev === undefined || nowMs - prev.last_seen >= HEARTBEAT_MS);
 
     if (!moved && !heartbeat) { nSkipped++; continue; }
@@ -72,7 +83,7 @@ export async function runDirectScan(env: Env): Promise<void> {
       destination: v.destination,
       lat: v.lat,
       lon: v.lon,
-      speed: v.speed,
+      speed: effectiveSpeed,
       heading: v.heading,
       ts: nowMs,
       of_interest: 1,
@@ -84,7 +95,7 @@ export async function runDirectScan(env: Env): Promise<void> {
 
     if (moved) {
       nMoved++;
-      positions.push({ mmsi: v.mmsi, lat: v.lat, lon: v.lon, speed: v.speed, heading: v.heading, ts: nowMs, tier: 'direct' });
+      positions.push({ mmsi: v.mmsi, lat: v.lat, lon: v.lon, speed: effectiveSpeed, heading: v.heading, ts: nowMs, tier: 'direct' });
     } else {
       nHeartbeat++;
     }
@@ -134,7 +145,7 @@ export async function runLocalScan(env: Env): Promise<void> {
     const max_extent = inDirect ? prevExtent : widenExtent(prevExtent, 'local');
 
     const tier: Tier = inDirect ? 'direct' : 'local';
-    const moved = hasMoved(v, prev, tier);
+    const { moved, effectiveSpeed } = assessMovement(v, prev, tier);
     const heartbeat = !moved && (prev === undefined || nowMs - prev.last_seen >= HEARTBEAT_MS);
 
     if (!moved && !heartbeat) { nSkipped++; continue; }
@@ -147,7 +158,7 @@ export async function runLocalScan(env: Env): Promise<void> {
       destination: v.destination,
       lat: v.lat,
       lon: v.lon,
-      speed: v.speed,
+      speed: effectiveSpeed,
       heading: v.heading,
       ts: nowMs,
       of_interest,
@@ -159,7 +170,7 @@ export async function runLocalScan(env: Env): Promise<void> {
 
     if (moved) {
       nMoved++;
-      positions.push({ mmsi: v.mmsi, lat: v.lat, lon: v.lon, speed: v.speed, heading: v.heading, ts: nowMs, tier });
+      positions.push({ mmsi: v.mmsi, lat: v.lat, lon: v.lon, speed: effectiveSpeed, heading: v.heading, ts: nowMs, tier });
     } else {
       nHeartbeat++;
     }
@@ -218,7 +229,7 @@ export async function runGlobalScan(env: Env): Promise<void> {
     const of_interest = prev !== undefined ? prev.of_interest : (inDirect ? 1 : 0);
     const firstDirect = inDirect && (prev === undefined || prev.of_interest === 0) ? nowMs : null;
 
-    const moved = hasMoved(v, prev, tier);
+    const { moved, effectiveSpeed } = assessMovement(v, prev, tier);
     const heartbeat = !moved && (prev === undefined || nowMs - prev.last_seen >= HEARTBEAT_MS);
 
     if (!moved && !heartbeat) { nSkipped++; continue; }
@@ -231,7 +242,7 @@ export async function runGlobalScan(env: Env): Promise<void> {
       destination: v.destination,
       lat: v.lat,
       lon: v.lon,
-      speed: v.speed,
+      speed: effectiveSpeed,
       heading: v.heading,
       ts: nowMs,
       of_interest,
@@ -243,7 +254,7 @@ export async function runGlobalScan(env: Env): Promise<void> {
 
     if (moved) {
       nMoved++;
-      positions.push({ mmsi: v.mmsi, lat: v.lat, lon: v.lon, speed: v.speed, heading: v.heading, ts: nowMs, tier });
+      positions.push({ mmsi: v.mmsi, lat: v.lat, lon: v.lon, speed: effectiveSpeed, heading: v.heading, ts: nowMs, tier });
     } else {
       nHeartbeat++;
     }

@@ -28,6 +28,11 @@ export const MOVE_THRESHOLD_NM: Record<string, number> = {
   global: 5.0,
 };
 
+// If a direct-tier vessel reports nonzero speed but its position hasn't changed by more
+// than this, we call BS on the speed and treat it as stationary. ~9m — within AIS GPS
+// noise for a moored vessel, well below the slowest plausible movement in one scan cycle.
+export const PHANTOM_SPEED_THRESHOLD_NM = 0.005;
+
 // How long a stationary vessel can go without a heartbeat last_seen update (ms)
 export const HEARTBEAT_MS = 10 * 60 * 1000;
 
