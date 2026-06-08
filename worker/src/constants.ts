@@ -21,10 +21,11 @@ export const GLOBAL_BOUNDING_BOX: [[number, number], [number, number]] = [
 ];
 
 // Max age before a vessel is dropped from the /vessels response
-export const STALE_THRESHOLD_MS = 5 * 60 * 1000;
+export const STALE_THRESHOLD_MS = 90 * 60 * 1000;
 
 // How long to drain the AIS WebSocket per live cron run (ms)
-export const DRAIN_WINDOW_MS = 40_000;
+// CF cron wall-clock limit is 15 min — 3 min drain leaves plenty of headroom.
+export const DRAIN_WINDOW_MS = 3 * 60 * 1000;
 
 // How long to drain the wide-area daily enrichment feed
 export const ENRICHMENT_DRAIN_MS = 30_000;
