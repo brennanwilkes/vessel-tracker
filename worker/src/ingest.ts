@@ -34,7 +34,8 @@ function assessMovement(v: Vessel, prev: VesselState | undefined, tier: Tier): {
     // forceUpsert ensures last_speed is corrected in the DB immediately, without waiting
     // for the 10-min heartbeat window.
     if (dist < PHANTOM_SPEED_THRESHOLD_NM) {
-      return { moved: false, effectiveSpeed: 0, forceUpsert: true };
+      const alreadyCorrected = prev.last_speed === 0;
+      return { moved: false, effectiveSpeed: 0, forceUpsert: !alreadyCorrected };
     }
     return { moved: true, effectiveSpeed: v.speed, forceUpsert: false };
   }
