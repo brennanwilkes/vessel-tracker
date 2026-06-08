@@ -98,6 +98,7 @@ export async function runDirectScan(env: Env): Promise<void> {
       first_direct_at: firstDirect,
       moved,
       heartbeat,
+      forceUpsert,
     });
 
     if (moved) {
@@ -173,6 +174,7 @@ export async function runLocalScan(env: Env): Promise<void> {
       first_direct_at: firstDirect,
       moved,
       heartbeat,
+      forceUpsert,
     });
 
     if (moved) {
@@ -257,6 +259,7 @@ export async function runGlobalScan(env: Env): Promise<void> {
       first_direct_at: firstDirect,
       moved,
       heartbeat,
+      forceUpsert,
     });
 
     if (moved) {

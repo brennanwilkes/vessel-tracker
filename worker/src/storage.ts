@@ -33,6 +33,7 @@ export interface VesselUpsert {
   first_direct_at: number | null;
   moved: boolean;
   heartbeat: boolean;
+  forceUpsert: boolean;
 }
 
 export interface PositionInsert {
@@ -121,6 +122,12 @@ export async function commitScan(env: Env, vessels: VesselUpsert[], positions: P
           v.mmsi, v.name, v.vessel_type, v.length, v.destination,
           v.ts, v.of_interest, v.max_extent, v.first_direct_at
         )
+      );
+    } else if (v.forceUpsert) {
+      stmts.push(
+        env.VESSELS_DB.prepare(
+          `UPDATE vessels SET last_speed = ?2, last_seen = ?3, times_seen = times_seen + 1 WHERE mmsi = ?1`
+        ).bind(v.mmsi, v.speed, v.ts)
       );
     }
   }
