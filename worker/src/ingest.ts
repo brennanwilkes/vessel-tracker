@@ -3,7 +3,7 @@ import {
   DIRECT_BOUNDING_BOX, LOCAL_BOUNDING_BOX, GLOBAL_BOUNDING_BOX,
   MOVE_THRESHOLD_NM, HEARTBEAT_MS,
   DIRECT_DRAIN_MS, LOCAL_DRAIN_MS, GLOBAL_DRAIN_MS,
-  PHANTOM_SPEED_MIN_KN, PHANTOM_SPEED_THRESHOLD_NM,
+  PHANTOM_SPEED_MIN_KN, PHANTOM_STALL_MS,
 } from './constants';
 import { drainAisStream } from './aisstream';
 import { pointInBox, isLargeVessel } from './ais';
@@ -22,18 +22,16 @@ function haversineNm(lat1: number, lon1: number, lat2: number, lon2: number): nu
   return 2 * R_NM * Math.asin(Math.sqrt(a));
 }
 
-function assessMovement(v: Vessel, prev: VesselState | undefined, tier: Tier): { moved: boolean; effectiveSpeed: number | null; forceUpsert: boolean } {
+function assessMovement(v: Vessel, prev: VesselState | undefined, tier: Tier, nowMs: number): { moved: boolean; effectiveSpeed: number | null; forceUpsert: boolean } {
   if (prev === undefined || prev.last_lat === null || prev.last_lon === null) {
     return { moved: true, effectiveSpeed: v.speed, forceUpsert: false };
   }
   const dist = haversineNm(prev.last_lat, prev.last_lon, v.lat, v.lon);
   if (tier === 'direct' && v.speed !== null && v.speed >= PHANTOM_SPEED_MIN_KN) {
-    // Some AIS transponders keep broadcasting their last-known speed after docking/anchoring.
-    // Only override when the reported speed is high enough that we'd expect real movement,
-    // yet the position barely changed (dist < ~37m, which covers AIS GPS dock jitter).
-    // forceUpsert ensures last_speed is corrected in the DB immediately, without waiting
-    // for the 10-min heartbeat window.
-    if (dist < PHANTOM_SPEED_THRESHOLD_NM) {
+    // A genuinely moving vessel at PHANTOM_SPEED_MIN_KN crosses MOVE_THRESHOLD_NM every
+    // ~2 min, so no position row in PHANTOM_STALL_MS means the speed is stale/phantom.
+    const posAge = prev.last_pos_ts !== null ? nowMs - prev.last_pos_ts : null;
+    if (posAge !== null && posAge > PHANTOM_STALL_MS) {
       const alreadyCorrected = prev.last_speed === 0;
       return { moved: false, effectiveSpeed: 0, forceUpsert: !alreadyCorrected };
     }
@@ -75,7 +73,7 @@ export async function runDirectScan(env: Env): Promise<void> {
 
   for (const v of vessels) {
     const prev = existing.get(v.mmsi);
-    const { moved, effectiveSpeed, forceUpsert } = assessMovement(v, prev, 'direct');
+    const { moved, effectiveSpeed, forceUpsert } = assessMovement(v, prev, 'direct', nowMs);
     const heartbeat = !moved && !forceUpsert && (prev === undefined || nowMs - prev.last_seen >= HEARTBEAT_MS);
 
     if (!moved && !heartbeat && !forceUpsert) { nSkipped++; continue; }
@@ -153,7 +151,7 @@ export async function runLocalScan(env: Env): Promise<void> {
     const max_extent = inDirect ? prevExtent : widenExtent(prevExtent, 'local');
 
     const tier: Tier = inDirect ? 'direct' : 'local';
-    const { moved, effectiveSpeed, forceUpsert } = assessMovement(v, prev, tier);
+    const { moved, effectiveSpeed, forceUpsert } = assessMovement(v, prev, tier, nowMs);
     const heartbeat = !moved && !forceUpsert && (prev === undefined || nowMs - prev.last_seen >= HEARTBEAT_MS);
 
     if (!moved && !heartbeat && !forceUpsert) { nSkipped++; continue; }
@@ -238,7 +236,7 @@ export async function runGlobalScan(env: Env): Promise<void> {
     const of_interest = prev !== undefined ? prev.of_interest : (inDirect ? 1 : 0);
     const firstDirect = inDirect && (prev === undefined || prev.of_interest === 0) ? nowMs : null;
 
-    const { moved, effectiveSpeed, forceUpsert } = assessMovement(v, prev, tier);
+    const { moved, effectiveSpeed, forceUpsert } = assessMovement(v, prev, tier, nowMs);
     const heartbeat = !moved && !forceUpsert && (prev === undefined || nowMs - prev.last_seen >= HEARTBEAT_MS);
 
     if (!moved && !heartbeat && !forceUpsert) { nSkipped++; continue; }
