@@ -39,6 +39,14 @@ export interface VesselRow {
   times_seen: number;
 }
 
+export interface StaticUpdate {
+  mmsi: number;
+  name: string | null;
+  vesselType: number | null;
+  length: number | null;
+  destination: string | null;
+}
+
 export interface PositionRow {
   id: number;
   mmsi: number;

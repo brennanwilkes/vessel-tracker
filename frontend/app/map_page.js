@@ -120,29 +120,23 @@ function closeSheet() {
 
 // ── Trail drawing ─────────────────────────────────────────────────────────────
 
-// Catmull-Rom spline: densify [lat,lon] array to a smooth curve through all points.
-// Phantom endpoints mirror the first/last segment so the curve has zero curvature at
-// both ends — prevents the spline from looping back toward the endpoints.
-function catmullRomPoints(pts, samples = 8) {
-  if (pts.length < 2) return pts;
-  const result = [];
-  for (let i = 0; i < pts.length - 1; i++) {
-    const p0 = i > 0 ? pts[i - 1] : [2 * pts[0][0] - pts[1][0], 2 * pts[0][1] - pts[1][1]];
-    const p1 = pts[i];
-    const p2 = pts[i + 1];
-    const p3 = i < pts.length - 2 ? pts[i + 2] : [2 * pts[pts.length - 1][0] - pts[pts.length - 2][0], 2 * pts[pts.length - 1][1] - pts[pts.length - 2][1]];
-    for (let j = 0; j < samples; j++) {
-      const t = j / samples;
-      const t2 = t * t;
-      const t3 = t2 * t;
-      result.push([
-        0.5 * ((2 * p1[0]) + (-p0[0] + p2[0]) * t + (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * t2 + (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * t3),
-        0.5 * ((2 * p1[1]) + (-p0[1] + p2[1]) * t + (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2 + (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3),
-      ]);
+// Chaikin's algorithm: each iteration cuts every segment corner at the 1/4 and 3/4
+// positions. Stays strictly within the convex hull of the input — cannot overshoot
+// or loop. First and last points are preserved so the trail endpoints are exact.
+function chaikinSmooth(pts, iterations = 3) {
+  if (pts.length < 3) return pts;
+  let cur = pts;
+  for (let iter = 0; iter < iterations; iter++) {
+    const next = [cur[0]];
+    for (let i = 0; i < cur.length - 1; i++) {
+      const a = cur[i], b = cur[i + 1];
+      next.push([0.75 * a[0] + 0.25 * b[0], 0.75 * a[1] + 0.25 * b[1]]);
+      next.push([0.25 * a[0] + 0.75 * b[0], 0.25 * a[1] + 0.75 * b[1]]);
     }
+    next.push(cur[cur.length - 1]);
+    cur = next;
   }
-  result.push(pts[pts.length - 1]);
-  return result;
+  return cur;
 }
 
 function segmentsByTier(points) {
@@ -193,7 +187,7 @@ function drawTrail(vessel, points, token) {
 
   for (const seg of segments) {
     const style = TIER_STYLE[seg.tier];
-    const layer = L.polyline(catmullRomPoints(seg.pts), {
+    const layer = L.polyline(chaikinSmooth(seg.pts), {
       color,
       weight: style.weight,
       opacity: 0,
