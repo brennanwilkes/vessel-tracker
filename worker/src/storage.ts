@@ -109,22 +109,27 @@ export async function commitScan(env: Env, vessels: VesselUpsert[], positions: P
     } else if (v.heartbeat) {
       stmts.push(
         env.VESSELS_DB.prepare(
-          `INSERT INTO vessels (mmsi,name,vessel_type,length,destination,last_seen,first_seen,of_interest,max_extent,direct_entry_count,times_seen)
-           VALUES (?1,?2,?3,?4,?5,?6,?6,?7,?8,?10,1)
+          `INSERT INTO vessels (mmsi,name,vessel_type,length,destination,last_lat,last_lon,last_speed,last_heading,last_seen,first_seen,of_interest,max_extent,direct_entry_count,times_seen)
+           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?10,?11,?12,?13,1)
            ON CONFLICT(mmsi) DO UPDATE SET
              name               = COALESCE(?2, name),
              vessel_type        = COALESCE(?3, vessel_type),
              length             = COALESCE(?4, length),
              destination        = COALESCE(?5, destination),
-             last_seen          = ?6,
-             of_interest        = MAX(of_interest, ?7),
-             max_extent         = ?8,
-             first_direct_at    = COALESCE(first_direct_at, ?9),
-             direct_entry_count = MAX(direct_entry_count, ?10),
+             last_lat           = ?6,
+             last_lon           = ?7,
+             last_speed         = ?8,
+             last_heading       = ?9,
+             last_seen          = ?10,
+             of_interest        = MAX(of_interest, ?11),
+             max_extent         = ?12,
+             first_direct_at    = COALESCE(first_direct_at, ?13),
+             direct_entry_count = MAX(direct_entry_count, ?14),
              times_seen         = times_seen + 1`
         ).bind(
           v.mmsi, v.name, v.vessel_type, v.length, v.destination,
-          v.ts, v.of_interest, v.max_extent, v.first_direct_at, v.direct_entry_count
+          v.lat, v.lon, v.speed, v.heading, v.ts,
+          v.of_interest, v.max_extent, v.first_direct_at, v.direct_entry_count
         )
       );
     } else if (v.forceUpsert) {
