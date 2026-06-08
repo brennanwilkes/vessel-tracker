@@ -1,4 +1,4 @@
-import { EXTENTS } from '../config.js';
+import { EXTENTS, TIERS } from '../config.js';
 import { subscribe, getSettings, setExtentFilter, setTrailFilter } from './settings_store.js';
 
 const EXTENT_LABELS = {
@@ -40,7 +40,7 @@ function buildHTML() {
     </button>`;
   }).join('');
 
-  const trailRows = EXTENTS.map(tier => {
+  const trailRows = TIERS.map(tier => {
     const on = settings.trail[tier];
     return `<button class="settings-toggle${on ? ' on' : ''}" data-section="trail" data-tier="${tier}" role="switch" aria-checked="${on}">
       <span class="toggle-label">${TRAIL_LABELS[tier]}</span>

@@ -1,4 +1,4 @@
-import { VIEWSHEDS, DIRECT_BOUNDING_BOX, MOVING_SPEED_KN, EXTENTS, TIER_STYLE } from '../config.js';
+import { VIEWSHEDS, DIRECT_BOUNDING_BOX, MOVING_SPEED_KN, TIERS, TIER_STYLE } from '../config.js';
 import { subscribe as subscribeVessels } from './store.js';
 import { subscribe as subscribeSettings, getSettings, passesExtentFilter } from './settings_store.js';
 import { haversineNm } from './geo.js';
@@ -269,7 +269,7 @@ async function scheduleTrails(visibleVessels, token) {
     if (!liveSet.has(mmsi)) removeTrailLayers(mmsi);
   }
 
-  const wantedTiers = EXTENTS.filter(t => lastSettings.trail[t]);
+  const wantedTiers = TIERS.filter(t => lastSettings.trail[t]);
 
   for (const vessel of visibleVessels) {
     if (token !== trailReqToken) break;

@@ -29,6 +29,7 @@ export const MOVING_SPEED_KN = 0.5;
 export const TRAIL_TTL_MS = 120_000;
 
 export const EXTENTS = ['local_boat', 'passing_through', 'distant_visitor'];
+export const TIERS   = ['direct', 'local', 'global'];
 
 export const TIER_STYLE = {
   direct: { opacity: 0.25, weight: 1 },

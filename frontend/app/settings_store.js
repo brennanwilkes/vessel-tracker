@@ -1,16 +1,16 @@
-import { EXTENTS, DEFAULT_EXTENT_FILTERS, DEFAULT_TRAIL_FILTERS } from '../config.js';
+import { EXTENTS, TIERS, DEFAULT_EXTENT_FILTERS, DEFAULT_TRAIL_FILTERS } from '../config.js';
 
 const EXTENT_KEY = 'vessel-tracker:extent-filters';
 const TRAIL_KEY  = 'vessel-tracker:trail-filters';
 
-function loadFilters(key, defaults) {
+function loadFilters(key, defaults, keys) {
   try {
     const raw = localStorage.getItem(key);
     if (raw === null) return { ...defaults };
     const parsed = JSON.parse(raw);
     const result = { ...defaults };
-    for (const tier of EXTENTS) {
-      if (typeof parsed[tier] === 'boolean') result[tier] = parsed[tier];
+    for (const k of keys) {
+      if (typeof parsed[k] === 'boolean') result[k] = parsed[k];
     }
     return result;
   } catch {
@@ -19,8 +19,8 @@ function loadFilters(key, defaults) {
 }
 
 let state = {
-  extent: loadFilters(EXTENT_KEY, DEFAULT_EXTENT_FILTERS),
-  trail:  loadFilters(TRAIL_KEY,  DEFAULT_TRAIL_FILTERS),
+  extent: loadFilters(EXTENT_KEY, DEFAULT_EXTENT_FILTERS, EXTENTS),
+  trail:  loadFilters(TRAIL_KEY,  DEFAULT_TRAIL_FILTERS,  TIERS),
 };
 
 const subscribers = new Set();
