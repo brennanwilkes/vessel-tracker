@@ -38,7 +38,7 @@ export default {
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
     console.log(`[scheduled] cron fired: ${event.cron}`);
 
-    if (event.cron === '*/5 * * * *') {
+    if (event.cron === '*/1 * * * *') {
       ctx.waitUntil(
         runLiveIngest(env).catch(err => console.error('[scheduled] live ingest failed:', err))
       );

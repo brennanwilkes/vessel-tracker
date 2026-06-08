@@ -49,7 +49,11 @@ export async function drainAisStream(opts: DrainOptions): Promise<Vessel[]> {
     ws.addEventListener('message', (event: MessageEvent) => {
       messageCount++;
       try {
-        const msg: AisMessage = JSON.parse(event.data as string);
+        // aisstream sends binary frames — decode ArrayBuffer to string before parsing
+        const text = event.data instanceof ArrayBuffer
+          ? new TextDecoder().decode(event.data)
+          : event.data as string;
+        const msg: AisMessage = JSON.parse(text);
         const update = msg.MessageType === 'PositionReport'
           ? parsePositionReport(msg, nowMs)
           : parseShipStaticData(msg);
@@ -57,7 +61,10 @@ export async function drainAisStream(opts: DrainOptions): Promise<Vessel[]> {
         if (update.mmsi === undefined) return;
         partials.set(update.mmsi, { ...partials.get(update.mmsi), ...update });
       } catch (err) {
-        console.warn('[aisstream] failed to parse message:', err, 'raw:', String(event.data).slice(0, 200));
+        const raw = event.data instanceof ArrayBuffer
+          ? new TextDecoder().decode(event.data).slice(0, 200)
+          : String(event.data).slice(0, 200);
+        console.warn('[aisstream] failed to parse message:', err, 'raw:', raw);
       }
     });
 
