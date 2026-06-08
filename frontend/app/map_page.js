@@ -1,6 +1,7 @@
 import { VIEWSHEDS, LOCAL_BOUNDING_BOX } from '../config.js';
 import { subscribe } from './store.js';
 import { haversineNm } from './geo.js';
+import { vesselColor, vesselCategoryLabel } from './vessels.js';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -8,17 +9,6 @@ const HOME = VIEWSHEDS[0].home;
 
 const TILE_URL = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
 const TILE_ATTR = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com">CARTO</a>';
-
-const TYPE_COLORS = {
-  cargo:     '#4a9eff',
-  tanker:    '#ff6b35',
-  passenger: '#00e5a0',
-  ferry:     '#00e5a0',
-  tug:       '#c084fc',
-  fishing:   '#ffd700',
-  pleasure:  '#ff8fab',
-  unknown:   '#3d5a73',
-};
 
 // ── State (module-level, reset on each mount) ────────────────────────────────
 
@@ -28,34 +18,8 @@ let unsubscribe = null;
 let container = null;
 let statusEl = null;
 
-// ── Vessel icon ──────────────────────────────────────────────────────────────
-
-function vesselColor(vesselType) {
-  if (vesselType === null) return TYPE_COLORS.unknown;
-  if (vesselType >= 70 && vesselType <= 79) return TYPE_COLORS.cargo;
-  if (vesselType >= 80 && vesselType <= 89) return TYPE_COLORS.tanker;
-  if (vesselType >= 60 && vesselType <= 69) return TYPE_COLORS.passenger;
-  if (vesselType >= 40 && vesselType <= 49) return TYPE_COLORS.ferry;
-  if (vesselType === 36 || vesselType === 37) return TYPE_COLORS.pleasure;
-  if (vesselType >= 31 && vesselType <= 32) return TYPE_COLORS.tug;
-  if (vesselType === 30) return TYPE_COLORS.fishing;
-  return TYPE_COLORS.unknown;
-}
-
-function vesselCategoryLabel(vesselType) {
-  if (vesselType === null) return 'Unknown';
-  if (vesselType >= 70 && vesselType <= 79) return 'Cargo';
-  if (vesselType >= 80 && vesselType <= 89) return 'Tanker';
-  if (vesselType >= 60 && vesselType <= 69) return 'Passenger';
-  if (vesselType >= 40 && vesselType <= 49) return 'Ferry';
-  if (vesselType === 36 || vesselType === 37) return 'Pleasure';
-  if (vesselType >= 31 && vesselType <= 32) return 'Tug';
-  if (vesselType === 30) return 'Fishing';
-  return 'Unknown';
-}
-
 function makeVesselIcon(vessel) {
-  const color = vesselColor(vessel.vesselType);
+  const color = vesselColor(vessel);
   const rotation = vessel.heading !== null ? vessel.heading : 0;
   return L.divIcon({
     html: `<div style="transform:rotate(${rotation}deg);width:20px;height:20px;">
@@ -83,7 +47,7 @@ function formatAge(updatedMs) {
 function openSheet(vessel) {
   const backdrop = container.querySelector('.detail-backdrop');
   const sheet = container.querySelector('.detail-sheet');
-  const color = vesselColor(vessel.vesselType);
+  const color = vesselColor(vessel);
   const distNm = haversineNm(HOME.lat, HOME.lon, vessel.lat, vessel.lon);
 
   sheet.innerHTML = `
@@ -91,7 +55,7 @@ function openSheet(vessel) {
     <div class="detail-vessel-name">${vessel.name ?? 'Unknown Vessel'}</div>
     <div class="detail-type-row">
       <div class="detail-type-dot" style="background:${color}"></div>
-      <div class="detail-vessel-type">${vesselCategoryLabel(vessel.vesselType)}${vessel.vesselType !== null ? ` · Type ${vessel.vesselType}` : ''}</div>
+      <div class="detail-vessel-type">${vesselCategoryLabel(vessel)}${vessel.vesselType !== null ? ` · Type ${vessel.vesselType}` : ''}</div>
     </div>
     <div class="detail-grid">
       <div class="detail-stat">
@@ -149,7 +113,7 @@ function updateMarkers(vessels, error) {
     if (existing !== undefined) {
       existing.setLatLng([vessel.lat, vessel.lon]);
       // Only recreate the SVG icon when the visual actually changes
-      if (existing._vessel.heading !== vessel.heading || existing._vessel.vesselType !== vessel.vesselType) {
+      if (existing._vessel.heading !== vessel.heading || existing._vessel.vesselType !== vessel.vesselType || existing._vessel.name !== vessel.name) {
         existing.setIcon(makeVesselIcon(vessel));
       }
       existing._vessel = vessel;

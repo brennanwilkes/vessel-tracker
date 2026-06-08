@@ -1,6 +1,7 @@
 import { VIEWSHEDS } from '../config.js';
 import { subscribe } from './store.js';
 import { haversineNm, haversineKm } from './geo.js';
+import { vesselColor, vesselCategoryLabel } from './vessels.js';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -15,32 +16,8 @@ let unitNm = localStorage.getItem(UNIT_KEY) !== 'km';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-function vesselCategoryLabel(vesselType) {
-  if (vesselType === null) return 'Unknown';
-  if (vesselType >= 70 && vesselType <= 79) return 'Cargo';
-  if (vesselType >= 80 && vesselType <= 89) return 'Tanker';
-  if (vesselType >= 60 && vesselType <= 69) return 'Passenger';
-  if (vesselType >= 40 && vesselType <= 49) return 'Ferry';
-  if (vesselType === 36 || vesselType === 37) return 'Pleasure';
-  if (vesselType >= 31 && vesselType <= 32) return 'Tug';
-  if (vesselType === 30) return 'Fishing';
-  return `Type ${vesselType}`;
-}
-
-function vesselColor(vesselType) {
-  if (vesselType === null) return '#3d5a73';
-  if (vesselType >= 70 && vesselType <= 79) return '#4a9eff';
-  if (vesselType >= 80 && vesselType <= 89) return '#ff6b35';
-  if (vesselType >= 60 && vesselType <= 69) return '#00e5a0';
-  if (vesselType >= 40 && vesselType <= 49) return '#00e5a0';
-  if (vesselType === 36 || vesselType === 37) return '#ff8fab';
-  if (vesselType >= 31 && vesselType <= 32) return '#c084fc';
-  if (vesselType === 30) return '#ffd700';
-  return '#3d5a73';
-}
-
-function vesselIconSvg(vesselType) {
-  const color = vesselColor(vesselType);
+function vesselIconSvg(vessel) {
+  const color = vesselColor(vessel);
   return `<svg viewBox="0 0 20 20" width="18" height="18">
     <polygon points="10,1 17,17 10,13 3,17" fill="${color}" stroke="rgba(0,0,0,0.4)" stroke-width="1.5" stroke-linejoin="round"/>
   </svg>`;
@@ -88,13 +65,13 @@ function renderVessels(vessels, error) {
 
   listEl.innerHTML = sorted.map((v, i) => {
     const dist = distanceLabel(v);
-    const category = vesselCategoryLabel(v.vesselType);
-    const color = vesselColor(v.vesselType);
+    const category = vesselCategoryLabel(v);
+    const color = vesselColor(v);
     const speed = v.speed !== null ? `${v.speed.toFixed(1)} kn` : '— kn';
     const name = v.name ?? 'Unknown Vessel';
 
     return `<div class="vessel-card" style="border-left-color:${color};animation-delay:${i * 30}ms" data-mmsi="${v.mmsi}">
-      <div class="vessel-card-icon">${vesselIconSvg(v.vesselType)}</div>
+      <div class="vessel-card-icon">${vesselIconSvg(v)}</div>
       <div class="vessel-card-body">
         <div class="vessel-card-name">${name}</div>
         <div class="vessel-card-meta">${category}${v.destination ? ' · ' + v.destination : ''}</div>
