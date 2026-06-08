@@ -196,6 +196,10 @@ export function mount(root) {
 
   L.tileLayer(TILE_URL, { attribution: TILE_ATTR, maxZoom: 18 }).addTo(map);
 
+  // Leaflet reads container dimensions synchronously on init — defer invalidation
+  // one frame so the browser has finished laying out the container.
+  requestAnimationFrame(() => map !== null && map.invalidateSize());
+
   L.rectangle(
     [LOCAL_BOUNDING_BOX.sw, LOCAL_BOUNDING_BOX.ne],
     { color: '#17c3d4', weight: 1, opacity: 0.35, fill: true, fillOpacity: 0.04, interactive: false, dashArray: '6 4' }
