@@ -31,9 +31,9 @@ function isMoving(vessel) {
   return vessel.speed !== null && vessel.speed > MOVING_SPEED_KN;
 }
 
-function makeArrowIcon(vessel) {
+function makeArrowIcon(vessel, heading) {
   const color = vesselColor(vessel);
-  const rotation = vessel.heading !== null ? vessel.heading : 0;
+  const rotation = heading ?? 0;
   return L.divIcon({
     html: `<div style="transform:rotate(${rotation}deg);width:20px;height:20px;">
       <svg viewBox="0 0 20 20" width="20" height="20" overflow="visible">
@@ -57,8 +57,8 @@ function makeDotIcon(vessel) {
   });
 }
 
-function makeVesselIcon(vessel) {
-  return isMoving(vessel) ? makeArrowIcon(vessel) : makeDotIcon(vessel);
+function makeVesselIcon(vessel, heading) {
+  return isMoving(vessel) ? makeArrowIcon(vessel, heading) : makeDotIcon(vessel);
 }
 
 // ── Detail sheet ─────────────────────────────────────────────────────────────
@@ -308,18 +308,27 @@ function render() {
     if (existing !== undefined) {
       existing.setLatLng([vessel.lat, vessel.lon]);
       const prev = existing._vessel;
+      const posChanged = prev.lat !== vessel.lat || prev.lon !== vessel.lon;
+      const effectiveHeading = vessel.heading ?? (
+        isMoving(vessel) && posChanged
+          ? bearingDeg(prev.lat, prev.lon, vessel.lat, vessel.lon)
+          : existing._effectiveHeading ?? null
+      );
       if (
         prev.heading !== vessel.heading ||
         prev.vessel_type !== vessel.vessel_type ||
         prev.name !== vessel.name ||
-        isMoving(prev) !== isMoving(vessel)
+        isMoving(prev) !== isMoving(vessel) ||
+        (vessel.heading === null && isMoving(vessel) && posChanged)
       ) {
-        existing.setIcon(makeVesselIcon(vessel));
+        existing.setIcon(makeVesselIcon(vessel, effectiveHeading));
       }
       existing._vessel = vessel;
+      existing._effectiveHeading = effectiveHeading;
     } else {
-      const marker = L.marker([vessel.lat, vessel.lon], { icon: makeVesselIcon(vessel) });
+      const marker = L.marker([vessel.lat, vessel.lon], { icon: makeVesselIcon(vessel, vessel.heading) });
       marker._vessel = vessel;
+      marker._effectiveHeading = vessel.heading;
       marker.on('click', () => openSheet(marker._vessel));
       marker.addTo(map);
       markers.set(vessel.mmsi, marker);
