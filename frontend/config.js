@@ -13,7 +13,7 @@ export const VIEWSHEDS = [
 ];
 
 // Direct view: vessels visible from the apartment window (matches worker DIRECT_BOUNDING_BOX)
-export const DIRECT_BOUNDING_BOX = { sw: [48.0, -123.9], ne: [48.54, -123.10] };
+export const DIRECT_BOUNDING_BOX = { sw: [48.054, -123.70], ne: [48.54, -123.02] };
 
 // Local area: all of Vancouver Island + waterways (matches worker LOCAL_BOUNDING_BOX)
 export const LOCAL_BOUNDING_BOX = { sw: [47.8, -128.7], ne: [51.2, -122.5] };
