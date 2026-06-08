@@ -65,7 +65,7 @@
   width: 40px;
   height: 40px;
   border-radius: 50%;
-  background: rgba(23, 195, 212, 0.08);
+  background: rgba(0, 229, 160, 0.08);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -76,8 +76,8 @@
   width: 10px;
   height: 10px;
   border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 10px var(--accent);
+  background: var(--green);
+  box-shadow: 0 0 10px var(--green);
 }
 
 @keyframes home-pulse {

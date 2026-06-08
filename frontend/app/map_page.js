@@ -120,6 +120,29 @@ function closeSheet() {
 
 // ── Trail drawing ─────────────────────────────────────────────────────────────
 
+// Catmull-Rom spline: densify [lat,lon] array to a smooth curve through all points.
+function catmullRomPoints(pts, samples = 8) {
+  if (pts.length < 2) return pts;
+  const result = [];
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[Math.max(0, i - 1)];
+    const p1 = pts[i];
+    const p2 = pts[i + 1];
+    const p3 = pts[Math.min(pts.length - 1, i + 2)];
+    for (let j = 0; j < samples; j++) {
+      const t = j / samples;
+      const t2 = t * t;
+      const t3 = t2 * t;
+      result.push([
+        0.5 * ((2 * p1[0]) + (-p0[0] + p2[0]) * t + (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * t2 + (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * t3),
+        0.5 * ((2 * p1[1]) + (-p0[1] + p2[1]) * t + (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2 + (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3),
+      ]);
+    }
+  }
+  result.push(pts[pts.length - 1]);
+  return result;
+}
+
 function segmentsByTier(points) {
   const segments = [];
   if (points.length === 0) return segments;
@@ -156,13 +179,19 @@ function drawTrail(vessel, points, token) {
   removeTrailLayers(mmsi);
   if (points.length === 0) return;
 
+  // Extend to the vessel's current position so the trail is always live.
+  const last = points[points.length - 1];
+  const allPoints = (last.lat === vessel.lat && last.lon === vessel.lon)
+    ? points
+    : [...points, { ...last, lat: vessel.lat, lon: vessel.lon }];
+
   const color = vesselColor(vessel);
-  const segments = segmentsByTier(points);
+  const segments = segmentsByTier(allPoints);
   const layers = [];
 
   for (const seg of segments) {
     const style = TIER_STYLE[seg.tier];
-    const layer = L.polyline(seg.pts, {
+    const layer = L.polyline(catmullRomPoints(seg.pts), {
       color,
       weight: style.weight,
       opacity: 0,

@@ -23,6 +23,7 @@ function haversineNm(lat1: number, lon1: number, lat2: number, lon2: number): nu
 
 function hasMoved(v: Vessel, prev: VesselState | undefined, tier: Tier): boolean {
   if (prev === undefined || prev.last_lat === null || prev.last_lon === null) return true;
+  if (tier === 'direct' && v.speed !== null && v.speed > 0) return true;
   return haversineNm(prev.last_lat, prev.last_lon, v.lat, v.lon) >= MOVE_THRESHOLD_NM[tier];
 }
 
