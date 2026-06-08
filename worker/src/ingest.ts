@@ -22,24 +22,26 @@ function haversineNm(lat1: number, lon1: number, lat2: number, lon2: number): nu
   return 2 * R_NM * Math.asin(Math.sqrt(a));
 }
 
-function assessMovement(v: Vessel, prev: VesselState | undefined, tier: Tier): { moved: boolean; effectiveSpeed: number | null } {
+function assessMovement(v: Vessel, prev: VesselState | undefined, tier: Tier): { moved: boolean; effectiveSpeed: number | null; forceUpsert: boolean } {
   if (prev === undefined || prev.last_lat === null || prev.last_lon === null) {
-    return { moved: true, effectiveSpeed: v.speed };
+    return { moved: true, effectiveSpeed: v.speed, forceUpsert: false };
   }
   const dist = haversineNm(prev.last_lat, prev.last_lon, v.lat, v.lon);
   if (tier === 'direct' && v.speed !== null && v.speed >= PHANTOM_SPEED_MIN_KN) {
     // Some AIS transponders keep broadcasting their last-known speed after docking/anchoring.
     // Only override when the reported speed is high enough that we'd expect real movement,
     // yet the position barely changed (dist < ~37m, which covers AIS GPS dock jitter).
+    // forceUpsert ensures last_speed is corrected in the DB immediately, without waiting
+    // for the 10-min heartbeat window.
     if (dist < PHANTOM_SPEED_THRESHOLD_NM) {
-      return { moved: false, effectiveSpeed: 0 };
+      return { moved: false, effectiveSpeed: 0, forceUpsert: true };
     }
-    return { moved: true, effectiveSpeed: v.speed };
+    return { moved: true, effectiveSpeed: v.speed, forceUpsert: false };
   }
   if (tier === 'direct' && v.speed !== null && v.speed > 0) {
-    return { moved: true, effectiveSpeed: v.speed };
+    return { moved: true, effectiveSpeed: v.speed, forceUpsert: false };
   }
-  return { moved: dist >= MOVE_THRESHOLD_NM[tier], effectiveSpeed: v.speed };
+  return { moved: dist >= MOVE_THRESHOLD_NM[tier], effectiveSpeed: v.speed, forceUpsert: false };
 }
 
 function tierOf(lat: number, lon: number): Tier {
@@ -72,10 +74,10 @@ export async function runDirectScan(env: Env): Promise<void> {
 
   for (const v of vessels) {
     const prev = existing.get(v.mmsi);
-    const { moved, effectiveSpeed } = assessMovement(v, prev, 'direct');
-    const heartbeat = !moved && (prev === undefined || nowMs - prev.last_seen >= HEARTBEAT_MS);
+    const { moved, effectiveSpeed, forceUpsert } = assessMovement(v, prev, 'direct');
+    const heartbeat = !moved && !forceUpsert && (prev === undefined || nowMs - prev.last_seen >= HEARTBEAT_MS);
 
-    if (!moved && !heartbeat) { nSkipped++; continue; }
+    if (!moved && !heartbeat && !forceUpsert) { nSkipped++; continue; }
 
     const firstDirect = (prev === undefined || prev.of_interest === 0) ? nowMs : null;
 
@@ -149,10 +151,10 @@ export async function runLocalScan(env: Env): Promise<void> {
     const max_extent = inDirect ? prevExtent : widenExtent(prevExtent, 'local');
 
     const tier: Tier = inDirect ? 'direct' : 'local';
-    const { moved, effectiveSpeed } = assessMovement(v, prev, tier);
-    const heartbeat = !moved && (prev === undefined || nowMs - prev.last_seen >= HEARTBEAT_MS);
+    const { moved, effectiveSpeed, forceUpsert } = assessMovement(v, prev, tier);
+    const heartbeat = !moved && !forceUpsert && (prev === undefined || nowMs - prev.last_seen >= HEARTBEAT_MS);
 
-    if (!moved && !heartbeat) { nSkipped++; continue; }
+    if (!moved && !heartbeat && !forceUpsert) { nSkipped++; continue; }
 
     upserts.push({
       mmsi: v.mmsi,
@@ -233,10 +235,10 @@ export async function runGlobalScan(env: Env): Promise<void> {
     const of_interest = prev !== undefined ? prev.of_interest : (inDirect ? 1 : 0);
     const firstDirect = inDirect && (prev === undefined || prev.of_interest === 0) ? nowMs : null;
 
-    const { moved, effectiveSpeed } = assessMovement(v, prev, tier);
-    const heartbeat = !moved && (prev === undefined || nowMs - prev.last_seen >= HEARTBEAT_MS);
+    const { moved, effectiveSpeed, forceUpsert } = assessMovement(v, prev, tier);
+    const heartbeat = !moved && !forceUpsert && (prev === undefined || nowMs - prev.last_seen >= HEARTBEAT_MS);
 
-    if (!moved && !heartbeat) { nSkipped++; continue; }
+    if (!moved && !heartbeat && !forceUpsert) { nSkipped++; continue; }
 
     upserts.push({
       mmsi: v.mmsi,
