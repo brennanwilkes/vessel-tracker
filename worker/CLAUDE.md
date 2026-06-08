@@ -7,7 +7,7 @@ Cloudflare Worker (TypeScript). Two handlers: `fetch` (HTTP API) and `scheduled`
 Two cron schedules in `wrangler.toml [triggers]`, both handled in `scheduled` (branch on `event.cron`):
 
 - `*/5 * * * *` — live ingest every 5 min: open WS to aisstream, drain ~40s, write KV snapshot + D1 upsert + ping rows. Ships move ~0.25 nm/min so 5-min resolution is indistinguishable on a map.
-- `0 0 * * 0` — weekly enrichment (Sunday midnight): re-query all known MMSIs over a near-global bounding box to record where past visitors are now. Best-effort (vessel must be transmitting within aisstream coverage).
+- `0 0 * * 1` — weekly enrichment (Monday midnight UTC): re-query all known MMSIs over a near-global bounding box to record where past visitors are now. Best-effort (vessel must be transmitting within aisstream coverage).
 
 **Why cron not Durable Objects:** Durable Objects require the paid Workers plan. Scheduled Workers are free-tier and sufficient. See `docs/decisions.md`.
 

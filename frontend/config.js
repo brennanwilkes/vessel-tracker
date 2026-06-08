@@ -12,6 +12,6 @@ export const VIEWSHEDS = [
   },
 ];
 
-export const WORKER_URL = 'https://vessel-tracker-api.__account__.workers.dev'; // TODO: set after first deploy
+export const WORKER_URL = 'https://vessel-tracker-api.brennan-a53.workers.dev';
 
 export const POLL_INTERVAL_MS = 30_000;

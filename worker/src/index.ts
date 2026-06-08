@@ -42,7 +42,7 @@ export default {
       ctx.waitUntil(
         runLiveIngest(env).catch(err => console.error('[scheduled] live ingest failed:', err))
       );
-    } else if (event.cron === '0 0 * * 0') {
+    } else if (event.cron === '0 0 * * 1') {
       ctx.waitUntil(
         runEnrichment(env).catch(err => console.error('[scheduled] enrichment failed:', err))
       );
