@@ -121,14 +121,16 @@ function closeSheet() {
 // ── Trail drawing ─────────────────────────────────────────────────────────────
 
 // Catmull-Rom spline: densify [lat,lon] array to a smooth curve through all points.
+// Phantom endpoints mirror the first/last segment so the curve has zero curvature at
+// both ends — prevents the spline from looping back toward the endpoints.
 function catmullRomPoints(pts, samples = 8) {
   if (pts.length < 2) return pts;
   const result = [];
   for (let i = 0; i < pts.length - 1; i++) {
-    const p0 = pts[Math.max(0, i - 1)];
+    const p0 = i > 0 ? pts[i - 1] : [2 * pts[0][0] - pts[1][0], 2 * pts[0][1] - pts[1][1]];
     const p1 = pts[i];
     const p2 = pts[i + 1];
-    const p3 = pts[Math.min(pts.length - 1, i + 2)];
+    const p3 = i < pts.length - 2 ? pts[i + 2] : [2 * pts[pts.length - 1][0] - pts[pts.length - 2][0], 2 * pts[pts.length - 1][1] - pts[pts.length - 2][1]];
     for (let j = 0; j < samples; j++) {
       const t = j / samples;
       const t2 = t * t;
