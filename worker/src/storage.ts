@@ -151,6 +151,8 @@ export async function commitScan(env: Env, vessels: VesselUpsert[], positions: P
 
 // Only updates rows that already exist AND are still missing static fields — avoids
 // burning write quota on rows that are already fully enriched.
+// Also promotes of_interest=1 if the vessel now qualifies as large (cargo/tanker/>=50m),
+// covering the case where a position-only row was created before static data arrived.
 export async function enrichStaticData(env: Env, updates: StaticUpdate[]): Promise<void> {
   if (updates.length === 0) return;
   const stmts = updates.map(u =>
@@ -159,7 +161,14 @@ export async function enrichStaticData(env: Env, updates: StaticUpdate[]): Promi
          name        = COALESCE(?2, name),
          vessel_type = COALESCE(?3, vessel_type),
          length      = COALESCE(?4, length),
-         destination = COALESCE(?5, destination)
+         destination = COALESCE(?5, destination),
+         of_interest = CASE
+           WHEN of_interest = 1 THEN 1
+           WHEN (?3 >= 70 AND ?3 <= 89) THEN 1
+           WHEN (?3 >= 60 AND ?3 <= 69 AND COALESCE(?4, length) >= 50) THEN 1
+           WHEN COALESCE(?4, length) >= 50 THEN 1
+           ELSE of_interest
+         END
        WHERE mmsi = ?1
          AND (vessel_type IS NULL OR length IS NULL OR destination IS NULL)`
     ).bind(u.mmsi, u.name, u.vesselType, u.length, u.destination)

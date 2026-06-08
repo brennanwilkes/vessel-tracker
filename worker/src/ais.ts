@@ -28,6 +28,13 @@ export function isLargeVessel(vesselType: number | null, length: number | null):
   return false;
 }
 
+// Returns true only when we have enough info to be certain a vessel is NOT large —
+// i.e., we can positively confirm small. Unknown type/length is NOT confirmed small.
+export function isConfirmedSmall(vesselType: number | null, length: number | null): boolean {
+  if (vesselType === null && length === null) return false;
+  return !isLargeVessel(vesselType, length);
+}
+
 // aisstream message shapes — only fields we actually use
 
 export interface AisPositionReport {

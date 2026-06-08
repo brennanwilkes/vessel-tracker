@@ -6,7 +6,7 @@ import {
   PHANTOM_SPEED_MIN_KN, PHANTOM_STALL_MS,
 } from './constants';
 import { drainAisStream } from './aisstream';
-import { pointInBox, isLargeVessel } from './ais';
+import { pointInBox, isLargeVessel, isConfirmedSmall } from './ais';
 import {
   loadVesselStates, commitScan, enrichStaticData, getOfInterestMmsis, widenExtent,
   type VesselUpsert, type PositionInsert, type VesselState,
@@ -153,7 +153,7 @@ export async function runLocalScan(env: Env): Promise<void> {
   for (const v of vessels) {
     const prev = existing.get(v.mmsi);
 
-    if (!isLargeVessel(v.vesselType, v.length) && prev === undefined) { nFiltered++; continue; }
+    if (isConfirmedSmall(v.vesselType, v.length) && prev === undefined) { nFiltered++; continue; }
 
     const inDirect = pointInBox(v.lat, v.lon, DIRECT_BOUNDING_BOX);
     if (inDirect) nInDirect++;
