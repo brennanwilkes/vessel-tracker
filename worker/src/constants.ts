@@ -7,11 +7,11 @@ export const DIRECT_BOUNDING_BOX: [[number, number], [number, number]] = [
   [48.524, -123.02],
 ];
 
-// Local area: all of Vancouver Island + waterways + open Pacific.
+// Local area: Vancouver Island + waterways + Puget Sound down to Seattle.
 // Only large vessels (or already-of-interest) are stored from this zone.
 export const LOCAL_BOUNDING_BOX: [[number, number], [number, number]] = [
-  [47.8, -128.7],
-  [51.2, -122.5],
+  [47.4, -128.7],
+  [51.2, -122.0],
 ];
 
 // Used by the daily global scan paired with FiltersShipMMSI.
