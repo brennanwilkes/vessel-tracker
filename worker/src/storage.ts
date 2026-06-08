@@ -109,8 +109,8 @@ export async function commitScan(env: Env, vessels: VesselUpsert[], positions: P
     } else if (v.heartbeat) {
       stmts.push(
         env.VESSELS_DB.prepare(
-          `INSERT INTO vessels (mmsi,name,vessel_type,length,destination,last_lat,last_lon,last_speed,last_heading,last_seen,first_seen,of_interest,max_extent,direct_entry_count,times_seen)
-           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?10,?11,?12,?13,1)
+          `INSERT INTO vessels (mmsi,name,vessel_type,length,destination,last_lat,last_lon,last_speed,last_heading,last_seen,first_seen,of_interest,max_extent,first_direct_at,direct_entry_count,times_seen)
+           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?10,?11,?12,?13,?14,1)
            ON CONFLICT(mmsi) DO UPDATE SET
              name               = COALESCE(?2, name),
              vessel_type        = COALESCE(?3, vessel_type),
