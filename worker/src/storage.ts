@@ -13,7 +13,18 @@ export async function readSnapshot(env: Env): Promise<Vessel[]> {
 // Merges fresh positions in, drops entries older than STALE_THRESHOLD_MS, writes back.
 export async function mergeSnapshot(env: Env, existing: Vessel[], fresh: Vessel[]): Promise<void> {
   const byMmsi = new Map(existing.map(v => [v.mmsi, v]));
-  for (const v of fresh) byMmsi.set(v.mmsi, v);
+  for (const v of fresh) {
+    const prev = byMmsi.get(v.mmsi);
+    // Always update position/motion. For static fields, keep previous non-null value
+    // if the current poll didn't include a ShipStaticData message for this vessel.
+    byMmsi.set(v.mmsi, prev ? {
+      ...v,
+      name:        v.name        ?? prev.name,
+      vesselType:  v.vesselType  ?? prev.vesselType,
+      length:      v.length      ?? prev.length,
+      destination: v.destination ?? prev.destination,
+    } : v);
+  }
 
   const cutoff = Date.now() - STALE_THRESHOLD_MS;
   const merged = [...byMmsi.values()].filter(v => v.updated >= cutoff);

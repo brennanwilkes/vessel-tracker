@@ -12,6 +12,9 @@ export const VIEWSHEDS = [
   },
 ];
 
+// AIS ingest bounding box — matches worker/src/constants.ts LOCAL_BOUNDING_BOX
+export const LOCAL_BOUNDING_BOX = { sw: [47.8, -124.5], ne: [49.0, -122.5] };
+
 export const WORKER_URL = 'https://vessel-tracker-api.brennan-a53.workers.dev';
 
 export const POLL_INTERVAL_MS = 30_000;

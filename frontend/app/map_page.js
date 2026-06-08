@@ -1,4 +1,4 @@
-import { VIEWSHEDS } from '../config.js';
+import { VIEWSHEDS, LOCAL_BOUNDING_BOX } from '../config.js';
 import { subscribe } from './store.js';
 import { haversineNm } from './geo.js';
 
@@ -148,7 +148,10 @@ function updateMarkers(vessels, error) {
 
     if (existing !== undefined) {
       existing.setLatLng([vessel.lat, vessel.lon]);
-      existing.setIcon(makeVesselIcon(vessel));
+      // Only recreate the SVG icon when the visual actually changes
+      if (existing._vessel.heading !== vessel.heading || existing._vessel.vesselType !== vessel.vesselType) {
+        existing.setIcon(makeVesselIcon(vessel));
+      }
       existing._vessel = vessel;
     } else {
       const marker = L.marker([vessel.lat, vessel.lon], { icon: makeVesselIcon(vessel) });
@@ -192,6 +195,11 @@ export function mount(root) {
     .setView([HOME.lat, HOME.lon], 11);
 
   L.tileLayer(TILE_URL, { attribution: TILE_ATTR, maxZoom: 18 }).addTo(map);
+
+  L.rectangle(
+    [LOCAL_BOUNDING_BOX.sw, LOCAL_BOUNDING_BOX.ne],
+    { color: '#17c3d4', weight: 1, opacity: 0.35, fill: true, fillOpacity: 0.04, interactive: false, dashArray: '6 4' }
+  ).addTo(map);
 
   const homeIcon = L.divIcon({
     html: `<div class="home-pulse-outer"><div class="home-pulse-inner"></div></div>`,

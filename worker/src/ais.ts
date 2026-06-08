@@ -43,10 +43,11 @@ export interface AisShipStaticData {
 export type AisMessage = AisPositionReport | AisShipStaticData;
 
 export function parsePositionReport(msg: AisPositionReport, nowMs: number): Partial<Vessel> {
-  const { MMSI, latitude, longitude } = msg.MetaData;
+  const { MMSI, ShipName, latitude, longitude } = msg.MetaData;
   const { Sog, TrueHeading } = msg.Message.PositionReport;
   return {
     mmsi: MMSI,
+    name: ShipName?.trim() || null,
     lat: latitude,
     lon: longitude,
     speed: Sog,
