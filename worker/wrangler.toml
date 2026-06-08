@@ -17,4 +17,4 @@ id = "__KV_ID__"
 [[d1_databases]]
 binding = "VESSELS_DB"
 database_name = "vessel-tracker"
-database_id = "__D1_ID__"
+database_id = "1fc3b1b8-b293-49fd-951e-5765f184e44b"

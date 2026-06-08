@@ -32,13 +32,15 @@ export interface VesselRow {
   times_seen: number;
   closest_nm: number | null;
   last_destination: string | null;
+  enrichment_lat: number | null;
+  enrichment_lon: number | null;
+  enrichment_ts: number | null;
 }
 
-export interface PingRow {
+export interface SightingRow {
   id: number;
   mmsi: number;
-  lat: number;
-  lon: number;
-  ts: number;
-  source: 'live' | 'enrichment';
+  entered_at: number;
+  last_seen_at: number;
+  exited_at: number | null;
 }

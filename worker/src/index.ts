@@ -1,7 +1,7 @@
 import type { Env } from './types';
 import { handleOptions } from './cors';
 import { json, errorJson } from './http';
-import { readFreshVessels, getVesselRow, getRecentPings } from './storage';
+import { readFreshVessels, getVesselRow, getVesselSightings } from './storage';
 import { runLiveIngest, runEnrichment } from './ingest';
 
 export default {
@@ -20,16 +20,16 @@ export default {
     const vesselMatch = url.pathname.match(/^\/vessel\/(\d+)$/);
     if (vesselMatch !== null) {
       const mmsi = parseInt(vesselMatch[1], 10);
-      const [row, pings] = await Promise.all([
+      const [row, sightings] = await Promise.all([
         getVesselRow(env, mmsi),
-        getRecentPings(env, mmsi),
+        getVesselSightings(env, mmsi),
       ]);
       if (row === null) {
         console.warn(`[fetch] GET /vessel/${mmsi} → 404`);
         return errorJson(req, env, 404, 'Vessel not found');
       }
-      console.log(`[fetch] GET /vessel/${mmsi} → ${pings.length} pings`);
-      return json(req, env, 200, { vessel: row, pings });
+      console.log(`[fetch] GET /vessel/${mmsi} → ${sightings.length} sightings`);
+      return json(req, env, 200, { vessel: row, sightings });
     }
 
     return errorJson(req, env, 404, 'Not found');

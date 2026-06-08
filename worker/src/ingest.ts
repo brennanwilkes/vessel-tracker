@@ -1,7 +1,7 @@
 import type { Env } from './types';
 import { LOCAL_BOUNDING_BOX, GLOBAL_BOUNDING_BOX, DRAIN_WINDOW_MS, ENRICHMENT_DRAIN_MS } from './constants';
 import { drainAisStream } from './aisstream';
-import { writeSnapshot, upsertVessels, insertPings, getAllKnownMmsis } from './storage';
+import { mergeSnapshot, upsertVessels, updateSightings, updateEnrichmentPositions, getAllKnownMmsis } from './storage';
 
 export async function runLiveIngest(env: Env): Promise<void> {
   console.log('[ingest] live ingest starting');
@@ -18,12 +18,12 @@ export async function runLiveIngest(env: Env): Promise<void> {
     console.warn('[ingest] live drain returned 0 vessels — check API key and bounding box');
   }
 
-  // KV snapshot and D1 upsert run in parallel; pings wait for upsert so the
-  // foreign key on vessel_pings(mmsi) → vessels(mmsi) is always satisfied.
+  // KV snapshot and D1 upsert run in parallel; sightings wait for upsert so the
+  // FK on vessel_sightings(mmsi) → vessels(mmsi) is always satisfied.
   const tWrite = Date.now();
   await Promise.all([
-    writeSnapshot(env, vessels),
-    upsertVessels(env, vessels).then(() => insertPings(env, vessels, 'live')),
+    mergeSnapshot(env, vessels),
+    upsertVessels(env, vessels).then(() => updateSightings(env, vessels)),
   ]);
 
   console.log(
@@ -50,6 +50,6 @@ export async function runEnrichment(env: Env): Promise<void> {
     drainMs: ENRICHMENT_DRAIN_MS,
   });
 
-  await insertPings(env, vessels, 'enrichment');
+  await updateEnrichmentPositions(env, vessels);
   console.log(`[ingest] enrichment done — ${vessels.length} vessels heard in ${Date.now() - start}ms`);
 }
