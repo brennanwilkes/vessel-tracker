@@ -1,4 +1,4 @@
-import type { Env, VesselRow, PositionRow, Tier, MaxExtent } from './types';
+import type { Env, VesselRow, PositionRow, StaticUpdate, Tier, MaxExtent } from './types';
 
 const EXTENT_ORDER: Record<MaxExtent, number> = { direct: 0, local: 1, global: 2 };
 
@@ -135,6 +135,24 @@ export async function commitScan(env: Env, vessels: VesselUpsert[], positions: P
   if (stmts.length > 0) {
     await env.VESSELS_DB.batch(stmts);
   }
+}
+
+// Only updates rows that already exist AND are still missing static fields — avoids
+// burning write quota on rows that are already fully enriched.
+export async function enrichStaticData(env: Env, updates: StaticUpdate[]): Promise<void> {
+  if (updates.length === 0) return;
+  const stmts = updates.map(u =>
+    env.VESSELS_DB.prepare(
+      `UPDATE vessels SET
+         name        = COALESCE(?2, name),
+         vessel_type = COALESCE(?3, vessel_type),
+         length      = COALESCE(?4, length),
+         destination = COALESCE(?5, destination)
+       WHERE mmsi = ?1
+         AND (vessel_type IS NULL OR length IS NULL OR destination IS NULL)`
+    ).bind(u.mmsi, u.name, u.vesselType, u.length, u.destination)
+  );
+  await env.VESSELS_DB.batch(stmts);
 }
 
 export async function getCurrentVessels(env: Env, ttlMs: number): Promise<VesselRow[]> {

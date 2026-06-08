@@ -2,7 +2,7 @@ import { VIEWSHEDS } from '../config.js';
 import { subscribe as subscribeVessels } from './store.js';
 import { subscribe as subscribeSettings, passesExtentFilter } from './settings_store.js';
 import { haversineNm, haversineKm } from './geo.js';
-import { vesselColor, vesselCategoryLabel } from './vessels.js';
+import { vesselColor, vesselCategoryLabel, vesselFlag } from './vessels.js';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -64,13 +64,14 @@ function renderVessels() {
     const dist = distanceLabel(v);
     const category = vesselCategoryLabel(v);
     const color = vesselColor(v);
+    const flag = vesselFlag(v);
     const speed = v.speed !== null ? `${v.speed.toFixed(1)} kn` : '— kn';
     const name = v.name ?? 'Unknown Vessel';
 
     return `<div class="vessel-card" style="border-left-color:${color};animation-delay:${i * 30}ms" data-mmsi="${v.mmsi}">
       <div class="vessel-card-icon">${vesselIconSvg(v)}</div>
       <div class="vessel-card-body">
-        <div class="vessel-card-name">${name}</div>
+        <div class="vessel-card-name">${flag !== null ? flag + ' ' : ''}${name}</div>
         <div class="vessel-card-meta">${category}${v.destination ? ' · ' + v.destination : ''}</div>
       </div>
       <div class="vessel-card-right">

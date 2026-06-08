@@ -2,7 +2,7 @@ import { VIEWSHEDS, DIRECT_BOUNDING_BOX, MOVING_SPEED_KN, EXTENTS, TIER_STYLE } 
 import { subscribe as subscribeVessels } from './store.js';
 import { subscribe as subscribeSettings, getSettings, passesExtentFilter } from './settings_store.js';
 import { haversineNm } from './geo.js';
-import { vesselColor, vesselCategoryLabel } from './vessels.js';
+import { vesselColor, vesselCategoryLabel, vesselFlag } from './vessels.js';
 import { getTrail, pruneTrails } from './trails.js';
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -76,13 +76,16 @@ function openSheet(vessel) {
   const sheet = container.querySelector('.detail-sheet');
   const color = vesselColor(vessel);
   const distNm = haversineNm(HOME.lat, HOME.lon, vessel.lat, vessel.lon);
+  const flag = vesselFlag(vessel);
+  const lengthStr = vessel.length !== null ? ` · ${vessel.length}m` : '';
+  const typeStr = vessel.vessel_type !== null ? ` · Type ${vessel.vessel_type}` : '';
 
   sheet.innerHTML = `
     <div class="sheet-handle"></div>
-    <div class="detail-vessel-name">${vessel.name ?? 'Unknown Vessel'}</div>
+    <div class="detail-vessel-name">${flag !== null ? flag + ' ' : ''}${vessel.name ?? 'Unknown Vessel'}</div>
     <div class="detail-type-row">
       <div class="detail-type-dot" style="background:${color}"></div>
-      <div class="detail-vessel-type">${vesselCategoryLabel(vessel)}${vessel.vessel_type !== null ? ` · Type ${vessel.vessel_type}` : ''}</div>
+      <div class="detail-vessel-type">${vesselCategoryLabel(vessel)}${typeStr}${lengthStr}</div>
     </div>
     <div class="detail-grid">
       <div class="detail-stat">
@@ -175,11 +178,14 @@ function drawTrail(vessel, points, token) {
   removeTrailLayers(mmsi);
   if (points.length === 0) return;
 
+  // API returns points newest-first; reverse to chronological order for drawing.
+  const chronological = [...points].reverse();
+
   // Extend to the vessel's current position so the trail is always live.
-  const last = points[points.length - 1];
+  const last = chronological[chronological.length - 1];
   const allPoints = (last.lat === vessel.lat && last.lon === vessel.lon)
-    ? points
-    : [...points, { ...last, lat: vessel.lat, lon: vessel.lon }];
+    ? chronological
+    : [...chronological, { ...last, lat: vessel.lat, lon: vessel.lon }];
 
   const color = vesselColor(vessel);
   const segments = segmentsByTier(allPoints);

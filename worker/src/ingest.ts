@@ -7,7 +7,7 @@ import {
 import { drainAisStream } from './aisstream';
 import { pointInBox, isLargeVessel } from './ais';
 import {
-  loadVesselStates, commitScan, getOfInterestMmsis, widenExtent,
+  loadVesselStates, commitScan, enrichStaticData, getOfInterestMmsis, widenExtent,
   type VesselUpsert, type PositionInsert, type VesselState,
 } from './storage';
 
@@ -37,13 +37,14 @@ export async function runDirectScan(env: Env): Promise<void> {
   const start = Date.now();
   console.log('[ingest] direct scan starting');
 
-  const vessels = await drainAisStream({
+  const { vessels, staticOnly } = await drainAisStream({
     apiKey: env.AISSTREAM_API_KEY,
     boundingBox: DIRECT_BOUNDING_BOX,
     drainMs: DIRECT_DRAIN_MS,
   });
 
   if (vessels.length === 0) {
+    if (staticOnly.length > 0) await enrichStaticData(env, staticOnly);
     console.warn('[ingest] direct scan — 0 vessels heard');
     return;
   }
@@ -91,20 +92,22 @@ export async function runDirectScan(env: Env): Promise<void> {
 
   console.log(`[ingest] direct scan — ${vessels.length} heard | ${nMoved} moved, ${nHeartbeat} heartbeat, ${nSkipped} no-change`);
   await commitScan(env, upserts, positions);
-  console.log(`[ingest] direct scan done — ${upserts.length} writes (${positions.length} pos) in ${Date.now() - start}ms`);
+  await enrichStaticData(env, staticOnly);
+  console.log(`[ingest] direct scan done — ${upserts.length} writes (${positions.length} pos), ${staticOnly.length} static-only enrichments in ${Date.now() - start}ms`);
 }
 
 export async function runLocalScan(env: Env): Promise<void> {
   const start = Date.now();
   console.log('[ingest] local scan starting');
 
-  const vessels = await drainAisStream({
+  const { vessels, staticOnly } = await drainAisStream({
     apiKey: env.AISSTREAM_API_KEY,
     boundingBox: LOCAL_BOUNDING_BOX,
     drainMs: LOCAL_DRAIN_MS,
   });
 
   if (vessels.length === 0) {
+    if (staticOnly.length > 0) await enrichStaticData(env, staticOnly);
     console.warn('[ingest] local scan — 0 vessels heard');
     return;
   }
@@ -167,7 +170,8 @@ export async function runLocalScan(env: Env): Promise<void> {
     ` | ${nMoved} moved, ${nHeartbeat} heartbeat, ${nSkipped} no-change`
   );
   await commitScan(env, upserts, positions);
-  console.log(`[ingest] local scan done — ${upserts.length} writes (${positions.length} pos) in ${Date.now() - start}ms`);
+  await enrichStaticData(env, staticOnly);
+  console.log(`[ingest] local scan done — ${upserts.length} writes (${positions.length} pos), ${staticOnly.length} static-only enrichments in ${Date.now() - start}ms`);
 }
 
 export async function runGlobalScan(env: Env): Promise<void> {
@@ -182,7 +186,7 @@ export async function runGlobalScan(env: Env): Promise<void> {
 
   console.log(`[ingest] global scan — querying ${mmsis.length} of-interest MMSIs`);
 
-  const vessels = await drainAisStream({
+  const { vessels, staticOnly } = await drainAisStream({
     apiKey: env.AISSTREAM_API_KEY,
     boundingBox: GLOBAL_BOUNDING_BOX,
     mmsis,
@@ -190,6 +194,7 @@ export async function runGlobalScan(env: Env): Promise<void> {
   });
 
   if (vessels.length === 0) {
+    if (staticOnly.length > 0) await enrichStaticData(env, staticOnly);
     console.log(`[ingest] global scan — 0 of ${mmsis.length} queried vessels heard (outside coverage or not transmitting)`);
     return;
   }
@@ -250,5 +255,6 @@ export async function runGlobalScan(env: Env): Promise<void> {
     ` | ${nMoved} moved, ${nHeartbeat} heartbeat, ${nSkipped} no-change`
   );
   await commitScan(env, upserts, positions);
-  console.log(`[ingest] global scan done — ${upserts.length} writes (${positions.length} pos) in ${Date.now() - start}ms`);
+  await enrichStaticData(env, staticOnly);
+  console.log(`[ingest] global scan done — ${upserts.length} writes (${positions.length} pos), ${staticOnly.length} static-only enrichments in ${Date.now() - start}ms`);
 }

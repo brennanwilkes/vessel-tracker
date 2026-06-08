@@ -1,4 +1,4 @@
-import type { Vessel } from './types';
+import type { Vessel, StaticUpdate } from './types';
 import type { BoundingBox } from './aisstream';
 
 export type VesselCategory = 'cargo' | 'tanker' | 'passenger' | 'ferry' | 'tug' | 'fishing' | 'pleasure' | 'unknown';
@@ -81,6 +81,25 @@ export function parseShipStaticData(msg: AisShipStaticData): Partial<Vessel> {
     length: length > 0 ? length : null,
     destination: Destination?.trim() || null,
   };
+}
+
+// Returns partials that have static data (type/length/destination) but no position.
+// Used to enrich existing DB rows when aisstream sends ShipStaticData without a
+// matching PositionReport in the same drain window.
+export function toStaticOnlyUpdates(partials: Map<number, Partial<Vessel>>): StaticUpdate[] {
+  const updates: StaticUpdate[] = [];
+  for (const [mmsi, p] of partials) {
+    if (p.lat !== undefined || p.lon !== undefined) continue; // has position — handled by toCompleteVessels
+    if (p.vesselType === undefined && p.length === undefined && p.destination === undefined) continue;
+    updates.push({
+      mmsi,
+      name: p.name ?? null,
+      vesselType: p.vesselType ?? null,
+      length: p.length ?? null,
+      destination: p.destination ?? null,
+    });
+  }
+  return updates;
 }
 
 export function toCompleteVessels(partials: Map<number, Partial<Vessel>>): Vessel[] {
