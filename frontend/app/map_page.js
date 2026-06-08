@@ -1,7 +1,7 @@
 import { VIEWSHEDS, DIRECT_BOUNDING_BOX, MOVING_SPEED_KN, TIER_STYLE } from '../config.js';
 import { subscribe as subscribeVessels } from './store.js';
 import { subscribe as subscribeSettings, getSettings, passesExtentFilter, vesselCategory } from './settings_store.js';
-import { haversineNm } from './geo.js';
+import { haversineNm, bearingDeg } from './geo.js';
 import { vesselColor, vesselCategoryLabel, vesselFlag } from './vessels.js';
 import { getTrail, pruneTrails } from './trails.js';
 
@@ -123,15 +123,16 @@ function closeSheet() {
 
 // ── Trail drawing ─────────────────────────────────────────────────────────────
 
-// Anti-Laplacian expander: nudges each interior point away from the midpoint of
-// its neighbors, weighted by how straight the path is through that point.
-// cos≈1 (straight) → points are near the midpoint already, push is near zero;
-// cos near 0 (turning) → no push (avoids blowing up sharp corners).
-// The effect is that gradual curves balloon outward instead of cutting inside.
-function preSmooth(pts, iterations = 2) {
+// Two-phase pre-processor:
+//   Pass 1×: gentle inward Laplacian to kill AIS jitter before expanding.
+//   Pass 2×: outward push so the final spline bulges beyond the data on curves.
+// Applying the outward pass directly to noisy data amplifies zigzags — the
+// inward denoise pass must come first.
+// cos-weighting (straight→full effect, turning→none) protects sharp corners.
+function preSmooth(pts) {
   if (pts.length < 3) return pts;
-  let cur = pts.slice();
-  for (let k = 0; k < iterations; k++) {
+
+  function laplacianPass(cur, sign, factor) {
     const next = [cur[0]];
     for (let i = 1; i < cur.length - 1; i++) {
       const [ax, ay] = cur[i - 1];
@@ -143,12 +144,17 @@ function preSmooth(pts, iterations = 2) {
       const len2 = Math.sqrt(dx2 * dx2 + dy2 * dy2);
       if (len1 < 1e-10 || len2 < 1e-10) { next.push(cur[i]); continue; }
       const cos = (dx1 * dx2 + dy1 * dy2) / (len1 * len2);
-      const t = Math.max(0, cos) * 0.3;
-      next.push([bx - ((ax + cx) / 2 - bx) * t, by - ((ay + cy) / 2 - by) * t]);
+      const t = Math.max(0, cos) * factor;
+      const mx = (ax + cx) / 2, my = (ay + cy) / 2;
+      next.push([bx + sign * (mx - bx) * t, by + sign * (my - by) * t]);
     }
     next.push(cur[cur.length - 1]);
-    cur = next;
+    return next;
   }
+
+  let cur = pts.slice();
+  cur = laplacianPass(cur, +1, 0.2); // inward: denoise
+  cur = laplacianPass(cur, -1, 0.5); // outward: expand past data
   return cur;
 }
 
