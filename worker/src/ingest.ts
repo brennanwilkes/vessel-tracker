@@ -12,18 +12,23 @@ export async function runLiveIngest(env: Env): Promise<void> {
     boundingBox: LOCAL_BOUNDING_BOX,
     drainMs: DRAIN_WINDOW_MS,
   });
+  const tDrain = Date.now() - start;
 
   if (vessels.length === 0) {
     console.warn('[ingest] live drain returned 0 vessels — check API key and bounding box');
   }
 
+  // KV snapshot and D1 upsert run in parallel; pings wait for upsert so the
+  // foreign key on vessel_pings(mmsi) → vessels(mmsi) is always satisfied.
+  const tWrite = Date.now();
   await Promise.all([
     writeSnapshot(env, vessels),
-    upsertVessels(env, vessels),
-    insertPings(env, vessels, 'live'),
+    upsertVessels(env, vessels).then(() => insertPings(env, vessels, 'live')),
   ]);
 
-  console.log(`[ingest] live ingest done — ${vessels.length} vessels written in ${Date.now() - start}ms`);
+  console.log(
+    `[ingest] live ingest done — ${vessels.length} vessels | drain ${tDrain}ms | write ${Date.now() - tWrite}ms | total ${Date.now() - start}ms`
+  );
 }
 
 export async function runEnrichment(env: Env): Promise<void> {
