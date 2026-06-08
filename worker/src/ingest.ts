@@ -28,6 +28,13 @@ function assessMovement(v: Vessel, prev: VesselState | undefined, tier: Tier, no
   }
   const dist = haversineNm(prev.last_lat, prev.last_lon, v.lat, v.lon);
   if (tier === 'direct' && v.speed !== null && v.speed >= PHANTOM_SPEED_MIN_KN) {
+    // Escape hatch: real displacement past the move threshold always wins, even for a
+    // vessel previously flagged phantom. Without this, a phantom flag is permanent —
+    // last_pos_ts only advances on a position row (moved=true), but moved stays false
+    // while flagged, so posAge grows forever and the vessel can never recover.
+    if (dist >= MOVE_THRESHOLD_NM.direct) {
+      return { moved: true, effectiveSpeed: v.speed, forceUpsert: false };
+    }
     // A genuinely moving vessel at PHANTOM_SPEED_MIN_KN crosses MOVE_THRESHOLD_NM every
     // ~2 min, so no position row in PHANTOM_STALL_MS (20 min = 10× that) means phantom.
     const posAge = prev.last_pos_ts !== null ? nowMs - prev.last_pos_ts : null;

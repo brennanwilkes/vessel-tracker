@@ -123,12 +123,12 @@ function closeSheet() {
 
 // ── Trail drawing ─────────────────────────────────────────────────────────────
 
-// Laplacian pre-smoother: nudges each interior point toward the midpoint of its
-// neighbors, weighted by how straight the path is through that point.
-// cos≈1 (straight) → full pull (t=0.45); cos≤0 (90°+ turn) → no pull.
-// Multiple iterations compound this so gently-curving paths become very smooth
-// while genuine sharp course changes resist it.
-function preSmooth(pts, iterations = 3) {
+// Anti-Laplacian expander: nudges each interior point away from the midpoint of
+// its neighbors, weighted by how straight the path is through that point.
+// cos≈1 (straight) → points are near the midpoint already, push is near zero;
+// cos near 0 (turning) → no push (avoids blowing up sharp corners).
+// The effect is that gradual curves balloon outward instead of cutting inside.
+function preSmooth(pts, iterations = 2) {
   if (pts.length < 3) return pts;
   let cur = pts.slice();
   for (let k = 0; k < iterations; k++) {
@@ -143,8 +143,8 @@ function preSmooth(pts, iterations = 3) {
       const len2 = Math.sqrt(dx2 * dx2 + dy2 * dy2);
       if (len1 < 1e-10 || len2 < 1e-10) { next.push(cur[i]); continue; }
       const cos = (dx1 * dx2 + dy1 * dy2) / (len1 * len2);
-      const t = Math.max(0, cos) * 0.45;
-      next.push([bx + ((ax + cx) / 2 - bx) * t, by + ((ay + cy) / 2 - by) * t]);
+      const t = Math.max(0, cos) * 0.3;
+      next.push([bx - ((ax + cx) / 2 - bx) * t, by - ((ay + cy) / 2 - by) * t]);
     }
     next.push(cur[cur.length - 1]);
     cur = next;
