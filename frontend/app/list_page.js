@@ -1,5 +1,6 @@
 import { VIEWSHEDS } from '../config.js';
-import { subscribe } from './store.js';
+import { subscribe as subscribeVessels } from './store.js';
+import { subscribe as subscribeSettings, passesExtentFilter } from './settings_store.js';
 import { haversineNm, haversineKm } from './geo.js';
 import { vesselColor, vesselCategoryLabel } from './vessels.js';
 
@@ -10,9 +11,12 @@ const UNIT_KEY = 'vessel-tracker:unit';
 
 // ── State ────────────────────────────────────────────────────────────────────
 
-let unsubscribe = null;
+let unsubscribeVessels = null;
+let unsubscribeSettings = null;
 let container = null;
 let unitNm = localStorage.getItem(UNIT_KEY) !== 'km';
+let lastVessels = [];
+let lastSettings = null;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -34,30 +38,23 @@ function distanceLabel(vessel) {
 
 // ── Render ───────────────────────────────────────────────────────────────────
 
-function renderVessels(vessels, error) {
-  if (container === null) return;
+function renderVessels() {
+  if (container === null || lastSettings === null) return;
 
-  if (error !== null) {
-    console.error('[list] poll error:', error);
-  }
+  const filtered = lastVessels.filter(v => passesExtentFilter(v, lastSettings.extent));
 
   const countEl = container.querySelector('.list-header-count');
-  if (countEl !== null) countEl.textContent = `${vessels.length} vessel${vessels.length !== 1 ? 's' : ''} in view`;
+  if (countEl !== null) countEl.textContent = `${filtered.length} vessel${filtered.length !== 1 ? 's' : ''} in view`;
 
   const listEl = container.querySelector('.vessel-list');
   if (listEl === null) return;
 
-  if (error !== null) {
-    listEl.innerHTML = `<div class="state-error">Poll failed: ${error.message}</div>`;
-    return;
-  }
-
-  if (vessels.length === 0) {
+  if (filtered.length === 0) {
     listEl.innerHTML = `<div class="state-empty">No vessels currently in view</div>`;
     return;
   }
 
-  const sorted = [...vessels].sort((a, b) => {
+  const sorted = [...filtered].sort((a, b) => {
     const da = haversineNm(HOME.lat, HOME.lon, a.lat, a.lon);
     const db = haversineNm(HOME.lat, HOME.lon, b.lat, b.lon);
     return da - db;
@@ -106,15 +103,30 @@ export function mount(root) {
     unitNm = !unitNm;
     localStorage.setItem(UNIT_KEY, unitNm ? 'nm' : 'km');
     container.querySelector('#unit-toggle').textContent = unitNm ? 'nm' : 'km';
-    // Re-render with current store state — subscribe callback handles it
-    unsubscribe();
-    unsubscribe = subscribe(renderVessels);
+    renderVessels();
   });
 
-  unsubscribe = subscribe(renderVessels);
+  unsubscribeVessels = subscribeVessels((vessels, error) => {
+    if (error !== null) {
+      console.error('[list] poll error:', error);
+      const listEl = container?.querySelector('.vessel-list');
+      if (listEl !== null) listEl.innerHTML = `<div class="state-error">Poll failed: ${error.message}</div>`;
+      return;
+    }
+    lastVessels = vessels;
+    renderVessels();
+  });
+
+  unsubscribeSettings = subscribeSettings(settings => {
+    lastSettings = settings;
+    renderVessels();
+  });
 }
 
 export function unmount() {
-  if (unsubscribe !== null) { unsubscribe(); unsubscribe = null; }
+  if (unsubscribeVessels !== null) { unsubscribeVessels(); unsubscribeVessels = null; }
+  if (unsubscribeSettings !== null) { unsubscribeSettings(); unsubscribeSettings = null; }
   container = null;
+  lastVessels = [];
+  lastSettings = null;
 }

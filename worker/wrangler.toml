@@ -8,11 +8,7 @@ minify = true
 ALLOWED_ORIGIN = "*"
 
 [triggers]
-crons = ["*/15 * * * *", "0 0 * * 1"]
-
-[[kv_namespaces]]
-binding = "SNAPSHOT_KV"
-id = "__KV_ID__"
+crons = ["* * * * *", "*/5 * * * *", "0 6 * * *"]
 
 [[d1_databases]]
 binding = "VESSELS_DB"

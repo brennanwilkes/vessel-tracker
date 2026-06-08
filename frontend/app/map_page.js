@@ -1,7 +1,9 @@
-import { VIEWSHEDS, LOCAL_BOUNDING_BOX } from '../config.js';
-import { subscribe } from './store.js';
+import { VIEWSHEDS, DIRECT_BOUNDING_BOX, MOVING_SPEED_KN, EXTENTS, TIER_STYLE } from '../config.js';
+import { subscribe as subscribeVessels } from './store.js';
+import { subscribe as subscribeSettings, getSettings, passesExtentFilter } from './settings_store.js';
 import { haversineNm } from './geo.js';
 import { vesselColor, vesselCategoryLabel } from './vessels.js';
+import { getTrail, pruneTrails } from './trails.js';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -14,11 +16,22 @@ const TILE_ATTR = '&copy; <a href="https://www.openstreetmap.org/copyright">Open
 
 let map = null;
 let markers = new Map();
-let unsubscribe = null;
+let trailLayers = new Map();   // mmsi → [L.polyline, ...]
+let unsubscribeVessels = null;
+let unsubscribeSettings = null;
 let container = null;
 let statusEl = null;
+let lastVessels = [];
+let lastSettings = getSettings();
+let trailReqToken = 0;
 
-function makeVesselIcon(vessel) {
+// ── Icon helpers ─────────────────────────────────────────────────────────────
+
+function isMoving(vessel) {
+  return vessel.speed !== null && vessel.speed > MOVING_SPEED_KN;
+}
+
+function makeArrowIcon(vessel) {
   const color = vesselColor(vessel);
   const rotation = vessel.heading !== null ? vessel.heading : 0;
   return L.divIcon({
@@ -32,6 +45,20 @@ function makeVesselIcon(vessel) {
     iconSize: [20, 20],
     iconAnchor: [10, 10],
   });
+}
+
+function makeDotIcon(vessel) {
+  const color = vesselColor(vessel);
+  return L.divIcon({
+    html: `<div class="vessel-dot" style="--dot-color:${color}"></div>`,
+    className: 'vessel-marker',
+    iconSize: [14, 14],
+    iconAnchor: [7, 7],
+  });
+}
+
+function makeVesselIcon(vessel) {
+  return isMoving(vessel) ? makeArrowIcon(vessel) : makeDotIcon(vessel);
 }
 
 // ── Detail sheet ─────────────────────────────────────────────────────────────
@@ -55,7 +82,7 @@ function openSheet(vessel) {
     <div class="detail-vessel-name">${vessel.name ?? 'Unknown Vessel'}</div>
     <div class="detail-type-row">
       <div class="detail-type-dot" style="background:${color}"></div>
-      <div class="detail-vessel-type">${vesselCategoryLabel(vessel)}${vessel.vesselType !== null ? ` · Type ${vessel.vesselType}` : ''}</div>
+      <div class="detail-vessel-type">${vesselCategoryLabel(vessel)}${vessel.vessel_type !== null ? ` · Type ${vessel.vessel_type}` : ''}</div>
     </div>
     <div class="detail-grid">
       <div class="detail-stat">
@@ -79,7 +106,7 @@ function openSheet(vessel) {
       <div class="detail-destination-label">Destination</div>
       <div class="detail-destination-value">${vessel.destination ?? '—'}</div>
     </div>
-    <div class="detail-footer">Updated ${formatAge(vessel.updated)}</div>
+    <div class="detail-footer">Updated ${formatAge(vessel.last_seen)}</div>
   `;
 
   backdrop.classList.add('open');
@@ -91,29 +118,116 @@ function closeSheet() {
   container.querySelector('.detail-sheet').classList.remove('open');
 }
 
-// ── Marker management ────────────────────────────────────────────────────────
+// ── Trail drawing ─────────────────────────────────────────────────────────────
 
-function updateMarkers(vessels, error) {
-  if (error !== null) {
-    console.error('[map] poll error:', error);
+function segmentsByTier(points) {
+  const segments = [];
+  if (points.length === 0) return segments;
+
+  let current = { tier: points[0].tier, pts: [[points[0].lat, points[0].lon]] };
+  for (let i = 1; i < points.length; i++) {
+    const p = points[i];
+    if (p.tier !== current.tier) {
+      // carry one overlap point so segments connect visually
+      current.pts.push([p.lat, p.lon]);
+      segments.push(current);
+      current = { tier: p.tier, pts: [[p.lat, p.lon]] };
+    } else {
+      current.pts.push([p.lat, p.lon]);
+    }
+  }
+  segments.push(current);
+  return segments;
+}
+
+function removeTrailLayers(mmsi) {
+  const layers = trailLayers.get(mmsi);
+  if (layers !== undefined) {
+    for (const layer of layers) layer.remove();
+    trailLayers.delete(mmsi);
+  }
+}
+
+function drawTrail(mmsi, points, token) {
+  if (token !== trailReqToken) return;
+  if (map === null) return;
+
+  removeTrailLayers(mmsi);
+  if (points.length === 0) return;
+
+  const segments = segmentsByTier(points);
+  const layers = [];
+
+  for (const seg of segments) {
+    const style = TIER_STYLE[seg.tier];
+    const layer = L.polyline(seg.pts, {
+      color: style.color,
+      weight: style.weight,
+      opacity: 0,
+      className: 'vessel-trail',
+      interactive: false,
+    });
+    layer._targetOpacity = style.opacity;
+    layer.addTo(map);
+    layers.push(layer);
   }
 
+  trailLayers.set(mmsi, layers);
+
+  requestAnimationFrame(() => {
+    for (const layer of layers) {
+      layer.setStyle({ opacity: layer._targetOpacity });
+    }
+  });
+}
+
+async function scheduleTrails(visibleVessels, token) {
+  const liveSet = new Set(visibleVessels.map(v => v.mmsi));
+  pruneTrails(liveSet);
+
+  // Remove trail layers for vessels no longer visible
+  for (const mmsi of trailLayers.keys()) {
+    if (!liveSet.has(mmsi)) removeTrailLayers(mmsi);
+  }
+
+  const wantedTiers = EXTENTS.filter(t => lastSettings.trail[t]);
+
+  for (const vessel of visibleVessels) {
+    if (token !== trailReqToken) break;
+    getTrail(vessel.mmsi, wantedTiers).then(points => drawTrail(vessel.mmsi, points, token));
+  }
+}
+
+// ── Marker management ────────────────────────────────────────────────────────
+
+function render() {
+  if (map === null || container === null) return;
+
+  const vessels = lastVessels;
+  const settings = lastSettings;
+  const error = null; // error is handled by status chip only
+
+  const filtered = vessels.filter(v => passesExtentFilter(v, settings.extent));
+
   if (statusEl !== null) {
-    statusEl.innerHTML = error !== null
-      ? `<span style="color:var(--red)">⚠ ${error.message}</span>`
-      : `<span class="dot"></span>${vessels.length} vessel${vessels.length !== 1 ? 's' : ''}`;
+    statusEl.innerHTML = `<span class="dot"></span>${filtered.length} vessel${filtered.length !== 1 ? 's' : ''}`;
   }
 
   const seen = new Set();
 
-  for (const vessel of vessels) {
+  for (const vessel of filtered) {
     seen.add(vessel.mmsi);
     const existing = markers.get(vessel.mmsi);
 
     if (existing !== undefined) {
       existing.setLatLng([vessel.lat, vessel.lon]);
-      // Only recreate the SVG icon when the visual actually changes
-      if (existing._vessel.heading !== vessel.heading || existing._vessel.vesselType !== vessel.vesselType || existing._vessel.name !== vessel.name) {
+      const prev = existing._vessel;
+      if (
+        prev.heading !== vessel.heading ||
+        prev.vessel_type !== vessel.vessel_type ||
+        prev.name !== vessel.name ||
+        isMoving(prev) !== isMoving(vessel)
+      ) {
         existing.setIcon(makeVesselIcon(vessel));
       }
       existing._vessel = vessel;
@@ -126,19 +240,39 @@ function updateMarkers(vessels, error) {
     }
   }
 
-  // Remove markers for vessels no longer in the snapshot
   for (const [mmsi, marker] of markers) {
     if (!seen.has(mmsi)) {
       marker.remove();
       markers.delete(mmsi);
     }
   }
+
+  trailReqToken++;
+  scheduleTrails(filtered, trailReqToken);
+}
+
+function onVesselsUpdate(vessels, error) {
+  if (error !== null) {
+    console.error('[map] poll error:', error);
+    if (statusEl !== null) {
+      statusEl.innerHTML = `<span style="color:var(--red)">⚠ ${error.message}</span>`;
+    }
+    return;
+  }
+  lastVessels = vessels;
+  render();
+}
+
+function onSettingsUpdate(settings) {
+  lastSettings = settings;
+  render();
 }
 
 // ── Mount / unmount ──────────────────────────────────────────────────────────
 
 export function mount(root) {
   container = root;
+  lastSettings = getSettings();
 
   container.innerHTML = `
     <div class="map-page">
@@ -160,12 +294,10 @@ export function mount(root) {
 
   L.tileLayer(TILE_URL, { attribution: TILE_ATTR, maxZoom: 18 }).addTo(map);
 
-  // Leaflet reads container dimensions synchronously on init — defer invalidation
-  // one frame so the browser has finished laying out the container.
   requestAnimationFrame(() => map !== null && map.invalidateSize());
 
   L.rectangle(
-    [LOCAL_BOUNDING_BOX.sw, LOCAL_BOUNDING_BOX.ne],
+    [DIRECT_BOUNDING_BOX.sw, DIRECT_BOUNDING_BOX.ne],
     { color: '#17c3d4', weight: 1, opacity: 0.35, fill: true, fillOpacity: 0.04, interactive: false, dashArray: '6 4' }
   ).addTo(map);
 
@@ -177,13 +309,21 @@ export function mount(root) {
   });
   L.marker([HOME.lat, HOME.lon], { icon: homeIcon, interactive: false }).addTo(map);
 
-  unsubscribe = subscribe(updateMarkers);
+  unsubscribeVessels = subscribeVessels(onVesselsUpdate);
+  unsubscribeSettings = subscribeSettings(onSettingsUpdate);
 }
 
 export function unmount() {
-  if (unsubscribe !== null) { unsubscribe(); unsubscribe = null; }
+  if (unsubscribeVessels !== null) { unsubscribeVessels(); unsubscribeVessels = null; }
+  if (unsubscribeSettings !== null) { unsubscribeSettings(); unsubscribeSettings = null; }
   if (map !== null) { map.remove(); map = null; }
   markers.clear();
+  for (const layers of trailLayers.values()) {
+    for (const layer of layers) layer.remove();
+  }
+  trailLayers.clear();
+  trailReqToken++;
   container = null;
   statusEl = null;
+  lastVessels = [];
 }

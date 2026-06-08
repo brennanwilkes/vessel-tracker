@@ -6,22 +6,26 @@ GitHub Pages SPA. No bundler, no framework. Raw ES6 modules + CDN libs loaded in
 
 ```
 index.html          — CDN libs (Leaflet), stylesheet links, <div id="app">, module entry
-config.js           — ALL runtime config as top-level consts (VIEWSHEDS, WORKER_URL, POLL_INTERVAL_MS)
+config.js           — ALL runtime config: VIEWSHEDS, WORKER_URL, POLL_INTERVAL_MS, MOVING_SPEED_KN, TIER_STYLE, etc.
 styles/
   base.css          — CSS custom properties (design tokens), reset, typography
   layout.css        — #app shell, #page-root, tab bar
-  map.css           — Leaflet container, overrides, vessel markers, home pulse, status chip
+  map.css           — Leaflet container, overrides, vessel markers (dot + arrow), trails, home pulse, status chip
   sheet.css         — vessel detail bottom sheet
   list.css          — list page, vessel cards
   camera.css        — camera placeholder
   states.css        — error / empty states
+  settings.css      — settings page, toggle switches
 app/
-  main.js           — hash router (#map / #list / #camera), tab bar, startPolling()
-  api.js            — fetch wrappers for worker endpoints (fetchVessels, fetchVessel)
+  main.js           — hash router (#map / #list / #camera / #settings), 4-tab bar, startPolling()
+  api.js            — fetchVessels (→ /current), fetchVessel, fetchTrack (→ /vessel/:mmsi/track)
   store.js          — 30s polling loop, pub/sub (subscribe returns an unsubscribe fn)
+  settings_store.js — extent + trail filter state, localStorage persistence, passesExtentFilter()
   geo.js            — haversineNm, haversineKm, bearingDeg (pure math)
-  map_page.js       — Leaflet map, vessel markers, detail sheet
-  list_page.js      — distance-sorted vessel list, unit toggle (nm/km in localStorage)
+  map_page.js       — Leaflet map, dot/arrow markers, trail polylines, extent filter, settings subscription
+  list_page.js      — distance-sorted vessel list, extent filter, unit toggle (nm/km in localStorage)
+  trails.js         — lazy trail fetch + in-memory cache (TTL + tier-union widening)
+  settings_page.js  — settings page: extent bucket toggles + trail tier toggles
   camera_page.js    — placeholder, renders in M3
 ```
 

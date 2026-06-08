@@ -1,8 +1,12 @@
-import type { Env } from './types';
+import type { Env, Tier } from './types';
 import { handleOptions } from './cors';
 import { json, errorJson } from './http';
-import { readSnapshot, getVesselRow, getVesselSightings } from './storage';
-import { runLiveIngest, runEnrichment } from './ingest';
+import { getCurrentVessels, getTrack } from './storage';
+import { runDirectScan, runLocalScan, runGlobalScan } from './ingest';
+import { LIVE_TTL_MS } from './constants';
+
+const TRACK_LIMIT = 500;
+const VALID_TIERS = new Set<Tier>(['direct', 'local', 'global']);
 
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
@@ -11,25 +15,28 @@ export default {
     if (req.method === 'OPTIONS') return handleOptions(req, env);
     if (req.method !== 'GET') return errorJson(req, env, 405, 'Method not allowed');
 
-    if (url.pathname === '/vessels') {
-      const vessels = await readSnapshot(env);
-      console.log(`[fetch] GET /vessels → ${vessels.length} fresh vessels`);
-      return json(req, env, 200, { vessels });
+    if (url.pathname === '/current') {
+      const vessels = await getCurrentVessels(env, LIVE_TTL_MS);
+      console.log(`[fetch] GET /current → ${vessels.length} vessels`);
+      return json(req, env, 200, { vessels }, { 'Cache-Control': 'no-store' });
     }
 
-    const vesselMatch = url.pathname.match(/^\/vessel\/(\d+)$/);
-    if (vesselMatch !== null) {
-      const mmsi = parseInt(vesselMatch[1], 10);
-      const [row, sightings] = await Promise.all([
-        getVesselRow(env, mmsi),
-        getVesselSightings(env, mmsi),
-      ]);
-      if (row === null) {
-        console.warn(`[fetch] GET /vessel/${mmsi} → 404`);
-        return errorJson(req, env, 404, 'Vessel not found');
-      }
-      console.log(`[fetch] GET /vessel/${mmsi} → ${sightings.length} sightings`);
-      return json(req, env, 200, { vessel: row, sightings });
+    const trackMatch = url.pathname.match(/^\/vessel\/(\d+)\/track$/);
+    if (trackMatch !== null) {
+      const mmsi = parseInt(trackMatch[1], 10);
+      const tierParam = url.searchParams.get('tier');
+      const tiers: Tier[] = tierParam
+        ? tierParam.split(',').filter((t): t is Tier => VALID_TIERS.has(t as Tier))
+        : [];
+
+      const points = await getTrack(env, mmsi, tiers, TRACK_LIMIT);
+      console.log(`[fetch] GET /vessel/${mmsi}/track?tier=${tierParam ?? ''} → ${points.length} points`);
+
+      return json(
+        req, env, 200,
+        { points: points.map(p => ({ lat: p.lat, lon: p.lon, speed: p.speed, heading: p.heading, t: p.ts, tier: p.tier })) },
+        { 'Cache-Control': 'public, max-age=60' }
+      );
     }
 
     return errorJson(req, env, 404, 'Not found');
@@ -38,13 +45,17 @@ export default {
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
     console.log(`[scheduled] cron fired: ${event.cron}`);
 
-    if (event.cron === '*/15 * * * *') {
+    if (event.cron === '* * * * *') {
       ctx.waitUntil(
-        runLiveIngest(env).catch(err => console.error('[scheduled] live ingest failed:', err))
+        runDirectScan(env).catch(err => console.error('[scheduled] direct scan failed:', err))
       );
-    } else if (event.cron === '0 0 * * 1') {
+    } else if (event.cron === '*/5 * * * *') {
       ctx.waitUntil(
-        runEnrichment(env).catch(err => console.error('[scheduled] enrichment failed:', err))
+        runLocalScan(env).catch(err => console.error('[scheduled] local scan failed:', err))
+      );
+    } else if (event.cron === '0 6 * * *') {
+      ctx.waitUntil(
+        runGlobalScan(env).catch(err => console.error('[scheduled] global scan failed:', err))
       );
     } else {
       console.warn(`[scheduled] unrecognised cron: ${event.cron}`);

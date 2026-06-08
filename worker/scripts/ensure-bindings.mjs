@@ -2,10 +2,9 @@
  * Idempotently ensures all Cloudflare bindings exist and applies any pending
  * DB migrations. Safe to run on every deploy.
  *
- * 1. Ensure KV namespace exists; patch wrangler.toml __KV_ID__ placeholder.
- * 2. Ensure D1 database exists; patch wrangler.toml __D1_ID__ placeholder.
- * 3. Bootstrap schema_migrations table.
- * 4. Read migrations/*.sql in numeric order; apply any not yet recorded.
+ * 1. Ensure D1 database exists; patch wrangler.toml __D1_ID__ placeholder.
+ * 2. Bootstrap schema_migrations table.
+ * 3. Read migrations/*.sql in numeric order; apply any not yet recorded.
  *
  * Adding a migration: drop a new file like 002_my_change.sql into worker/migrations/
  * and push. CI will apply it automatically on the next deploy.
@@ -39,36 +38,6 @@ async function cfFetch(url, init = {}) {
     throw new Error(`Cloudflare API error (${res.status}): ${msg}`);
   }
   return data;
-}
-
-// ── KV ───────────────────────────────────────────────────────────────────────
-
-async function listKvNamespaces(accountId) {
-  const data = await cfFetch(`${API_BASE}/accounts/${accountId}/storage/kv/namespaces`);
-  return Array.isArray(data.result) ? data.result : [];
-}
-
-async function createKvNamespace(accountId, title) {
-  const data = await cfFetch(`${API_BASE}/accounts/${accountId}/storage/kv/namespaces`, {
-    method: 'POST',
-    body: JSON.stringify({ title }),
-  });
-  return data.result;
-}
-
-async function ensureKv(accountId, title) {
-  const all = await listKvNamespaces(accountId);
-  const found = all.find((n) => n.title === title);
-  if (found) return found;
-  try {
-    return await createKvNamespace(accountId, title);
-  } catch {
-    // concurrent run may have created it
-    const all2 = await listKvNamespaces(accountId);
-    const found2 = all2.find((n) => n.title === title);
-    if (found2) return found2;
-    throw new Error(`Could not create or find KV namespace "${title}"`);
-  }
 }
 
 // ── D1 ───────────────────────────────────────────────────────────────────────
@@ -191,13 +160,7 @@ async function main() {
   const workerNameMatch = wranglerToml.match(/^\s*name\s*=\s*"([^"]+)"/m);
   const workerName = workerNameMatch?.[1] ?? 'worker';
 
-  // 1. KV
-  const kvTitle = `${workerName}-kv`;
-  const kv = await ensureKv(accountId, kvTitle);
-  wranglerToml = wranglerToml.replace(/id\s*=\s*"__KV_ID__"/g, `id = "${kv.id}"`);
-  console.log(`KV "${kvTitle}" → ${kv.id}`);
-
-  // 2. D1
+  // 1. D1
   const d1NameMatch = wranglerToml.match(/database_name\s*=\s*"([^"]+)"/);
   const d1Name = d1NameMatch?.[1] ?? workerName;
   const d1 = await ensureD1(accountId, d1Name);
@@ -206,11 +169,11 @@ async function main() {
 
   await fs.writeFile(wranglerPath, wranglerToml, 'utf8');
 
-  // 3. Migrations
+  // 2. Migrations
   const migrationsDir = path.join(repoRoot, 'migrations');
   await applyPendingMigrations(d1Name, migrationsDir);
 
-  console.log(JSON.stringify({ workerName, kv: { title: kvTitle, id: kv.id }, d1: { name: d1Name, id: d1.uuid } }, null, 2));
+  console.log(JSON.stringify({ workerName, d1: { name: d1Name, id: d1.uuid } }, null, 2));
 }
 
 main().catch((err) => {

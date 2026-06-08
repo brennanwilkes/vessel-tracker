@@ -1,0 +1,106 @@
+/* Settings page */
+
+.settings-page {
+  padding: 16px;
+  padding-bottom: 24px;
+  overflow-y: auto;
+  height: 100%;
+  box-sizing: border-box;
+}
+
+.settings-header {
+  font-family: var(--font-ui);
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 20px;
+}
+
+/* ── Cards ───────────────────────────────────────────────────── */
+
+.settings-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-mid);
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 14px;
+}
+
+.settings-card-title {
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 6px;
+}
+
+.settings-card-hint {
+  font-family: var(--font-ui);
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 14px;
+  line-height: 1.4;
+}
+
+.settings-toggles {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* ── Toggle rows ─────────────────────────────────────────────── */
+
+.settings-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: none;
+  border: none;
+  padding: 4px 0;
+  cursor: pointer;
+  width: 100%;
+  text-align: left;
+}
+
+.toggle-label {
+  font-family: var(--font-ui);
+  font-size: 14px;
+  color: var(--text-secondary);
+  transition: color 0.15s;
+}
+
+.settings-toggle.on .toggle-label {
+  color: var(--text-primary);
+}
+
+.toggle-track {
+  width: 44px;
+  height: 24px;
+  border-radius: 12px;
+  background: var(--border-mid);
+  position: relative;
+  flex-shrink: 0;
+  transition: background 0.2s;
+}
+
+.settings-toggle.on .toggle-track {
+  background: var(--accent);
+}
+
+.toggle-thumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  transition: transform 0.2s, background 0.2s;
+}
+
+.settings-toggle.on .toggle-thumb {
+  transform: translateX(20px);
+  background: #fff;
+}

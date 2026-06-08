@@ -28,7 +28,7 @@ const CATEGORY_LABELS = {
 // then name/length heuristics for vessels that transmit type=null.
 export function classifyVessel(vessel) {
   const name = (vessel.name ?? '').toUpperCase();
-  const t = vessel.vesselType;
+  const t = vessel.vessel_type ?? vessel.vesselType ?? null;
   const len = vessel.length;
 
   // Known local ferry operators by name pattern (type often comes back null)

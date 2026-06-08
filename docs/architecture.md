@@ -5,50 +5,72 @@
 ```
 aisstream.io WebSocket
         │
-        ▼ (every 5 min, ~40s drain)
-CF Scheduled Worker (ingest.ts)
+        ▼ (every 1 min, ≤45s drain — DIRECT zone)
+CF Scheduled Worker runDirectScan
         │
-        ├─► KV: snapshot:current  ← read by every GET /vessels
-        └─► D1: vessels (upsert)
-             D1: vessel_pings (insert, source='live')
+        └─► D1: vessels (upsert, of_interest=1)
+             D1: positions (insert, tier='direct', only if moved)
 
-CF Scheduled Worker (weekly enrichment)
-        │ reads known MMSIs from D1 vessels
-        ▼
-aisstream.io WebSocket (global bounding box + FiltersShipMMSI)
+aisstream.io WebSocket
         │
-        └─► D1: vessel_pings (insert, source='enrichment')
+        ▼ (every 5 min, ~90s drain — LOCAL zone, large vessels only)
+CF Scheduled Worker runLocalScan
+        │
+        └─► D1: vessels (upsert, of_interest if in direct box)
+             D1: positions (insert, tier='direct'|'local', only if moved)
+
+aisstream.io WebSocket
+        │
+        ▼ (daily 06:00 UTC — GLOBAL zone, of-interest MMSIs only)
+CF Scheduled Worker runGlobalScan
+        │
+        └─► D1: vessels (upsert, max_extent widened)
+             D1: positions (insert, tier='global', only if moved)
 
 Browser
-  └─► GET /vessels (every 30s poll)
+  └─► GET /current (every 30s poll)
         │
         ▼
 CF Worker fetch handler
-  └─► KV snapshot:current → filter stale → return JSON
+  └─► D1 vessels WHERE of_interest=1 AND last_seen >= now-90min → return JSON
 
 Browser
-  └─► GET /vessel/:mmsi
+  └─► GET /vessel/:mmsi/track?tier=direct,local (lazy trail fetch)
         │
         ▼
 CF Worker fetch handler
-  └─► D1 vessels row + recent vessel_pings → return JSON
+  └─► D1 positions WHERE mmsi=? [AND tier IN (?)] ORDER BY ts DESC → return JSON
 ```
 
-## Why KV for the live snapshot
+## Three-tier scan model
 
-KV reads are fast and free at scale. Every page load reads the same single key (`snapshot:current`). D1 would work but adds unnecessary SQL overhead on the hot read path.
+| Tier | Cron | Drain | Box | Filter | Position threshold |
+|------|------|-------|-----|--------|--------------------|
+| Direct | `* * * * *` | 45s | Apartment window view | None — everything | 0.05 nm (~90m) |
+| Local | `*/5 * * * *` | 90s | All of Vancouver Island + Pacific | Large vessels (≥50m or cargo/tanker) OR already-of-interest | 0.5 nm |
+| Global | `0 6 * * *` | 30s | Global | Of-interest MMSIs via FiltersShipMMSI | 5.0 nm |
 
-## Why D1 for history
+## Event-based position storage
 
-Vessel sightings and pings need relational queries (by MMSI, by time range). KV has no query capability.
+Position rows are *movement events*, not time samples. A new `positions` row is only inserted when the vessel has moved past the tier-specific threshold since its last stored point. Stationary/anchored vessels emit ~0 rows after their first. The `vessels` row denormalizes the current position for fast `/current` reads without JOIN.
+
+A liveness heartbeat updates `last_seen` at most every 10 min for vessels present but not moving, so they don't drop off the live map.
+
+## Of-interest definition
+
+A vessel is `of_interest=1` once it has entered the DIRECT bounding box at least once. Only of-interest vessels are returned by `/current` and targeted by the global scan. Large local vessels that have not yet entered the direct view still get a `vessels` row (pre-entry approach track) but are not rendered.
+
+## Why D1-only (no KV)
+
+KV was used in M1 as a fast snapshot cache. D1 free tier limits are far higher (100k row writes/day, 5M reads/day, 5GB) and with denormalized current position on the `vessels` row, the `/current` query is a single indexed scan with no JOIN — comparable latency to KV at this scale.
 
 ## Free-tier constraints
 
 - No Durable Objects (requires paid plan) → cron ingestion instead of persistent socket.
-- CF Workers free tier: 100k requests/day, 10ms CPU/invocation, 15min wall-clock for scheduled triggers. Our cron uses ~40s wall-clock (mostly I/O) and well under 10ms CPU.
-- aisstream.io free tier: WebSocket only, no REST.
+- CF Workers free tier: 100k requests/day, 10ms CPU/invocation, 15min wall-clock for scheduled triggers.
+- D1 free tier: 100k row writes/day, 5M reads/day, 5GB storage. Estimated usage: ~10k–15k writes/day.
 
 ## Deployment
 
 - Frontend: GitHub Pages, deployed verbatim from `frontend/` with no build step.
-- Worker: `*.workers.dev`, deployed via `wrangler deploy`. Bindings (KV + D1) auto-created by `ensure-bindings.mjs` on each deploy; migrations applied in order.
+- Worker: `*.workers.dev`, deployed via `wrangler deploy`. D1 auto-created by `ensure-bindings.mjs` on each deploy; migrations applied in order.

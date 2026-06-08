@@ -4,9 +4,10 @@ import type { Env } from './types';
 
 type JsonValue = null | boolean | number | string | JsonValue[] | { [k: string]: JsonValue };
 
-export function json(req: Request, env: Env, status: number, body: JsonValue): Response {
+export function json(req: Request, env: Env, status: number, body: JsonValue, extra: Record<string, string> = {}): Response {
   const headers = new Headers(corsHeaders(req, env));
   headers.set('Content-Type', JSON_CT);
+  for (const [k, v] of Object.entries(extra)) headers.set(k, v);
   return new Response(JSON.stringify(body), { status, headers });
 }
 

@@ -1,4 +1,5 @@
 import type { Vessel } from './types';
+import type { BoundingBox } from './aisstream';
 
 export type VesselCategory = 'cargo' | 'tanker' | 'passenger' | 'ferry' | 'tug' | 'fishing' | 'pleasure' | 'unknown';
 
@@ -12,6 +13,19 @@ export function vesselCategory(typeCode: number | null): VesselCategory {
   if (typeCode === 30) return 'fishing';
   if (typeCode >= 40 && typeCode <= 49) return 'ferry';
   return 'unknown';
+}
+
+// Returns true if the point falls inside the box [[sw_lat,sw_lon],[ne_lat,ne_lon]]
+export function pointInBox(lat: number, lon: number, box: BoundingBox): boolean {
+  return lat >= box[0][0] && lat <= box[1][0] && lon >= box[0][1] && lon <= box[1][1];
+}
+
+// Large-vessel gate for the local tier: cargo/tanker, or passenger/cruise >=50m, or any vessel >=50m
+export function isLargeVessel(vesselType: number | null, length: number | null): boolean {
+  if (vesselType !== null && vesselType >= 70 && vesselType <= 89) return true;
+  if (vesselType !== null && vesselType >= 60 && vesselType <= 69 && length !== null && length >= 50) return true;
+  if (length !== null && length >= 50) return true;
+  return false;
 }
 
 // aisstream message shapes — only fields we actually use
@@ -51,7 +65,7 @@ export function parsePositionReport(msg: AisPositionReport, nowMs: number): Part
     lat: latitude,
     lon: longitude,
     speed: Sog,
-    heading: TrueHeading === 511 ? null : TrueHeading, // 511 = not available per AIS spec
+    heading: TrueHeading === 511 ? null : TrueHeading,
     updated: nowMs,
   };
 }

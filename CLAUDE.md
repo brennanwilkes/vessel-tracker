@@ -21,12 +21,13 @@ See `frontend/CLAUDE.md`, `worker/CLAUDE.md`, `model/CLAUDE.md` for subsystem de
 - **Worker** → `*.workers.dev` (deploy-worker.yml, path-filtered to `worker/**`)
 - No PR gate workflow — single engineer.
 - Required GitHub secrets: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `AISSTREAM_API_KEY`
-- On first push to main touching `worker/`, CI auto-creates the KV namespace + D1 database and applies all pending migrations. Nothing in the Cloudflare dashboard needs to be touched manually.
+- On first push to main touching `worker/`, CI auto-creates the D1 database and applies all pending migrations. Nothing in the Cloudflare dashboard needs to be touched manually.
 
 ## Milestones
 
-- **M1 (current):** Live map + vessel list, deployed. Sightings recorded from day one.
-- **M2:** Viewshed calibration — restrict shown vessels to those actually visible from the window.
+- **M1:** Live map + vessel list, deployed. Sightings recorded from day one.
+- **M2 (current):** D1-only rebuild — three-tier tracking, event-based positions, trails, Settings tab.
+- **M3:** Viewshed calibration — restrict shown vessels to those actually visible from the window.
 - **M3:** AR camera overlay — project vessel labels using device orientation.
 - **M4:** ONNX boat detector — "where is the boat in this frame" → match to AIS contact.
 
