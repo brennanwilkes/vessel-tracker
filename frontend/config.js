@@ -13,7 +13,7 @@ export const VIEWSHEDS = [
 ];
 
 // Direct view: vessels visible from the apartment window (matches worker DIRECT_BOUNDING_BOX)
-export const DIRECT_BOUNDING_BOX = { sw: [48.054, -123.70], ne: [48.54, -123.02] };
+export const DIRECT_BOUNDING_BOX = { sw: [48.070, -123.70], ne: [48.524, -123.02] };
 
 // Local area: all of Vancouver Island + waterways (matches worker LOCAL_BOUNDING_BOX)
 export const LOCAL_BOUNDING_BOX = { sw: [47.8, -128.7], ne: [51.2, -122.5] };
@@ -31,9 +31,9 @@ export const TRAIL_TTL_MS = 120_000;
 export const EXTENTS = ['direct', 'local', 'global'];
 
 export const TIER_STYLE = {
-  direct: { color: '#17c3d4', opacity: 0.85, weight: 3 },
-  local:  { color: '#4a9eff', opacity: 0.55, weight: 2.5 },
-  global: { color: '#5b7d98', opacity: 0.35, weight: 2 },
+  direct: { opacity: 0.45, weight: 1.5 },
+  local:  { opacity: 0.25, weight: 1.5 },
+  global: { opacity: 0.15, weight: 1 },
 };
 
 export const DEFAULT_EXTENT_FILTERS = { direct: true, local: true, global: true };

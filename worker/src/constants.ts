@@ -3,8 +3,8 @@ export const JSON_CT = 'application/json; charset=utf-8';
 // Direct view: vessels visble from the apartment window.
 // No size filter — everything in this box gets tracked and rendered.
 export const DIRECT_BOUNDING_BOX: [[number, number], [number, number]] = [
-  [48.054, -123.70],
-  [48.54, -123.02],
+  [48.070, -123.70],
+  [48.524, -123.02],
 ];
 
 // Local area: all of Vancouver Island + waterways + open Pacific.

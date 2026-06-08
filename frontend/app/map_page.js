@@ -148,20 +148,22 @@ function removeTrailLayers(mmsi) {
   }
 }
 
-function drawTrail(mmsi, points, token) {
+function drawTrail(vessel, points, token) {
   if (token !== trailReqToken) return;
   if (map === null) return;
 
+  const mmsi = vessel.mmsi;
   removeTrailLayers(mmsi);
   if (points.length === 0) return;
 
+  const color = vesselColor(vessel);
   const segments = segmentsByTier(points);
   const layers = [];
 
   for (const seg of segments) {
     const style = TIER_STYLE[seg.tier];
     const layer = L.polyline(seg.pts, {
-      color: style.color,
+      color,
       weight: style.weight,
       opacity: 0,
       className: 'vessel-trail',
@@ -194,7 +196,7 @@ async function scheduleTrails(visibleVessels, token) {
 
   for (const vessel of visibleVessels) {
     if (token !== trailReqToken) break;
-    getTrail(vessel.mmsi, wantedTiers).then(points => drawTrail(vessel.mmsi, points, token));
+    getTrail(vessel.mmsi, wantedTiers).then(points => drawTrail(vessel, points, token));
   }
 }
 

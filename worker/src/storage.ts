@@ -44,14 +44,31 @@ export interface PositionInsert {
   tier: Tier;
 }
 
+const MMSI_CHUNK = 99; // D1 caps bound parameters per statement at 100
+
 export async function loadVesselStates(env: Env, mmsis: number[]): Promise<Map<number, VesselState>> {
   if (mmsis.length === 0) return new Map();
-  const placeholders = mmsis.map((_, i) => `?${i + 1}`).join(',');
-  const result = await env.VESSELS_DB
-    .prepare(`SELECT mmsi,last_lat,last_lon,last_pos_ts,last_seen,of_interest,max_extent FROM vessels WHERE mmsi IN (${placeholders})`)
-    .bind(...mmsis)
-    .all<VesselState>();
-  return new Map(result.results.map(r => [r.mmsi, r]));
+
+  const chunks: number[][] = [];
+  for (let i = 0; i < mmsis.length; i += MMSI_CHUNK) {
+    chunks.push(mmsis.slice(i, i + MMSI_CHUNK));
+  }
+
+  const stmts = chunks.map(chunk => {
+    const placeholders = chunk.map((_, i) => `?${i + 1}`).join(',');
+    return env.VESSELS_DB
+      .prepare(`SELECT mmsi,last_lat,last_lon,last_pos_ts,last_seen,of_interest,max_extent FROM vessels WHERE mmsi IN (${placeholders})`)
+      .bind(...chunk);
+  });
+
+  const results = await env.VESSELS_DB.batch<VesselState>(stmts);
+  const map = new Map<number, VesselState>();
+  for (const result of results) {
+    for (const row of result.results) {
+      map.set(row.mmsi, row);
+    }
+  }
+  return map;
 }
 
 export async function commitScan(env: Env, vessels: VesselUpsert[], positions: PositionInsert[]): Promise<void> {

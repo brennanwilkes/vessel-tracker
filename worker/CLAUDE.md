@@ -53,7 +53,7 @@ Drop a new `NNN_my_change.sql` file in `worker/migrations/`. On next push to mai
 
 ## Bounding boxes (in constants.ts)
 
-- `DIRECT_BOUNDING_BOX` — apartment window view: `[[48.054,-123.70],[48.54,-123.02]]`
+- `DIRECT_BOUNDING_BOX` — apartment window view: `[[48.070,-123.70],[48.524,-123.02]]`
 - `LOCAL_BOUNDING_BOX` — Vancouver Island + waterways: `[[47.8,-128.7],[51.2,-122.5]]`
 - `GLOBAL_BOUNDING_BOX` — near-global, paired with FiltersShipMMSI for daily scan
 

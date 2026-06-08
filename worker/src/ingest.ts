@@ -43,7 +43,7 @@ export async function runDirectScan(env: Env): Promise<void> {
   });
 
   if (vessels.length === 0) {
-    console.warn('[ingest] direct scan — 0 vessels');
+    console.warn('[ingest] direct scan — 0 vessels heard');
     return;
   }
 
@@ -51,13 +51,14 @@ export async function runDirectScan(env: Env): Promise<void> {
   const nowMs = Date.now();
   const upserts: VesselUpsert[] = [];
   const positions: PositionInsert[] = [];
+  let nMoved = 0, nHeartbeat = 0, nSkipped = 0;
 
   for (const v of vessels) {
     const prev = existing.get(v.mmsi);
     const moved = hasMoved(v, prev, 'direct');
     const heartbeat = !moved && (prev === undefined || nowMs - prev.last_seen >= HEARTBEAT_MS);
 
-    if (!moved && !heartbeat) continue;
+    if (!moved && !heartbeat) { nSkipped++; continue; }
 
     const firstDirect = (prev === undefined || prev.of_interest === 0) ? nowMs : null;
 
@@ -80,12 +81,16 @@ export async function runDirectScan(env: Env): Promise<void> {
     });
 
     if (moved) {
+      nMoved++;
       positions.push({ mmsi: v.mmsi, lat: v.lat, lon: v.lon, speed: v.speed, heading: v.heading, ts: nowMs, tier: 'direct' });
+    } else {
+      nHeartbeat++;
     }
   }
 
+  console.log(`[ingest] direct scan — ${vessels.length} heard | ${nMoved} moved, ${nHeartbeat} heartbeat, ${nSkipped} no-change`);
   await commitScan(env, upserts, positions);
-  console.log(`[ingest] direct scan done — ${vessels.length} heard, ${upserts.length} writes (${positions.length} pos) in ${Date.now() - start}ms`);
+  console.log(`[ingest] direct scan done — ${upserts.length} writes (${positions.length} pos) in ${Date.now() - start}ms`);
 }
 
 export async function runLocalScan(env: Env): Promise<void> {
@@ -99,7 +104,7 @@ export async function runLocalScan(env: Env): Promise<void> {
   });
 
   if (vessels.length === 0) {
-    console.warn('[ingest] local scan — 0 vessels');
+    console.warn('[ingest] local scan — 0 vessels heard');
     return;
   }
 
@@ -107,14 +112,17 @@ export async function runLocalScan(env: Env): Promise<void> {
   const nowMs = Date.now();
   const upserts: VesselUpsert[] = [];
   const positions: PositionInsert[] = [];
+  let nFiltered = 0, nMoved = 0, nHeartbeat = 0, nSkipped = 0;
+  let nInDirect = 0;
 
   for (const v of vessels) {
     const prev = existing.get(v.mmsi);
 
-    // Skip small, untracked vessels — we don't want to store local harbor traffic
-    if (!isLargeVessel(v.vesselType, v.length) && prev === undefined) continue;
+    if (!isLargeVessel(v.vesselType, v.length) && prev === undefined) { nFiltered++; continue; }
 
     const inDirect = pointInBox(v.lat, v.lon, DIRECT_BOUNDING_BOX);
+    if (inDirect) nInDirect++;
+
     const of_interest = inDirect || (prev !== undefined && prev.of_interest === 1) ? 1 : 0;
     const firstDirect = inDirect && (prev === undefined || prev.of_interest === 0) ? nowMs : null;
 
@@ -125,7 +133,7 @@ export async function runLocalScan(env: Env): Promise<void> {
     const moved = hasMoved(v, prev, tier);
     const heartbeat = !moved && (prev === undefined || nowMs - prev.last_seen >= HEARTBEAT_MS);
 
-    if (!moved && !heartbeat) continue;
+    if (!moved && !heartbeat) { nSkipped++; continue; }
 
     upserts.push({
       mmsi: v.mmsi,
@@ -146,12 +154,19 @@ export async function runLocalScan(env: Env): Promise<void> {
     });
 
     if (moved) {
+      nMoved++;
       positions.push({ mmsi: v.mmsi, lat: v.lat, lon: v.lon, speed: v.speed, heading: v.heading, ts: nowMs, tier });
+    } else {
+      nHeartbeat++;
     }
   }
 
+  console.log(
+    `[ingest] local scan — ${vessels.length} heard | ${nFiltered} filtered (small/untracked), ${nInDirect} in direct box` +
+    ` | ${nMoved} moved, ${nHeartbeat} heartbeat, ${nSkipped} no-change`
+  );
   await commitScan(env, upserts, positions);
-  console.log(`[ingest] local scan done — ${vessels.length} heard, ${upserts.length} writes (${positions.length} pos) in ${Date.now() - start}ms`);
+  console.log(`[ingest] local scan done — ${upserts.length} writes (${positions.length} pos) in ${Date.now() - start}ms`);
 }
 
 export async function runGlobalScan(env: Env): Promise<void> {
@@ -174,7 +189,7 @@ export async function runGlobalScan(env: Env): Promise<void> {
   });
 
   if (vessels.length === 0) {
-    console.log('[ingest] global scan — 0 vessels heard');
+    console.log(`[ingest] global scan — 0 of ${mmsis.length} queried vessels heard (outside coverage or not transmitting)`);
     return;
   }
 
@@ -182,10 +197,13 @@ export async function runGlobalScan(env: Env): Promise<void> {
   const nowMs = Date.now();
   const upserts: VesselUpsert[] = [];
   const positions: PositionInsert[] = [];
+  let nMoved = 0, nHeartbeat = 0, nSkipped = 0;
+  const tierCounts: Record<Tier, number> = { direct: 0, local: 0, global: 0 };
 
   for (const v of vessels) {
     const prev = existing.get(v.mmsi);
     const tier = tierOf(v.lat, v.lon);
+    tierCounts[tier]++;
 
     const prevExtent: MaxExtent = prev?.max_extent ?? 'direct';
     const max_extent = tier === 'global' ? widenExtent(prevExtent, 'global') : prevExtent;
@@ -197,7 +215,7 @@ export async function runGlobalScan(env: Env): Promise<void> {
     const moved = hasMoved(v, prev, tier);
     const heartbeat = !moved && (prev === undefined || nowMs - prev.last_seen >= HEARTBEAT_MS);
 
-    if (!moved && !heartbeat) continue;
+    if (!moved && !heartbeat) { nSkipped++; continue; }
 
     upserts.push({
       mmsi: v.mmsi,
@@ -218,10 +236,18 @@ export async function runGlobalScan(env: Env): Promise<void> {
     });
 
     if (moved) {
+      nMoved++;
       positions.push({ mmsi: v.mmsi, lat: v.lat, lon: v.lon, speed: v.speed, heading: v.heading, ts: nowMs, tier });
+    } else {
+      nHeartbeat++;
     }
   }
 
+  console.log(
+    `[ingest] global scan — ${vessels.length}/${mmsis.length} heard` +
+    ` | by zone: ${tierCounts.direct} direct, ${tierCounts.local} local, ${tierCounts.global} global` +
+    ` | ${nMoved} moved, ${nHeartbeat} heartbeat, ${nSkipped} no-change`
+  );
   await commitScan(env, upserts, positions);
-  console.log(`[ingest] global scan done — ${vessels.length} heard, ${upserts.length} writes (${positions.length} pos) in ${Date.now() - start}ms`);
+  console.log(`[ingest] global scan done — ${upserts.length} writes (${positions.length} pos) in ${Date.now() - start}ms`);
 }
