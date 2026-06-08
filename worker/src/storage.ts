@@ -157,7 +157,7 @@ export async function commitScan(env: Env, vessels: VesselUpsert[], positions: P
 // Only updates rows that already exist AND are still missing static fields — avoids
 // burning write quota on rows that are already fully enriched.
 // Also promotes of_interest=1 if the vessel now qualifies as large (cargo/tanker/>=50m),
-// covering the case where a position-only row was created before static data arrived.
+// so it gets included in the global scan even if static data arrived after first position.
 export async function enrichStaticData(env: Env, updates: StaticUpdate[]): Promise<void> {
   if (updates.length === 0) return;
   const stmts = updates.map(u =>
@@ -190,7 +190,7 @@ export async function getCurrentVessels(env: Env, ttlMs: number, globalTtlMs: nu
       `SELECT mmsi,name,vessel_type,length,destination,
               last_lat AS lat,last_lon AS lon,last_speed AS speed,last_heading AS heading,
               last_pos_ts,last_seen,max_extent,first_direct_at,direct_entry_count
-       FROM vessels WHERE of_interest = 1
+       FROM vessels WHERE of_interest = 1 AND first_direct_at IS NOT NULL
          AND CASE WHEN max_extent = 'global' THEN last_seen >= ?2 ELSE last_seen >= ?1 END
        ORDER BY last_seen DESC`
     )
