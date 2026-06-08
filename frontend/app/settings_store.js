@@ -20,7 +20,7 @@ function loadFilters(key, defaults, keys) {
 
 let state = {
   extent: loadFilters(EXTENT_KEY, DEFAULT_EXTENT_FILTERS, EXTENTS),
-  trail:  loadFilters(TRAIL_KEY,  DEFAULT_TRAIL_FILTERS,  TIERS),
+  trail:  loadFilters(TRAIL_KEY,  DEFAULT_TRAIL_FILTERS,  EXTENTS),
 };
 
 const subscribers = new Set();

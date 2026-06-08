@@ -40,8 +40,12 @@ export const PHANTOM_STALL_MS     = 20 * 60 * 1000;
 // How long a stationary vessel can go without a heartbeat last_seen update (ms)
 export const HEARTBEAT_MS = 10 * 60 * 1000;
 
-// Max age before a vessel is dropped from the /current response
-export const LIVE_TTL_MS = 90 * 60 * 1000;
+// Max age before a vessel is dropped from the /current response.
+// Direct and local vessels update every 1-5 min, so 90 min is generous.
+// Global vessels update once daily at 6am — keep them visible for 25h so
+// they persist through the full gap between scans.
+export const LIVE_TTL_MS        = 90 * 60 * 1000;
+export const LIVE_TTL_GLOBAL_MS = 25 * 60 * 60 * 1000;
 
 // Drain windows per tier (ms). Direct cron is every 1 min — leave headroom.
 export const DIRECT_DRAIN_MS  = 45_000;

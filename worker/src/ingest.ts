@@ -88,6 +88,7 @@ export async function runDirectScan(env: Env): Promise<void> {
 
     const firstDirect = (prev === undefined || prev.of_interest === 0) ? nowMs : null;
     const direct_entry_count = computeDirectEntryCount(prev, 'direct');
+    const max_extent: MaxExtent = prev?.max_extent ?? 'direct';
 
     upserts.push({
       mmsi: v.mmsi,
@@ -101,7 +102,7 @@ export async function runDirectScan(env: Env): Promise<void> {
       heading: v.heading,
       ts: nowMs,
       of_interest: 1,
-      max_extent: 'direct',
+      max_extent,
       first_direct_at: firstDirect,
       direct_entry_count,
       moved,

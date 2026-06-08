@@ -1,20 +1,15 @@
-import { EXTENTS, TIERS } from '../config.js';
+import { EXTENTS } from '../config.js';
 import { subscribe, getSettings, setExtentFilter, setTrailFilter } from './settings_store.js';
 
-const EXTENT_LABELS = {
+const CATEGORY_LABELS = {
   local_boat:       'Local Boats',
   passing_through:  'Vessels Passing Through',
   distant_visitor:  'Distant Visitors',
 };
 
-const TRAIL_LABELS = {
-  direct: 'Direct View',
-  local:  'Local Area',
-  global: 'Global',
-};
-
 let container = null;
 let unsubscribe = null;
+let clickHandler = null;
 
 function renderToggles() {
   if (container === null) return;
@@ -32,18 +27,18 @@ function renderToggles() {
 function buildHTML() {
   const settings = getSettings();
 
-  const extentRows = EXTENTS.map(tier => {
-    const on = settings.extent[tier];
-    return `<button class="settings-toggle${on ? ' on' : ''}" data-section="extent" data-tier="${tier}" role="switch" aria-checked="${on}">
-      <span class="toggle-label">${EXTENT_LABELS[tier]}</span>
+  const extentRows = EXTENTS.map(cat => {
+    const on = settings.extent[cat];
+    return `<button class="settings-toggle${on ? ' on' : ''}" data-section="extent" data-tier="${cat}" role="switch" aria-checked="${on}">
+      <span class="toggle-label">${CATEGORY_LABELS[cat]}</span>
       <span class="toggle-track"><span class="toggle-thumb"></span></span>
     </button>`;
   }).join('');
 
-  const trailRows = TIERS.map(tier => {
-    const on = settings.trail[tier];
-    return `<button class="settings-toggle${on ? ' on' : ''}" data-section="trail" data-tier="${tier}" role="switch" aria-checked="${on}">
-      <span class="toggle-label">${TRAIL_LABELS[tier]}</span>
+  const trailRows = EXTENTS.map(cat => {
+    const on = settings.trail[cat];
+    return `<button class="settings-toggle${on ? ' on' : ''}" data-section="trail" data-tier="${cat}" role="switch" aria-checked="${on}">
+      <span class="toggle-label">${CATEGORY_LABELS[cat]}</span>
       <span class="toggle-track"><span class="toggle-thumb"></span></span>
     </button>`;
   }).join('');
@@ -59,7 +54,7 @@ function buildHTML() {
       </div>
 
       <div class="settings-card">
-        <div class="settings-card-title">Trail Tiers</div>
+        <div class="settings-card-title">Show Trails For</div>
         <div class="settings-toggles">${trailRows}</div>
       </div>
     </div>
@@ -70,7 +65,7 @@ export function mount(root) {
   container = root;
   container.innerHTML = buildHTML();
 
-  container.addEventListener('click', e => {
+  clickHandler = e => {
     const btn = e.target.closest('.settings-toggle');
     if (btn === null) return;
     const section = btn.dataset.section;
@@ -81,12 +76,14 @@ export function mount(root) {
     } else {
       setTrailFilter(tier, !currentlyOn);
     }
-  });
+  };
+  container.addEventListener('click', clickHandler);
 
   unsubscribe = subscribe(() => renderToggles());
 }
 
 export function unmount() {
   if (unsubscribe !== null) { unsubscribe(); unsubscribe = null; }
+  if (clickHandler !== null) { container.removeEventListener('click', clickHandler); clickHandler = null; }
   container = null;
 }

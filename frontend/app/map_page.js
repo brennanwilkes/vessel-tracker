@@ -1,6 +1,6 @@
-import { VIEWSHEDS, DIRECT_BOUNDING_BOX, MOVING_SPEED_KN, TIERS, TIER_STYLE } from '../config.js';
+import { VIEWSHEDS, DIRECT_BOUNDING_BOX, MOVING_SPEED_KN, TIER_STYLE } from '../config.js';
 import { subscribe as subscribeVessels } from './store.js';
-import { subscribe as subscribeSettings, getSettings, passesExtentFilter } from './settings_store.js';
+import { subscribe as subscribeSettings, getSettings, passesExtentFilter, vesselCategory } from './settings_store.js';
 import { haversineNm } from './geo.js';
 import { vesselColor, vesselCategoryLabel, vesselFlag } from './vessels.js';
 import { getTrail, pruneTrails } from './trails.js';
@@ -269,11 +269,12 @@ async function scheduleTrails(visibleVessels, token) {
     if (!liveSet.has(mmsi)) removeTrailLayers(mmsi);
   }
 
-  const wantedTiers = TIERS.filter(t => lastSettings.trail[t]);
+  const TRAIL_TIERS = ['direct', 'local'];
 
   for (const vessel of visibleVessels) {
     if (token !== trailReqToken) break;
-    getTrail(vessel.mmsi, wantedTiers).then(points => drawTrail(vessel, points, token));
+    if (!lastSettings.trail[vesselCategory(vessel)]) continue;
+    getTrail(vessel.mmsi, TRAIL_TIERS).then(points => drawTrail(vessel, points, token));
   }
 }
 

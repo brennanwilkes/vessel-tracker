@@ -38,4 +38,4 @@ export const TIER_STYLE = {
 };
 
 export const DEFAULT_EXTENT_FILTERS = { local_boat: true, passing_through: true, distant_visitor: true };
-export const DEFAULT_TRAIL_FILTERS  = { direct: true, local: true, global: false };
+export const DEFAULT_TRAIL_FILTERS  = { local_boat: true, passing_through: true, distant_visitor: false };

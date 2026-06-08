@@ -167,17 +167,20 @@ export async function enrichStaticData(env: Env, updates: StaticUpdate[]): Promi
   await env.VESSELS_DB.batch(stmts);
 }
 
-export async function getCurrentVessels(env: Env, ttlMs: number): Promise<VesselRow[]> {
-  const cutoff = Date.now() - ttlMs;
+export async function getCurrentVessels(env: Env, ttlMs: number, globalTtlMs: number): Promise<VesselRow[]> {
+  const now = Date.now();
+  const cutoff = now - ttlMs;
+  const globalCutoff = now - globalTtlMs;
   const result = await env.VESSELS_DB
     .prepare(
       `SELECT mmsi,name,vessel_type,length,destination,
               last_lat AS lat,last_lon AS lon,last_speed AS speed,last_heading AS heading,
               last_pos_ts,last_seen,max_extent,first_direct_at,direct_entry_count
-       FROM vessels WHERE of_interest = 1 AND last_seen >= ?1
+       FROM vessels WHERE of_interest = 1
+         AND CASE WHEN max_extent = 'global' THEN last_seen >= ?2 ELSE last_seen >= ?1 END
        ORDER BY last_seen DESC`
     )
-    .bind(cutoff)
+    .bind(cutoff, globalCutoff)
     .all<VesselRow>();
   return result.results;
 }
