@@ -240,6 +240,27 @@ function drawTrail(vessel, points, token) {
     ? chronological
     : [...chronological, { ...last, lat: vessel.lat, lon: vessel.lon }];
 
+  // When AIS reports no true heading, infer direction of travel from the last
+  // two distinct trail points and rotate the arrow to match.
+  if (vessel.heading === null && isMoving(vessel)) {
+    const marker = markers.get(mmsi);
+    if (marker !== undefined) {
+      const head = allPoints[allPoints.length - 1];
+      let trailHeading = null;
+      for (let i = allPoints.length - 2; i >= 0; i--) {
+        const p = allPoints[i];
+        if (p.lat !== head.lat || p.lon !== head.lon) {
+          trailHeading = bearingDeg(p.lat, p.lon, head.lat, head.lon);
+          break;
+        }
+      }
+      if (trailHeading !== null && trailHeading !== marker._effectiveHeading) {
+        marker._effectiveHeading = trailHeading;
+        marker.setIcon(makeVesselIcon(vessel, trailHeading));
+      }
+    }
+  }
+
   const color = vesselColor(vessel);
   const segments = segmentsByTier(allPoints);
   const layers = [];
