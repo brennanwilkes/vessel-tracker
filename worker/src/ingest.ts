@@ -29,7 +29,7 @@ function assessMovement(v: Vessel, prev: VesselState | undefined, tier: Tier, no
   const dist = haversineNm(prev.last_lat, prev.last_lon, v.lat, v.lon);
   if (tier === 'direct' && v.speed !== null && v.speed >= PHANTOM_SPEED_MIN_KN) {
     // A genuinely moving vessel at PHANTOM_SPEED_MIN_KN crosses MOVE_THRESHOLD_NM every
-    // ~2 min, so no position row in PHANTOM_STALL_MS means the speed is stale/phantom.
+    // ~2 min, so no position row in PHANTOM_STALL_MS (15 min = 7× that) means phantom.
     const posAge = prev.last_pos_ts !== null ? nowMs - prev.last_pos_ts : null;
     if (posAge !== null && posAge > PHANTOM_STALL_MS) {
       const alreadyCorrected = prev.last_speed === 0;

@@ -35,7 +35,7 @@ export const MOVE_THRESHOLD_NM: Record<string, number> = {
 // A genuine 1.5-kn vessel crosses MOVE_THRESHOLD_NM.direct every ~2 min, so 5 min gives
 // 2.5× headroom before we'd incorrectly flag a legitimately slow vessel.
 export const PHANTOM_SPEED_MIN_KN = 1.5;
-export const PHANTOM_STALL_MS     = 5 * 60 * 1000;
+export const PHANTOM_STALL_MS     = 15 * 60 * 1000;
 
 // How long a stationary vessel can go without a heartbeat last_seen update (ms)
 export const HEARTBEAT_MS = 10 * 60 * 1000;
