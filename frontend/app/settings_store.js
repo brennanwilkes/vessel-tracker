@@ -51,6 +51,12 @@ export function setTrailFilter(tier, on) {
   notify();
 }
 
+export function vesselCategory(vessel) {
+  if (vessel.max_extent === 'direct' || vessel.direct_entry_count >= 3) return 'local_boat';
+  if (vessel.max_extent === 'global') return 'distant_visitor';
+  return 'passing_through';
+}
+
 export function passesExtentFilter(vessel, extentFilters) {
-  return extentFilters[vessel.max_extent] === true;
+  return extentFilters[vesselCategory(vessel)] === true;
 }

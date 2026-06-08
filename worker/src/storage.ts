@@ -15,6 +15,7 @@ export interface VesselState {
   last_seen: number;
   of_interest: number;
   max_extent: MaxExtent;
+  direct_entry_count: number;
 }
 
 export interface VesselUpsert {
@@ -31,6 +32,7 @@ export interface VesselUpsert {
   of_interest: number;
   max_extent: MaxExtent;
   first_direct_at: number | null;
+  direct_entry_count: number;
   moved: boolean;
   heartbeat: boolean;
   forceUpsert: boolean;
@@ -59,7 +61,7 @@ export async function loadVesselStates(env: Env, mmsis: number[]): Promise<Map<n
   const stmts = chunks.map(chunk => {
     const placeholders = chunk.map((_, i) => `?${i + 1}`).join(',');
     return env.VESSELS_DB
-      .prepare(`SELECT mmsi,last_lat,last_lon,last_speed,last_pos_ts,last_seen,of_interest,max_extent FROM vessels WHERE mmsi IN (${placeholders})`)
+      .prepare(`SELECT mmsi,last_lat,last_lon,last_speed,last_pos_ts,last_seen,of_interest,max_extent,direct_entry_count FROM vessels WHERE mmsi IN (${placeholders})`)
       .bind(...chunk);
   });
 
@@ -80,47 +82,49 @@ export async function commitScan(env: Env, vessels: VesselUpsert[], positions: P
     if (v.moved) {
       stmts.push(
         env.VESSELS_DB.prepare(
-          `INSERT INTO vessels (mmsi,name,vessel_type,length,destination,last_lat,last_lon,last_speed,last_heading,last_pos_ts,last_seen,first_seen,of_interest,max_extent,first_direct_at,times_seen)
-           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?10,?10,?11,?12,?13,1)
+          `INSERT INTO vessels (mmsi,name,vessel_type,length,destination,last_lat,last_lon,last_speed,last_heading,last_pos_ts,last_seen,first_seen,of_interest,max_extent,first_direct_at,direct_entry_count,times_seen)
+           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?10,?10,?11,?12,?13,?14,1)
            ON CONFLICT(mmsi) DO UPDATE SET
-             name            = COALESCE(?2, name),
-             vessel_type     = COALESCE(?3, vessel_type),
-             length          = COALESCE(?4, length),
-             destination     = COALESCE(?5, destination),
-             last_lat        = ?6,
-             last_lon        = ?7,
-             last_speed      = ?8,
-             last_heading    = ?9,
-             last_pos_ts     = ?10,
-             last_seen       = ?10,
-             of_interest     = MAX(of_interest, ?11),
-             max_extent      = ?12,
-             first_direct_at = COALESCE(first_direct_at, ?13),
-             times_seen      = times_seen + 1`
+             name                = COALESCE(?2, name),
+             vessel_type         = COALESCE(?3, vessel_type),
+             length              = COALESCE(?4, length),
+             destination         = COALESCE(?5, destination),
+             last_lat            = ?6,
+             last_lon            = ?7,
+             last_speed          = ?8,
+             last_heading        = ?9,
+             last_pos_ts         = ?10,
+             last_seen           = ?10,
+             of_interest         = MAX(of_interest, ?11),
+             max_extent          = ?12,
+             first_direct_at     = COALESCE(first_direct_at, ?13),
+             direct_entry_count  = MAX(direct_entry_count, ?14),
+             times_seen          = times_seen + 1`
         ).bind(
           v.mmsi, v.name, v.vessel_type, v.length, v.destination,
           v.lat, v.lon, v.speed, v.heading, v.ts,
-          v.of_interest, v.max_extent, v.first_direct_at
+          v.of_interest, v.max_extent, v.first_direct_at, v.direct_entry_count
         )
       );
     } else if (v.heartbeat) {
       stmts.push(
         env.VESSELS_DB.prepare(
-          `INSERT INTO vessels (mmsi,name,vessel_type,length,destination,last_seen,first_seen,of_interest,max_extent,times_seen)
-           VALUES (?1,?2,?3,?4,?5,?6,?6,?7,?8,1)
+          `INSERT INTO vessels (mmsi,name,vessel_type,length,destination,last_seen,first_seen,of_interest,max_extent,direct_entry_count,times_seen)
+           VALUES (?1,?2,?3,?4,?5,?6,?6,?7,?8,?10,1)
            ON CONFLICT(mmsi) DO UPDATE SET
-             name            = COALESCE(?2, name),
-             vessel_type     = COALESCE(?3, vessel_type),
-             length          = COALESCE(?4, length),
-             destination     = COALESCE(?5, destination),
-             last_seen       = ?6,
-             of_interest     = MAX(of_interest, ?7),
-             max_extent      = ?8,
-             first_direct_at = COALESCE(first_direct_at, ?9),
-             times_seen      = times_seen + 1`
+             name               = COALESCE(?2, name),
+             vessel_type        = COALESCE(?3, vessel_type),
+             length             = COALESCE(?4, length),
+             destination        = COALESCE(?5, destination),
+             last_seen          = ?6,
+             of_interest        = MAX(of_interest, ?7),
+             max_extent         = ?8,
+             first_direct_at    = COALESCE(first_direct_at, ?9),
+             direct_entry_count = MAX(direct_entry_count, ?10),
+             times_seen         = times_seen + 1`
         ).bind(
           v.mmsi, v.name, v.vessel_type, v.length, v.destination,
-          v.ts, v.of_interest, v.max_extent, v.first_direct_at
+          v.ts, v.of_interest, v.max_extent, v.first_direct_at, v.direct_entry_count
         )
       );
     } else if (v.forceUpsert) {
@@ -169,7 +173,7 @@ export async function getCurrentVessels(env: Env, ttlMs: number): Promise<Vessel
     .prepare(
       `SELECT mmsi,name,vessel_type,length,destination,
               last_lat AS lat,last_lon AS lon,last_speed AS speed,last_heading AS heading,
-              last_pos_ts,last_seen,max_extent,first_direct_at
+              last_pos_ts,last_seen,max_extent,first_direct_at,direct_entry_count
        FROM vessels WHERE of_interest = 1 AND last_seen >= ?1
        ORDER BY last_seen DESC`
     )

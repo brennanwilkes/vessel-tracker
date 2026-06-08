@@ -49,6 +49,14 @@ function tierOf(lat: number, lon: number): Tier {
   return 'global';
 }
 
+function computeDirectEntryCount(prev: VesselState | undefined, currentTier: Tier): number {
+  const prevCount = prev?.direct_entry_count ?? 0;
+  if (currentTier !== 'direct') return prevCount;
+  const prevInDirect = prev !== undefined && prev.last_lat !== null && prev.last_lon !== null
+    && tierOf(prev.last_lat, prev.last_lon) === 'direct';
+  return prevInDirect ? prevCount : prevCount + 1;
+}
+
 export async function runDirectScan(env: Env): Promise<void> {
   const start = Date.now();
   console.log('[ingest] direct scan starting');
@@ -69,7 +77,7 @@ export async function runDirectScan(env: Env): Promise<void> {
   const nowMs = Date.now();
   const upserts: VesselUpsert[] = [];
   const positions: PositionInsert[] = [];
-  let nMoved = 0, nHeartbeat = 0, nSkipped = 0;
+  let nMoved = 0, nHeartbeat = 0, nPhantom = 0, nSkipped = 0;
 
   for (const v of vessels) {
     const prev = existing.get(v.mmsi);
@@ -79,6 +87,7 @@ export async function runDirectScan(env: Env): Promise<void> {
     if (!moved && !heartbeat && !forceUpsert) { nSkipped++; continue; }
 
     const firstDirect = (prev === undefined || prev.of_interest === 0) ? nowMs : null;
+    const direct_entry_count = computeDirectEntryCount(prev, 'direct');
 
     upserts.push({
       mmsi: v.mmsi,
@@ -94,6 +103,7 @@ export async function runDirectScan(env: Env): Promise<void> {
       of_interest: 1,
       max_extent: 'direct',
       first_direct_at: firstDirect,
+      direct_entry_count,
       moved,
       heartbeat,
       forceUpsert,
@@ -102,12 +112,15 @@ export async function runDirectScan(env: Env): Promise<void> {
     if (moved) {
       nMoved++;
       positions.push({ mmsi: v.mmsi, lat: v.lat, lon: v.lon, speed: effectiveSpeed, heading: v.heading, ts: nowMs, tier: 'direct' });
+    } else if (forceUpsert) {
+      nPhantom++;
+      console.log(`[ingest] phantom speed: mmsi=${v.mmsi} reported=${v.speed}kn, pos stale ${Math.round((nowMs - (prev!.last_pos_ts ?? 0)) / 60000)}min`);
     } else {
       nHeartbeat++;
     }
   }
 
-  console.log(`[ingest] direct scan — ${vessels.length} heard | ${nMoved} moved, ${nHeartbeat} heartbeat, ${nSkipped} no-change`);
+  console.log(`[ingest] direct scan — ${vessels.length} heard | ${nMoved} moved, ${nHeartbeat} heartbeat, ${nPhantom} phantom, ${nSkipped} no-change`);
   await commitScan(env, upserts, positions);
   await enrichStaticData(env, staticOnly);
   console.log(`[ingest] direct scan done — ${upserts.length} writes (${positions.length} pos), ${staticOnly.length} static-only enrichments in ${Date.now() - start}ms`);
@@ -133,7 +146,7 @@ export async function runLocalScan(env: Env): Promise<void> {
   const nowMs = Date.now();
   const upserts: VesselUpsert[] = [];
   const positions: PositionInsert[] = [];
-  let nFiltered = 0, nMoved = 0, nHeartbeat = 0, nSkipped = 0;
+  let nFiltered = 0, nMoved = 0, nHeartbeat = 0, nPhantom = 0, nSkipped = 0;
   let nInDirect = 0;
 
   for (const v of vessels) {
@@ -156,6 +169,8 @@ export async function runLocalScan(env: Env): Promise<void> {
 
     if (!moved && !heartbeat && !forceUpsert) { nSkipped++; continue; }
 
+    const direct_entry_count = computeDirectEntryCount(prev, tier);
+
     upserts.push({
       mmsi: v.mmsi,
       name: v.name,
@@ -170,6 +185,7 @@ export async function runLocalScan(env: Env): Promise<void> {
       of_interest,
       max_extent,
       first_direct_at: firstDirect,
+      direct_entry_count,
       moved,
       heartbeat,
       forceUpsert,
@@ -178,6 +194,9 @@ export async function runLocalScan(env: Env): Promise<void> {
     if (moved) {
       nMoved++;
       positions.push({ mmsi: v.mmsi, lat: v.lat, lon: v.lon, speed: effectiveSpeed, heading: v.heading, ts: nowMs, tier });
+    } else if (forceUpsert) {
+      nPhantom++;
+      console.log(`[ingest] phantom speed: mmsi=${v.mmsi} reported=${v.speed}kn, pos stale ${Math.round((nowMs - (prev!.last_pos_ts ?? 0)) / 60000)}min`);
     } else {
       nHeartbeat++;
     }
@@ -185,7 +204,7 @@ export async function runLocalScan(env: Env): Promise<void> {
 
   console.log(
     `[ingest] local scan — ${vessels.length} heard | ${nFiltered} filtered (small/untracked), ${nInDirect} in direct box` +
-    ` | ${nMoved} moved, ${nHeartbeat} heartbeat, ${nSkipped} no-change`
+    ` | ${nMoved} moved, ${nHeartbeat} heartbeat, ${nPhantom} phantom, ${nSkipped} no-change`
   );
   await commitScan(env, upserts, positions);
   await enrichStaticData(env, staticOnly);
@@ -221,7 +240,7 @@ export async function runGlobalScan(env: Env): Promise<void> {
   const nowMs = Date.now();
   const upserts: VesselUpsert[] = [];
   const positions: PositionInsert[] = [];
-  let nMoved = 0, nHeartbeat = 0, nSkipped = 0;
+  let nMoved = 0, nHeartbeat = 0, nPhantom = 0, nSkipped = 0;
   const tierCounts: Record<Tier, number> = { direct: 0, local: 0, global: 0 };
 
   for (const v of vessels) {
@@ -241,6 +260,8 @@ export async function runGlobalScan(env: Env): Promise<void> {
 
     if (!moved && !heartbeat && !forceUpsert) { nSkipped++; continue; }
 
+    const direct_entry_count = computeDirectEntryCount(prev, tier);
+
     upserts.push({
       mmsi: v.mmsi,
       name: v.name,
@@ -255,6 +276,7 @@ export async function runGlobalScan(env: Env): Promise<void> {
       of_interest,
       max_extent,
       first_direct_at: firstDirect,
+      direct_entry_count,
       moved,
       heartbeat,
       forceUpsert,
@@ -263,6 +285,9 @@ export async function runGlobalScan(env: Env): Promise<void> {
     if (moved) {
       nMoved++;
       positions.push({ mmsi: v.mmsi, lat: v.lat, lon: v.lon, speed: effectiveSpeed, heading: v.heading, ts: nowMs, tier });
+    } else if (forceUpsert) {
+      nPhantom++;
+      console.log(`[ingest] phantom speed: mmsi=${v.mmsi} reported=${v.speed}kn, pos stale ${Math.round((nowMs - (prev!.last_pos_ts ?? 0)) / 60000)}min`);
     } else {
       nHeartbeat++;
     }
@@ -271,7 +296,7 @@ export async function runGlobalScan(env: Env): Promise<void> {
   console.log(
     `[ingest] global scan — ${vessels.length}/${mmsis.length} heard` +
     ` | by zone: ${tierCounts.direct} direct, ${tierCounts.local} local, ${tierCounts.global} global` +
-    ` | ${nMoved} moved, ${nHeartbeat} heartbeat, ${nSkipped} no-change`
+    ` | ${nMoved} moved, ${nHeartbeat} heartbeat, ${nPhantom} phantom, ${nSkipped} no-change`
   );
   await commitScan(env, upserts, positions);
   await enrichStaticData(env, staticOnly);

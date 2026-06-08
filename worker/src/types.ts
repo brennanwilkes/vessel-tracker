@@ -37,6 +37,7 @@ export interface VesselRow {
   max_extent: MaxExtent;
   first_direct_at: number | null;
   times_seen: number;
+  direct_entry_count: number;
 }
 
 export interface StaticUpdate {

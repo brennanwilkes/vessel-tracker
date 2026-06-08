@@ -28,7 +28,7 @@ export const MOVING_SPEED_KN = 0.5;
 // Trail cache TTL — refetch only when older than this
 export const TRAIL_TTL_MS = 120_000;
 
-export const EXTENTS = ['direct', 'local', 'global'];
+export const EXTENTS = ['local_boat', 'passing_through', 'distant_visitor'];
 
 export const TIER_STYLE = {
   direct: { opacity: 0.25, weight: 1 },
@@ -36,5 +36,5 @@ export const TIER_STYLE = {
   global: { opacity: 0.25, weight: 1 },
 };
 
-export const DEFAULT_EXTENT_FILTERS = { direct: true, local: true, global: true };
+export const DEFAULT_EXTENT_FILTERS = { local_boat: true, passing_through: true, distant_visitor: true };
 export const DEFAULT_TRAIL_FILTERS  = { direct: true, local: true, global: false };

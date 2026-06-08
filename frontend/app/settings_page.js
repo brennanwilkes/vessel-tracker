@@ -2,9 +2,9 @@ import { EXTENTS } from '../config.js';
 import { subscribe, getSettings, setExtentFilter, setTrailFilter } from './settings_store.js';
 
 const EXTENT_LABELS = {
-  direct: 'Direct View',
-  local:  'Local Area',
-  global: 'Global',
+  local_boat:       'Local Boats',
+  passing_through:  'Vessels Passing Through',
+  distant_visitor:  'Distant Visitors',
 };
 
 const TRAIL_LABELS = {
@@ -53,8 +53,8 @@ function buildHTML() {
       <div class="settings-header">Settings</div>
 
       <div class="settings-card">
-        <div class="settings-card-title">Vessel Extent</div>
-        <div class="settings-card-hint">Every shown vessel has entered the direct view at least once</div>
+        <div class="settings-card-title">Vessel Type</div>
+        <div class="settings-card-hint">Local Boats: never left direct view, or re-entered 3+ times. Passing Through: seen outside direct view but not a regular. Distant Visitors: tracked globally.</div>
         <div class="settings-toggles">${extentRows}</div>
       </div>
 
