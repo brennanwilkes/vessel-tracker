@@ -1,0 +1,106 @@
+/* Map page: Leaflet container, overrides, vessel markers, home pulse, status chip */
+
+.map-page {
+  position: absolute;
+  inset: 0;
+}
+
+#leaflet-map {
+  width: 100%;
+  height: 100%;
+}
+
+/* ── Leaflet UI overrides ─────────────────────────────────────── */
+
+.leaflet-control-attribution {
+  font-size: 9px !important;
+  background: rgba(5, 12, 26, 0.75) !important;
+  color: var(--text-muted) !important;
+}
+
+.leaflet-control-attribution a { color: var(--text-secondary) !important; }
+
+.leaflet-control-zoom {
+  border: 1px solid var(--border-mid) !important;
+  box-shadow: none !important;
+}
+
+.leaflet-control-zoom a {
+  background: var(--bg-elevated) !important;
+  color: var(--text-secondary) !important;
+  border-bottom-color: var(--border) !important;
+  font-size: 16px !important;
+}
+
+/* ── Vessel marker ───────────────────────────────────────────── */
+
+.vessel-marker {
+  background: none;
+  border: none;
+  cursor: pointer;
+  overflow: visible;
+}
+
+/* ── Home pulse marker ───────────────────────────────────────── */
+
+.home-pulse-outer {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: rgba(23, 195, 212, 0.08);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: home-pulse 3s ease-in-out infinite;
+}
+
+.home-pulse-inner {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 10px var(--accent);
+}
+
+@keyframes home-pulse {
+  0%, 100% { transform: scale(1);   opacity: 0.8; }
+  50%       { transform: scale(1.3); opacity: 0.3; }
+}
+
+/* ── Live status chip ────────────────────────────────────────── */
+
+.map-status {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(10, 21, 38, 0.88);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid var(--border-mid);
+  border-radius: 20px;
+  padding: 5px 14px;
+  font-size: 11px;
+  font-family: var(--font-data);
+  color: var(--text-secondary);
+  z-index: 20;
+  white-space: nowrap;
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.map-status .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--green);
+  flex-shrink: 0;
+  animation: blink 2s step-end infinite;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1;   }
+  50%       { opacity: 0.2; }
+}

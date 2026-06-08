@@ -1,0 +1,17 @@
+{
+  "name": "vessel-tracker-api",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "ensure:bindings": "node scripts/ensure-bindings.mjs",
+    "types": "wrangler types",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250909.0",
+    "typescript": "5.9.3",
+    "wrangler": "4.65.0"
+  }
+}

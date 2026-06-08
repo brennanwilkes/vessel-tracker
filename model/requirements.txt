@@ -1,0 +1,5 @@
+# Pinned at M4 when training is first run
+# torch
+# torchvision
+# onnx
+# onnxruntime

@@ -1,0 +1,20 @@
+name = "vessel-tracker-api"
+main = "src/index.ts"
+compatibility_date = "2026-02-15"
+workers_dev = true
+minify = true
+
+[vars]
+ALLOWED_ORIGIN = "*"
+
+[triggers]
+crons = ["*/5 * * * *", "0 0 * * 0"]
+
+[[kv_namespaces]]
+binding = "SNAPSHOT_KV"
+id = "__KV_ID__"
+
+[[d1_databases]]
+binding = "VESSELS_DB"
+database_name = "vessel-tracker"
+database_id = "__D1_ID__"

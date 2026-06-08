@@ -1,0 +1,143 @@
+import { VIEWSHEDS } from '../config.js';
+import { subscribe } from './store.js';
+import { haversineNm, haversineKm } from './geo.js';
+
+// ── Constants ────────────────────────────────────────────────────────────────
+
+const HOME = VIEWSHEDS[0].home;
+const UNIT_KEY = 'vessel-tracker:unit';
+
+// ── State ────────────────────────────────────────────────────────────────────
+
+let unsubscribe = null;
+let container = null;
+let unitNm = localStorage.getItem(UNIT_KEY) !== 'km';
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function vesselCategoryLabel(vesselType) {
+  if (vesselType === null) return 'Unknown';
+  if (vesselType >= 70 && vesselType <= 79) return 'Cargo';
+  if (vesselType >= 80 && vesselType <= 89) return 'Tanker';
+  if (vesselType >= 60 && vesselType <= 69) return 'Passenger';
+  if (vesselType >= 40 && vesselType <= 49) return 'Ferry';
+  if (vesselType === 36 || vesselType === 37) return 'Pleasure';
+  if (vesselType >= 31 && vesselType <= 32) return 'Tug';
+  if (vesselType === 30) return 'Fishing';
+  return `Type ${vesselType}`;
+}
+
+function vesselColor(vesselType) {
+  if (vesselType === null) return '#3d5a73';
+  if (vesselType >= 70 && vesselType <= 79) return '#4a9eff';
+  if (vesselType >= 80 && vesselType <= 89) return '#ff6b35';
+  if (vesselType >= 60 && vesselType <= 69) return '#00e5a0';
+  if (vesselType >= 40 && vesselType <= 49) return '#00e5a0';
+  if (vesselType === 36 || vesselType === 37) return '#ff8fab';
+  if (vesselType >= 31 && vesselType <= 32) return '#c084fc';
+  if (vesselType === 30) return '#ffd700';
+  return '#3d5a73';
+}
+
+function vesselIconSvg(vesselType) {
+  const color = vesselColor(vesselType);
+  return `<svg viewBox="0 0 20 20" width="18" height="18">
+    <polygon points="10,1 17,17 10,13 3,17" fill="${color}" stroke="rgba(0,0,0,0.4)" stroke-width="1.5" stroke-linejoin="round"/>
+  </svg>`;
+}
+
+function distanceLabel(vessel) {
+  if (unitNm) {
+    const d = haversineNm(HOME.lat, HOME.lon, vessel.lat, vessel.lon);
+    return { value: d.toFixed(1), unit: 'nm' };
+  }
+  const d = haversineKm(HOME.lat, HOME.lon, vessel.lat, vessel.lon);
+  return { value: d.toFixed(1), unit: 'km' };
+}
+
+// ── Render ───────────────────────────────────────────────────────────────────
+
+function renderVessels(vessels, error) {
+  if (container === null) return;
+
+  if (error !== null) {
+    console.error('[list] poll error:', error);
+  }
+
+  const countEl = container.querySelector('.list-header-count');
+  if (countEl !== null) countEl.textContent = `${vessels.length} vessel${vessels.length !== 1 ? 's' : ''} in view`;
+
+  const listEl = container.querySelector('.vessel-list');
+  if (listEl === null) return;
+
+  if (error !== null) {
+    listEl.innerHTML = `<div class="state-error">Poll failed: ${error.message}</div>`;
+    return;
+  }
+
+  if (vessels.length === 0) {
+    listEl.innerHTML = `<div class="state-empty">No vessels currently in view</div>`;
+    return;
+  }
+
+  const sorted = [...vessels].sort((a, b) => {
+    const da = haversineNm(HOME.lat, HOME.lon, a.lat, a.lon);
+    const db = haversineNm(HOME.lat, HOME.lon, b.lat, b.lon);
+    return da - db;
+  });
+
+  listEl.innerHTML = sorted.map((v, i) => {
+    const dist = distanceLabel(v);
+    const category = vesselCategoryLabel(v.vesselType);
+    const color = vesselColor(v.vesselType);
+    const speed = v.speed !== null ? `${v.speed.toFixed(1)} kn` : '— kn';
+    const name = v.name ?? 'Unknown Vessel';
+
+    return `<div class="vessel-card" style="border-left-color:${color};animation-delay:${i * 30}ms" data-mmsi="${v.mmsi}">
+      <div class="vessel-card-icon">${vesselIconSvg(v.vesselType)}</div>
+      <div class="vessel-card-body">
+        <div class="vessel-card-name">${name}</div>
+        <div class="vessel-card-meta">${category}${v.destination ? ' · ' + v.destination : ''}</div>
+      </div>
+      <div class="vessel-card-right">
+        <div class="vessel-card-dist">${dist.value}<span class="unit">${dist.unit}</span></div>
+        <div class="vessel-card-speed">${speed}</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// ── Mount / unmount ──────────────────────────────────────────────────────────
+
+export function mount(root) {
+  container = root;
+
+  container.innerHTML = `
+    <div class="list-page">
+      <div class="list-header">
+        <div class="list-header-left">
+          <div class="list-header-title">Vessels</div>
+          <div class="list-header-count">—</div>
+        </div>
+        <button class="unit-toggle" id="unit-toggle">${unitNm ? 'nm' : 'km'}</button>
+      </div>
+      <div class="vessel-list"></div>
+    </div>
+  `;
+
+  container.querySelector('#unit-toggle').addEventListener('click', () => {
+    unitNm = !unitNm;
+    localStorage.setItem(UNIT_KEY, unitNm ? 'nm' : 'km');
+    container.querySelector('#unit-toggle').textContent = unitNm ? 'nm' : 'km';
+    // Re-render with current store state — subscribe callback handles it
+    unsubscribe();
+    unsubscribe = subscribe(renderVessels);
+  });
+
+  unsubscribe = subscribe(renderVessels);
+}
+
+export function unmount() {
+  if (unsubscribe !== null) { unsubscribe(); unsubscribe = null; }
+  container = null;
+}

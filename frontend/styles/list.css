@@ -1,0 +1,151 @@
+/* List page and vessel cards */
+
+.list-page {
+  position: absolute;
+  inset: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px 12px;
+  position: sticky;
+  top: 0;
+  background: var(--bg-base);
+  border-bottom: 1px solid var(--border);
+  z-index: 10;
+}
+
+.list-header-left {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.list-header-title {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.list-header-count {
+  font-family: var(--font-data);
+  font-size: 11px;
+  color: var(--accent);
+}
+
+.unit-toggle {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-mid);
+  border-radius: 20px;
+  padding: 6px 14px;
+  font-family: var(--font-ui);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.unit-toggle:active {
+  color: var(--accent);
+  border-color: var(--border-bright);
+}
+
+/* ── Vessel cards ────────────────────────────────────────────── */
+
+.vessel-list {
+  padding: 10px 14px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.vessel-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: 12px;
+  padding: 14px 16px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: background 0.15s;
+  animation: card-in 0.25s ease both;
+}
+
+.vessel-card:active { background: var(--bg-elevated); }
+
+@keyframes card-in {
+  from { opacity: 0; transform: translateY(5px); }
+  to   { opacity: 1; transform: translateY(0);   }
+}
+
+.vessel-card-icon {
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-elevated);
+}
+
+.vessel-card-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.vessel-card-name {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-bottom: 3px;
+}
+
+.vessel-card-meta {
+  font-size: 11px;
+  color: var(--text-secondary);
+  letter-spacing: 0.03em;
+}
+
+.vessel-card-right {
+  flex-shrink: 0;
+  text-align: right;
+}
+
+.vessel-card-dist {
+  font-family: var(--font-data);
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.vessel-card-dist .unit {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-secondary);
+  margin-left: 1px;
+}
+
+.vessel-card-speed {
+  font-family: var(--font-data);
+  font-size: 11px;
+  color: var(--green);
+  margin-top: 2px;
+}

@@ -1,0 +1,44 @@
+/* Design tokens + reset + typography */
+
+:root {
+  --bg-base:       #050c1a;
+  --bg-surface:    #0a1526;
+  --bg-elevated:   #111f38;
+  --bg-sheet:      #0d1a30;
+
+  --accent:        #17c3d4;
+  --accent-dim:    rgba(23, 195, 212, 0.10);
+  --accent-glow:   rgba(23, 195, 212, 0.25);
+  --green:         #00e5a0;
+  --red:           #ff5252;
+
+  --text-primary:  #cde4ef;
+  --text-secondary:#5b7d98;
+  --text-muted:    #2a4058;
+
+  --border:        rgba(23, 195, 212, 0.10);
+  --border-mid:    rgba(23, 195, 212, 0.22);
+  --border-bright: rgba(23, 195, 212, 0.50);
+
+  --font-ui:   'Syne', sans-serif;
+  --font-data: 'Space Mono', monospace;
+
+  --safe-b: env(safe-area-inset-bottom, 0px);
+  --safe-t: env(safe-area-inset-top, 0px);
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  height: 100%;
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  -webkit-font-smoothing: antialiased;
+  overscroll-behavior: none;
+  overflow: hidden;
+}

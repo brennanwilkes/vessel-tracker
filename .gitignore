@@ -1,0 +1,21 @@
+node_modules/
+.wrangler/
+worker/.dev.vars
+worker/wrangler.toml.bak
+
+# Model dataset images — stored outside git (R2 or local machine)
+model/dataset/images/*
+!model/dataset/images/.gitkeep
+
+# Model weights — too large to commit
+model/model/base/*
+model/model/checkpoints/*
+model/model/export/*
+!model/model/base/.gitkeep
+!model/model/checkpoints/.gitkeep
+!model/model/export/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+.venv/
