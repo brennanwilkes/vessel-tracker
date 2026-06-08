@@ -28,10 +28,14 @@ export const MOVE_THRESHOLD_NM: Record<string, number> = {
   global: 5.0,
 };
 
-// If a direct-tier vessel reports nonzero speed but its position hasn't changed by more
-// than this, we call BS on the speed and treat it as stationary. ~9m — within AIS GPS
-// noise for a moored vessel, well below the slowest plausible movement in one scan cycle.
-export const PHANTOM_SPEED_THRESHOLD_NM = 0.005;
+// Phantom speed detection for direct-tier vessels. Some AIS transponders keep broadcasting
+// their last-known speed after anchoring/docking. We call BS when:
+//   - reported speed >= PHANTOM_SPEED_MIN_KN (below this, slow maneuvers are plausible)
+//   - actual position change < PHANTOM_SPEED_THRESHOLD_NM (< ~37m, within GPS dock jitter)
+// At 1.5 kn a vessel moves ~46m/min, so a genuine 1.5-kn vessel will usually exceed the
+// threshold. Below 1.5 kn we leave the speed alone and let the haversine check decide.
+export const PHANTOM_SPEED_MIN_KN        = 1.5;
+export const PHANTOM_SPEED_THRESHOLD_NM  = 0.02;
 
 // How long a stationary vessel can go without a heartbeat last_seen update (ms)
 export const HEARTBEAT_MS = 10 * 60 * 1000;

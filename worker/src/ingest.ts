@@ -3,7 +3,7 @@ import {
   DIRECT_BOUNDING_BOX, LOCAL_BOUNDING_BOX, GLOBAL_BOUNDING_BOX,
   MOVE_THRESHOLD_NM, HEARTBEAT_MS,
   DIRECT_DRAIN_MS, LOCAL_DRAIN_MS, GLOBAL_DRAIN_MS,
-  PHANTOM_SPEED_THRESHOLD_NM,
+  PHANTOM_SPEED_MIN_KN, PHANTOM_SPEED_THRESHOLD_NM,
 } from './constants';
 import { drainAisStream } from './aisstream';
 import { pointInBox, isLargeVessel } from './ais';
@@ -27,12 +27,16 @@ function assessMovement(v: Vessel, prev: VesselState | undefined, tier: Tier): {
     return { moved: true, effectiveSpeed: v.speed };
   }
   const dist = haversineNm(prev.last_lat, prev.last_lon, v.lat, v.lon);
-  if (tier === 'direct' && v.speed !== null && v.speed > 0) {
-    // Some AIS transponders keep broadcasting their last-known speed after anchoring.
-    // If the position hasn't changed beyond GPS noise level, the reported speed is phantom.
+  if (tier === 'direct' && v.speed !== null && v.speed >= PHANTOM_SPEED_MIN_KN) {
+    // Some AIS transponders keep broadcasting their last-known speed after docking/anchoring.
+    // Only override when the reported speed is high enough that we'd expect real movement,
+    // yet the position barely changed (dist < ~37m, which covers AIS GPS dock jitter).
     if (dist < PHANTOM_SPEED_THRESHOLD_NM) {
       return { moved: false, effectiveSpeed: 0 };
     }
+    return { moved: true, effectiveSpeed: v.speed };
+  }
+  if (tier === 'direct' && v.speed !== null && v.speed > 0) {
     return { moved: true, effectiveSpeed: v.speed };
   }
   return { moved: dist >= MOVE_THRESHOLD_NM[tier], effectiveSpeed: v.speed };
