@@ -123,11 +123,42 @@ function closeSheet() {
 
 // ── Trail drawing ─────────────────────────────────────────────────────────────
 
+// Laplacian pre-smoother: nudges each interior point toward the midpoint of its
+// neighbors, weighted by how straight the path is through that point.
+// cos≈1 (straight) → full pull (t=0.45); cos≤0 (90°+ turn) → no pull.
+// Multiple iterations compound this so gently-curving paths become very smooth
+// while genuine sharp course changes resist it.
+function preSmooth(pts, iterations = 3) {
+  if (pts.length < 3) return pts;
+  let cur = pts.slice();
+  for (let k = 0; k < iterations; k++) {
+    const next = [cur[0]];
+    for (let i = 1; i < cur.length - 1; i++) {
+      const [ax, ay] = cur[i - 1];
+      const [bx, by] = cur[i];
+      const [cx, cy] = cur[i + 1];
+      const dx1 = bx - ax, dy1 = by - ay;
+      const dx2 = cx - bx, dy2 = cy - by;
+      const len1 = Math.sqrt(dx1 * dx1 + dy1 * dy1);
+      const len2 = Math.sqrt(dx2 * dx2 + dy2 * dy2);
+      if (len1 < 1e-10 || len2 < 1e-10) { next.push(cur[i]); continue; }
+      const cos = (dx1 * dx2 + dy1 * dy2) / (len1 * len2);
+      const t = Math.max(0, cos) * 0.45;
+      next.push([bx + ((ax + cx) / 2 - bx) * t, by + ((ay + cy) / 2 - by) * t]);
+    }
+    next.push(cur[cur.length - 1]);
+    cur = next;
+  }
+  return cur;
+}
+
 // Centripetal Catmull-Rom spline (α=0.5): passes through every data point and
 // weights tangents by √distance between points. This prevents the overshoot/zigzag
 // artifacts that uniform Catmull-Rom produces when AIS points are unevenly spaced.
-function catmullRomPoints(pts, samples = 8) {
+// Pre-smoothed so sparse/noisy AIS data produces gentle curves rather than kinks.
+function catmullRomPoints(pts, samples = 12) {
   if (pts.length < 2) return pts;
+  pts = preSmooth(pts);
 
   function knot(t, a, b) {
     const dx = b[0] - a[0], dy = b[1] - a[1];
