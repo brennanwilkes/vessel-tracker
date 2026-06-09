@@ -1,4 +1,4 @@
-import { VIEWSHEDS, DIRECT_BOUNDING_BOX, MOVING_SPEED_KN, TIER_STYLE, TRAIL_GAP_SEVER_MS, LIVE_TTL_MS } from '../config.js';
+import { VIEWSHEDS, DIRECT_BOUNDING_BOX, LOCAL_BOUNDING_BOX, MOVING_SPEED_KN, TIER_STYLE, TRAIL_GAP_SEVER_MS, LIVE_TTL_MS } from '../config.js';
 import { subscribe as subscribeVessels } from './store.js';
 import { subscribe as subscribeSettings, getSettings, passesExtentFilter, vesselCategory } from './settings_store.js';
 import { haversineNm, bearingDeg } from './geo.js';
@@ -37,11 +37,11 @@ function markerOpacity(vessel) {
   return Math.max(0, Math.min(1, 1 - age / ttl));
 }
 
-function makeArrowIcon(vessel, heading) {
+function makeArrowIcon(vessel, heading, opacity) {
   const color = vesselColor(vessel);
   const rotation = heading ?? 0;
   return L.divIcon({
-    html: `<div style="transform:rotate(${rotation}deg);width:20px;height:20px;">
+    html: `<div style="transform:rotate(${rotation}deg);width:20px;height:20px;opacity:${opacity}">
       <svg viewBox="0 0 20 20" width="20" height="20" overflow="visible">
         <polygon points="10,1 17,17 10,13 3,17"
           fill="${color}" stroke="rgba(0,0,0,0.6)" stroke-width="1.5" stroke-linejoin="round"/>
@@ -53,18 +53,18 @@ function makeArrowIcon(vessel, heading) {
   });
 }
 
-function makeDotIcon(vessel) {
+function makeDotIcon(vessel, opacity) {
   const color = vesselColor(vessel);
   return L.divIcon({
-    html: `<div class="vessel-dot" style="--dot-color:${color}"></div>`,
+    html: `<div class="vessel-dot" style="--dot-color:${color};opacity:${opacity}"></div>`,
     className: 'vessel-marker',
     iconSize: [14, 14],
     iconAnchor: [7, 7],
   });
 }
 
-function makeVesselIcon(vessel, heading) {
-  return isMoving(vessel) ? makeArrowIcon(vessel, heading) : makeDotIcon(vessel);
+function makeVesselIcon(vessel, heading, opacity) {
+  return isMoving(vessel) ? makeArrowIcon(vessel, heading, opacity) : makeDotIcon(vessel, opacity);
 }
 
 // ── Detail sheet ─────────────────────────────────────────────────────────────
@@ -368,20 +368,11 @@ function render() {
           ? bearingDeg(prev.lat, prev.lon, vessel.lat, vessel.lon)
           : existing._effectiveHeading ?? null
       );
-      if (
-        prev.heading !== vessel.heading ||
-        prev.vessel_type !== vessel.vessel_type ||
-        prev.name !== vessel.name ||
-        isMoving(prev) !== isMoving(vessel) ||
-        (vessel.heading === null && isMoving(vessel) && posChanged)
-      ) {
-        existing.setIcon(makeVesselIcon(vessel, effectiveHeading));
-      }
+      existing.setIcon(makeVesselIcon(vessel, effectiveHeading, markerOpacity(vessel)));
       existing._vessel = vessel;
       existing._effectiveHeading = effectiveHeading;
-      existing.setOpacity(markerOpacity(vessel));
     } else {
-      const marker = L.marker([vessel.lat, vessel.lon], { icon: makeVesselIcon(vessel, vessel.heading), opacity: markerOpacity(vessel) });
+      const marker = L.marker([vessel.lat, vessel.lon], { icon: makeVesselIcon(vessel, vessel.heading, markerOpacity(vessel)) });
       marker._vessel = vessel;
       marker._effectiveHeading = vessel.heading;
       marker.on('click', () => openSheet(marker._vessel));
@@ -449,6 +440,11 @@ export function mount(root) {
   L.rectangle(
     [DIRECT_BOUNDING_BOX.sw, DIRECT_BOUNDING_BOX.ne],
     { color: '#17c3d4', weight: 1, opacity: 0.35, fill: false, interactive: false, dashArray: '6 4' }
+  ).addTo(map);
+
+  L.rectangle(
+    [LOCAL_BOUNDING_BOX.sw, LOCAL_BOUNDING_BOX.ne],
+    { color: '#6b7d8a', weight: 1, opacity: 0.12, fill: false, interactive: false, dashArray: '4 6' }
   ).addTo(map);
 
   const homeIcon = L.divIcon({

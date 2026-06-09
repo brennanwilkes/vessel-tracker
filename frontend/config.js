@@ -15,8 +15,8 @@ export const VIEWSHEDS = [
 // Direct view: vessels visible from the apartment window (matches worker DIRECT_BOUNDING_BOX)
 export const DIRECT_BOUNDING_BOX = { sw: [48.070, -123.70], ne: [48.524, -123.02] };
 
-// Local area: all of Vancouver Island + waterways (matches worker LOCAL_BOUNDING_BOX)
-export const LOCAL_BOUNDING_BOX = { sw: [47.8, -128.7], ne: [51.2, -122.5] };
+// Local area: Vancouver Island + Puget Sound including Tacoma (matches worker LOCAL_BOUNDING_BOX)
+export const LOCAL_BOUNDING_BOX = { sw: [47.0, -128.7], ne: [51.2, -122.0] };
 
 export const WORKER_URL = 'https://vessel-tracker-api.brennan-a53.workers.dev';
 

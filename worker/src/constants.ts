@@ -7,10 +7,10 @@ export const DIRECT_BOUNDING_BOX: [[number, number], [number, number]] = [
   [48.524, -123.02],
 ];
 
-// Local area: Vancouver Island + waterways + Puget Sound down to Seattle.
+// Local area: Vancouver Island + Puget Sound including Tacoma.
 // Only large vessels (or already-of-interest) are stored from this zone.
 export const LOCAL_BOUNDING_BOX: [[number, number], [number, number]] = [
-  [47.4, -128.7],
+  [47.0, -128.7],
   [51.2, -122.0],
 ];
 
