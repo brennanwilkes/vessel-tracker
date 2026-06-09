@@ -34,7 +34,9 @@ function hexToRgb(hex) {
 
 // Gradient-faded polyline: single CanvasGradient stroke from transparent (oldest)
 // to full trailFade (newest). One path = no anti-aliasing seams.
-function makeFadePolyline(pts, color, weight, trailFade) {
+// trailBounds { t0, t1 } — overall trail time range; each segment only paints its
+// window of the gradient so there are no opacity seams at tier boundaries.
+function makeFadePolyline(pts, color, weight, trailFade, trailBounds, segTimes) {
   const [r, g, b] = hexToRgb(color);
   const layer = L.polyline(pts, {
     color: `rgb(${r},${g},${b})`,
@@ -43,8 +45,20 @@ function makeFadePolyline(pts, color, weight, trailFade) {
     className: 'vessel-trail',
     interactive: false,
   });
-  const tailOpacity = trailFade;
-  const headOpacity = trailFade * 0.1;
+
+  const range = trailFade * 0.9;
+  const base = trailFade * 0.1;
+
+  let headOpacity = base;
+  let tailOpacity = trailFade;
+
+  if (trailBounds && segTimes && trailBounds.t1 > trailBounds.t0) {
+    const frac0 = (segTimes.t0 - trailBounds.t0) / (trailBounds.t1 - trailBounds.t0);
+    const frac1 = (segTimes.t1 - trailBounds.t0) / (trailBounds.t1 - trailBounds.t0);
+    headOpacity = base + range * frac0;
+    tailOpacity = base + range * frac1;
+  }
+
   const firstLatLon = pts[0];
   const lastLatLon = pts[pts.length - 1];
 
@@ -264,26 +278,40 @@ function segmentsByTier(points, gapByTier) {
   const segments = [];
   if (points.length === 0) return segments;
 
-  let current = { tier: points[0].tier, pts: [[points[0].lat, points[0].lon]] };
+  let pts = [[points[0].lat, points[0].lon]];
+  let tier = points[0].tier;
+  let segT0 = points[0].t;
+  let segT1 = points[0].t;
+
+  function flush() {
+    segments.push({ tier, pts, t0: segT0, t1: segT1 });
+  }
+
   for (let i = 1; i < points.length; i++) {
     const p = points[i];
     const gapMs = p.t - points[i - 1].t;
-    const threshold = gapByTier[current.tier];
+    const threshold = gapByTier[tier];
 
-    if (p.tier !== current.tier) {
-      // carry one overlap point so segments connect visually
-      current.pts.push([p.lat, p.lon]);
-      segments.push(current);
-      current = { tier: p.tier, pts: [[p.lat, p.lon]] };
+    if (p.tier !== tier) {
+      pts.push([p.lat, p.lon]);     // overlap so segments connect visually
+      segT1 = p.t;
+      flush();
+      pts = [[p.lat, p.lon]];
+      tier = p.tier;
+      segT0 = p.t;
+      segT1 = p.t;
     } else if (threshold !== null && gapMs > threshold) {
-      // time gap — clean break, no overlap
-      segments.push(current);
-      current = { tier: p.tier, pts: [[p.lat, p.lon]] };
+      segT1 = points[i - 1].t;      // segment ends before the gap
+      flush();
+      pts = [[p.lat, p.lon]];
+      segT0 = p.t;
+      segT1 = p.t;
     } else {
-      current.pts.push([p.lat, p.lon]);
+      pts.push([p.lat, p.lon]);
+      segT1 = p.t;
     }
   }
-  segments.push(current);
+  flush();
   return segments;
 }
 
@@ -340,13 +368,20 @@ function drawTrail(vessel, points, token) {
   const layers = [];
   let globalPts = [];
 
+  // Trail-wide time range so each segment paints only its window of the gradient
+  const trailBounds = {
+    t0: allPoints[0].t,
+    t1: allPoints[allPoints.length - 1].t,
+  };
+
   for (const seg of segments) {
     if (seg.tier === 'global') {
       globalPts = globalPts.concat(catmullRomPoints(seg.pts));
     } else {
       const style = TIER_STYLE[seg.tier];
       const smooth = catmullRomPoints(seg.pts);
-      const layer = makeFadePolyline(smooth, color, style.weight, style.opacity * trailFade);
+      const segTimes = { t0: seg.t0, t1: seg.t1 };
+      const layer = makeFadePolyline(smooth, color, style.weight, style.opacity * trailFade, trailBounds, segTimes);
       layer.addTo(map);
       layers.push(layer);
     }
@@ -354,7 +389,8 @@ function drawTrail(vessel, points, token) {
 
   if (globalPts.length > 1) {
     const style = TIER_STYLE.global;
-    const layer = makeFadePolyline(globalPts, color, style.weight, style.opacity * trailFade);
+    const segTimes = { t0: trailBounds.t0, t1: trailBounds.t1 };
+    const layer = makeFadePolyline(globalPts, color, style.weight, style.opacity * trailFade, trailBounds, segTimes);
     layer.addTo(map);
     layers.push(layer);
   }
