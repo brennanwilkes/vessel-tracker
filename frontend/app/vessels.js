@@ -41,15 +41,15 @@ const MID_TO_ISO2 = {
 };
 
 const CATEGORY_COLORS = {
-  ferry:      '#06b6d4',  // cyan-400    — dependable commuter traffic
-  cruise:     '#f59e0b',  // amber-400   — warm gold, luxury/passenger
-  cargo:      '#3b82f6',  // blue-500    — commercial cargo (most-tracked)
-  tanker:     '#ef4444',  // red-500     — distinct red, hazardous cargo
-  tug:        '#8b5cf6',  // violet-500  — muted purple, lower interest
+  cargo:      '#f97316',  // orange-500  — shipping family (warm, stands out)
+  tanker:     '#dc2626',  // red-600     — deeper red, same warm shipping family
+  cruise:     '#facc15',  // yellow-400  — bright gold, luxury/passenger
+  ferry:      '#06b6d4',  // cyan-500    — cool contrast, dependable commuter
+  military:   '#3b82f6',  // blue-500    — navy / military association
   fishing:    '#22c55e',  // green-500   — fishing vessels
+  government: '#8b5cf6',  // violet-500  — coast guard / government
   pleasure:   '#ec4899',  // pink-500    — private / recreational
-  government: '#f97316',  // orange-500  — coast guard / government
-  military:   '#64748b',  // slate-500   — deliberately low-key
+  tug:        '#78716c',  // neutral-500 — de-emphasised, low interest
   unknown:    '#525252',  // neutral-600 — de-emphasised
 };
 
