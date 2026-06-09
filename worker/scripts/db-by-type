@@ -1,58 +1,34 @@
 #!/usr/bin/env bash
-# Vessels grouped by AIS vessel type code.
-#
-# AIS type codes are integers (e.g. 70-79 cargo, 60-69 passenger).
-# Shows count per type and how many are of_interest. Use --min to filter
-# out rare types.
-#
-# Usage:  db-by-type [--local] [--db <name>] [--pretty] [--min N]
-#
-# Examples:
-#   db-by-type
-#   db-by-type --min 5
-#   db-by-type --pretty
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-show_help() { cat <<'EOF'
-Usage: db-by-type [--local] [--db <name>] [--pretty] [--min N]
-
-Vessels grouped by AIS vessel type code. See docs/ais-reference.md for
-type code meanings (70-79 = cargo, 60-69 = passenger, etc.).
-
+show_help() { cat <<'HELP'
+Usage: db-by-type [--pretty] [--min N]
 Options:
-  --min N        Minimum count to include (default: 1, use --min 5 to skip rare types)
-  --local        Query local D1 (default: remote)
-  --db <name>    Database name (default: vessel-tracker)
-  --pretty       Human-readable table instead of JSON
-  --help, -h     Show this help
-
-Output (JSON mode): array of { vessel_type, cnt, of_interest_cnt }
-
-Examples:
-  db-by-type
-  db-by-type --min 5
-EOF
+  --pretty     Human-readable table instead of JSON
+  --min N      Minimum vessel count to include (default: 1)
+HELP
 }
 
 source "$SCRIPT_DIR/db-common"
 
 MIN=1
-args=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --min) MIN="$2"; validate_int "min" "$MIN"; shift 2 ;;
-        *) args+=("$1"); shift ;;
+        --min) shift; MIN="$1"; validate_int "--min" "$MIN"; shift ;;
+        --help|-h) show_help; exit 0 ;;
+        *) break ;;
     esac
 done
-set -- "${args[@]}"
+
 parse_common_flags "$@"
 
 d1_query "
-SELECT vessel_type, COUNT(*) as cnt, SUM(of_interest) as of_interest_cnt
+SELECT vessel_type, COUNT(*) as cnt,
+       SUM(of_interest) as of_interest_cnt
 FROM vessels
 WHERE vessel_type IS NOT NULL
 GROUP BY vessel_type
 HAVING cnt >= $MIN
-ORDER BY cnt DESC;
+ORDER BY cnt DESC
 "

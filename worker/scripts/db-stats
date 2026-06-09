@@ -1,69 +1,18 @@
 #!/usr/bin/env bash
-# High-level database statistics — vessel/position counts, tier breakdown.
-#
-# Returns a flat list of metric/value pairs covering:
-#   total_vessels, of_interest, not_of_interest, total_positions,
-#   direct/local/global_positions, vessels_with_positions,
-#   max_extent_direct/local/global
-#
-# Usage:  db-stats [--local] [--db <name>] [--pretty]
-#
-# Examples:
-#   db-stats
-#   db-stats --pretty
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-
-show_help() { cat <<'EOF'
-Usage: db-stats [--local] [--db <name>] [--pretty]
-
-High-level database statistics: vessel and position counts by category,
-database file size, and max_extent distribution.
-
-Options:
-  --local        Query local D1 (default: remote)
-  --db <name>    Database name (default: vessel-tracker)
-  --pretty       Human-readable table instead of JSON
-  --help, -h     Show this help
-
-Output (JSON mode): array of { metric, value } pairs
-
-Metrics returned:
-  total_vessels, of_interest, not_of_interest, total_positions,
-  direct_positions, local_positions, global_positions,
-  vessels_with_positions,
-  max_extent_direct, max_extent_local, max_extent_global
-
-Examples:
-  db-stats
-  db-stats --pretty
-EOF
-}
-
 source "$SCRIPT_DIR/db-common"
-
 parse_common_flags "$@"
-
 d1_query "
-SELECT 'total_vessels' as metric, COUNT(*) as value FROM vessels
-UNION ALL
-SELECT 'of_interest', SUM(of_interest) FROM vessels
-UNION ALL
-SELECT 'not_of_interest', COUNT(*) - SUM(of_interest) FROM vessels
-UNION ALL
-SELECT 'total_positions', COUNT(*) FROM positions
-UNION ALL
-SELECT 'direct_positions', COUNT(*) FROM positions WHERE tier = 'direct'
-UNION ALL
-SELECT 'local_positions', COUNT(*) FROM positions WHERE tier = 'local'
-UNION ALL
-SELECT 'global_positions', COUNT(*) FROM positions WHERE tier = 'global'
-UNION ALL
-SELECT 'vessels_with_positions', COUNT(DISTINCT mmsi) FROM positions
-UNION ALL
-SELECT 'max_extent_direct', COUNT(*) FROM vessels WHERE max_extent = 'direct'
-UNION ALL
-SELECT 'max_extent_local', COUNT(*) FROM vessels WHERE max_extent = 'local'
-UNION ALL
-SELECT 'max_extent_global', COUNT(*) FROM vessels WHERE max_extent = 'global';
+SELECT 'total_vessels' as metric, COUNT(*) as value FROM vessels;
+SELECT 'of_interest' as metric, SUM(of_interest) as value FROM vessels;
+SELECT 'not_of_interest' as metric, COUNT(*) - SUM(of_interest) as value FROM vessels;
+SELECT 'total_positions' as metric, COUNT(*) as value FROM positions;
+SELECT 'direct_positions' as metric, COUNT(*) as value FROM positions WHERE tier = 'direct';
+SELECT 'local_positions' as metric, COUNT(*) as value FROM positions WHERE tier = 'local';
+SELECT 'global_positions' as metric, COUNT(*) as value FROM positions WHERE tier = 'global';
+SELECT 'vessels_with_positions' as metric, COUNT(DISTINCT mmsi) as value FROM positions;
+SELECT 'max_extent_direct' as metric, COUNT(*) as value FROM vessels WHERE max_extent = 'direct';
+SELECT 'max_extent_local' as metric, COUNT(*) as value FROM vessels WHERE max_extent = 'local';
+SELECT 'max_extent_global' as metric, COUNT(*) as value FROM vessels WHERE max_extent = 'global';
 "

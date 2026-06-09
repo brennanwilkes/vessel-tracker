@@ -1,63 +1,38 @@
 #!/usr/bin/env bash
-# Vessels that have entered the direct (apartment window) bounding box.
-#
-# These are the vessels rendered on the live map. Includes max_extent to show
-# how far each vessel has been tracked (direct < local < global).
-#
-# Output fields (JSON): mmsi, name, vessel_type, length, max_extent,
-#                       first_direct_utc, last_seen_utc, direct_entry_count, times_seen
-# Sorted by last_seen desc.
-#
-# Usage:  db-of-interest [--local] [--db <name>] [--pretty] [--limit N]
-#
-# Examples:
-#   db-of-interest
-#   db-of-interest --limit 5 --pretty
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-show_help() { cat <<'EOF'
-Usage: db-of-interest [--local] [--db <name>] [--pretty] [--limit N]
-
-Vessels marked of_interest (entered the direct bounding box at least once).
-These are the vessels visible on the live map.
-
+show_help() { cat <<'HELP'
+Usage: db-of-interest [--pretty] [--limit N]
 Options:
-  --local        Query local D1 (default: remote)
-  --db <name>    Database name (default: vessel-tracker)
-  --pretty       Human-readable table instead of JSON
-  --limit N      Max rows (default: 100)
-  --help, -h     Show this help
-
-Output (JSON mode): array of { mmsi, name, vessel_type, length, max_extent,
-  first_direct_utc, last_seen_utc, direct_entry_count, times_seen }
-
-Examples:
-  db-of-interest
-  db-of-interest --limit 5 --pretty
-EOF
+  --pretty     Human-readable table
+  --limit N    Maximum rows (default: all)
+HELP
 }
 
 source "$SCRIPT_DIR/db-common"
 
-LIMIT=100
-args=()
+LIMIT=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --limit) LIMIT="$2"; validate_int "limit" "$LIMIT"; shift 2 ;;
-        *) args+=("$1"); shift ;;
+        --limit) shift; LIMIT="$1"; validate_int "--limit" "$LIMIT"; shift ;;
+        --help|-h) show_help; exit 0 ;;
+        *) break ;;
     esac
 done
-set -- "${args[@]}"
+
 parse_common_flags "$@"
 
-d1_query "
-SELECT mmsi, name, vessel_type, length, max_extent,
-       datetime(first_direct_at/1000,'unixepoch') as first_direct_utc,
-       datetime(last_seen/1000,'unixepoch') as last_seen_utc,
-       direct_entry_count, times_seen
-FROM vessels
-WHERE of_interest = 1
-ORDER BY last_seen DESC
-LIMIT $LIMIT;
-"
+SQL="SELECT mmsi, name, vessel_type, length, max_extent,
+             first_direct_at as first_direct_utc,
+             last_seen as last_seen_utc,
+             COALESCE(direct_entry_count, 0) as direct_entry_count,
+             times_seen
+      FROM vessels WHERE of_interest = 1
+      ORDER BY last_seen DESC"
+
+if [[ -n "$LIMIT" ]]; then
+    SQL="$SQL LIMIT $LIMIT"
+fi
+
+d1_query "$SQL"

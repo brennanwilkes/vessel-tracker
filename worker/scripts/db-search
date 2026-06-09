@@ -1,74 +1,61 @@
 #!/usr/bin/env bash
-# Search vessels by MMSI or name (case-insensitive partial match).
-#
-# Results are ordered by match relevance: exact MMSI match first, then MMSI
-# prefix match, then name/substring match.
-#
-# Usage:  db-search <term> [--local] [--db <name>] [--pretty] [--limit N]
-#
-# Examples:
-#   db-search 316
-#   db-search "OCEAN"
-#   db-search "MAERSK" --limit 5
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-show_help() { cat <<'EOF'
-Usage: db-search <term> [--local] [--db <name>] [--pretty] [--limit N]
-
+show_help() { cat <<'HELP'
+Usage: db-search <term> [--pretty] [--limit N]
 Search vessels by MMSI or name fragment (case-insensitive). Results ordered
 by relevance: exact MMSI > MMSI prefix > name/substring.
-
-Arguments:
-  term           Search string — partial MMSI or vessel name
-
 Options:
-  --limit N      Max results (default: 30)
-  --local        Query local D1 (default: remote)
-  --db <name>    Database name (default: vessel-tracker)
-  --pretty       Human-readable table instead of JSON
-  --help, -h     Show this help
-
-Output (JSON mode): array of { mmsi, name, vessel_type, of_interest, max_extent, last_seen_utc }
-
-Examples:
-  db-search 316            # find vessels with MMSI starting with 316
-  db-search "OCEAN"        # find vessels named like %OCEAN%
-  db-search "MAERSK" --limit 5
-EOF
+  --pretty     Human-readable table
+  --limit N    Maximum rows (default: 30)
+HELP
 }
 
 source "$SCRIPT_DIR/db-common"
 
-TERM=""
+TERM="${1:-}"
+if [[ -z "$TERM" ]]; then
+    echo "Error: search term argument is required" >&2
+    show_help >&2
+    exit 1
+fi
+shift
+
 LIMIT=30
-args=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --limit) LIMIT="$2"; validate_int "limit" "$LIMIT"; shift 2 ;;
-        *) args+=("$1"); shift ;;
+        --limit) shift; LIMIT="$1"; validate_int "--limit" "$LIMIT"; shift ;;
+        --help|-h) show_help; exit 0 ;;
+        *) break ;;
     esac
 done
-set -- "${args[@]}"
-TERM="${1:-}"; shift || true
+
 parse_common_flags "$@"
 
-if [[ -z "$TERM" ]]; then
-    echo "Error: search term is required" >&2; exit 1
+SAFE_TERM="$(sanitize_like "$TERM")"
+
+# Match patterns: exact MMSI, MMSI prefix, name/substring
+if [[ "$TERM" =~ ^[0-9]+$ ]]; then
+    d1_query "
+    SELECT mmsi, name, vessel_type, length, of_interest, max_extent, last_seen
+    FROM vessels
+    WHERE CAST(mmsi AS TEXT) LIKE '$SAFE_TERM%'
+       OR UPPER(name) LIKE UPPER('%$SAFE_TERM%')
+    ORDER BY
+        CASE WHEN CAST(mmsi AS TEXT) = '$SAFE_TERM' THEN 0
+             WHEN CAST(mmsi AS TEXT) LIKE '$SAFE_TERM%' THEN 1
+             ELSE 2
+        END,
+        last_seen DESC
+    LIMIT $LIMIT
+    "
+else
+    d1_query "
+    SELECT mmsi, name, vessel_type, length, of_interest, max_extent, last_seen
+    FROM vessels
+    WHERE UPPER(name) LIKE UPPER('%$SAFE_TERM%')
+    ORDER BY last_seen DESC
+    LIMIT $LIMIT
+    "
 fi
-
-TERM_SAFE="$(sanitize_like "$TERM")"
-
-d1_query "
-SELECT mmsi, name, vessel_type, of_interest, max_extent,
-       datetime(last_seen/1000,'unixepoch') as last_seen_utc
-FROM vessels
-WHERE CAST(mmsi AS TEXT) LIKE '%$TERM_SAFE%'
-   OR (name IS NOT NULL AND LOWER(name) LIKE LOWER('%$TERM_SAFE%'))
-ORDER BY
-    CASE WHEN CAST(mmsi AS TEXT) = '$TERM_SAFE' THEN 0
-         WHEN CAST(mmsi AS TEXT) LIKE '$TERM_SAFE%' THEN 1
-         ELSE 2 END,
-    last_seen DESC
-LIMIT $LIMIT;
-"

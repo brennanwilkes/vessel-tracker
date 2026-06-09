@@ -1,60 +1,35 @@
 #!/usr/bin/env bash
-# List all known vessels — MMSI, name, type, of_interest status, last seen time.
-#
-# Output fields (JSON): mmsi, name, vessel_type, length, of_interest, max_extent,
-#                       last_seen_utc (ISO 8601), times_seen, direct_entry_count
-# Sorted by last_seen desc (most recently active first).
-#
-# Usage:  db-list-ships [--local] [--db <name>] [--pretty] [--limit N]
-#
-# Examples:
-#   db-list-ships
-#   db-list-ships --limit 10
-#   db-list-ships --pretty --local
-#   db-list-ships --db my-dev-db --limit 5
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-show_help() { cat <<'EOF'
-Usage: db-list-ships [--local] [--db <name>] [--pretty] [--limit N]
-
-List all known vessels with key fields. Sorted by most recently active.
-
+show_help() { cat <<'HELP'
+Usage: db-list-ships [--pretty] [--limit N]
 Options:
-  --local        Query local D1 (default: remote)
-  --db <name>    Database name (default: vessel-tracker)
-  --pretty       Human-readable table instead of JSON
-  --limit N      Max rows (default: 100)
-  --help, -h     Show this help
-
-Output (JSON mode): array of { mmsi, name, vessel_type, length, of_interest,
-  max_extent, last_seen_utc, times_seen, direct_entry_count }
-
-Examples:
-  db-list-ships
-  db-list-ships --limit 10
-  db-list-ships --pretty --local
-EOF
+  --pretty     Human-readable table instead of JSON
+  --limit N    Maximum rows (default: all)
+HELP
 }
 
 source "$SCRIPT_DIR/db-common"
 
-LIMIT=100
-args=()
+LIMIT=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --limit) LIMIT="$2"; validate_int "limit" "$LIMIT"; shift 2 ;;
-        *) args+=("$1"); shift ;;
+        --limit) shift; LIMIT="$1"; validate_int "--limit" "$LIMIT"; shift ;;
+        --help|-h) show_help; exit 0 ;;
+        *) break ;;
     esac
 done
-set -- "${args[@]}"
+
 parse_common_flags "$@"
 
-d1_query "
-SELECT mmsi, name, vessel_type, length, of_interest, max_extent,
-       datetime(last_seen/1000,'unixepoch') as last_seen_utc,
-       times_seen, direct_entry_count
-FROM vessels
-ORDER BY last_seen DESC
-LIMIT $LIMIT;
-"
+SQL="SELECT mmsi, name, vessel_type, length, of_interest, max_extent,
+             last_seen as last_seen_utc, times_seen,
+             COALESCE(direct_entry_count, 0) as direct_entry_count
+      FROM vessels ORDER BY last_seen DESC"
+
+if [[ -n "$LIMIT" ]]; then
+    SQL="$SQL LIMIT $LIMIT"
+fi
+
+d1_query "$SQL"

@@ -1,58 +1,23 @@
 #!/usr/bin/env bash
-# Position counts and metadata by scan tier (direct / local / global).
-#
-# Per tier: position count, distinct vessels, average speed, lat range,
-# and first/last timestamp.
-#
-# Usage:  db-tiers [--local] [--db <name>] [--pretty]
-#
-# Examples:
-#   db-tiers
-#   db-tiers --pretty
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-show_help() { cat <<'EOF'
-Usage: db-tiers [--local] [--db <name>] [--pretty]
-
-Position statistics broken down by scan tier.
-
+show_help() { cat <<'HELP'
+Usage: db-tiers [--pretty]
 Options:
-  --local        Query local D1 (default: remote)
-  --db <name>    Database name (default: vessel-tracker)
-  --pretty       Human-readable table instead of JSON
-  --help, -h     Show this help
-
-Output (JSON mode): array of { tier, pos_count, distinct_vessels, avg_speed_knots,
-  min_lat, max_lat, first_ts_utc, last_ts_utc }
-
-Tiers: direct (1min, ~90m threshold), local (5min, ~900m), global (1hr, ~9km)
-
-Examples:
-  db-tiers
-  db-tiers --pretty
-EOF
+  --pretty     Human-readable table
+HELP
 }
 
 source "$SCRIPT_DIR/db-common"
-
 parse_common_flags "$@"
 
 d1_query "
-SELECT tier,
-       COUNT(*) as pos_count,
+SELECT tier, COUNT(*) as pos_count,
        COUNT(DISTINCT mmsi) as distinct_vessels,
-       ROUND(AVG(speed), 1) as avg_speed_knots,
-       ROUND(MIN(lat), 4) as min_lat,
-       ROUND(MAX(lat), 4) as max_lat,
-       MIN(datetime(ts/1000,'unixepoch')) as first_ts_utc,
-       MAX(datetime(ts/1000,'unixepoch')) as last_ts_utc
+       ROUND(AVG(speed), 1) as avg_speed_kn,
+       MIN(ts) as first_ts, MAX(ts) as last_ts
 FROM positions
 GROUP BY tier
-ORDER BY
-    CASE tier
-        WHEN 'direct' THEN 1
-        WHEN 'local' THEN 2
-        WHEN 'global' THEN 3
-    END;
+ORDER BY tier
 "
