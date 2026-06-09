@@ -45,14 +45,15 @@ function makeFadePolyline(pts, color, weight, trailFade) {
   });
   const tailOpacity = trailFade;
   const headOpacity = trailFade * 0.1;
+  const firstLatLon = pts[0];
+  const lastLatLon = pts[pts.length - 1];
 
   const origUpdate = L.Polyline.prototype._updatePath;
   layer._updatePath = function () {
-    if (this._renderer && this._renderer._ctx && this._map && this._latlngs && this._latlngs[0] && this._latlngs[0].length >= 2) {
+    if (this._renderer && this._renderer._ctx && this._map && pts.length >= 2) {
       const ctx = this._renderer._ctx;
-      const lls = this._latlngs[0];
-      const first = this._map.latLngToLayerPoint(lls[0]);
-      const last = this._map.latLngToLayerPoint(lls[lls.length - 1]);
+      const first = this._map.latLngToLayerPoint(firstLatLon);
+      const last = this._map.latLngToLayerPoint(lastLatLon);
       const g = ctx.createLinearGradient(first.x, first.y, last.x, last.y);
       g.addColorStop(0, `rgba(${r},${g},${b},${headOpacity})`);
       g.addColorStop(1, `rgba(${r},${g},${b},${tailOpacity})`);
@@ -462,7 +463,7 @@ export function mount(root) {
 
   container.querySelector('.detail-backdrop').addEventListener('click', closeSheet);
 
-  map = L.map('leaflet-map', { zoomControl: true, attributionControl: true })
+  map = L.map('leaflet-map', { zoomControl: true, attributionControl: true, preferCanvas: true })
     .setView([HOME.lat, HOME.lon], 11);
 
   L.tileLayer(TILE_URL, { attribution: TILE_ATTR, maxZoom: 18 }).addTo(map);
