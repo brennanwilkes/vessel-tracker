@@ -36,6 +36,14 @@ export const LIVE_TTL_MS = {
   global: 72 * 60 * 60 * 1000,
 };
 
+// Fade window for marker opacity (independent of display TTL).
+//   The marker fades from 1.0 → floor over this window, then holds at floor.
+export const FADE_TTL_MS = {
+  direct: 2 * 60 * 60 * 1000,
+  local:  6 * 60 * 60 * 1000,
+  global: 24 * 60 * 60 * 1000,
+};
+
 // Time-gap thresholds for trail line behavior per tier.
 //   direct: >2h → sever line into two
 //   local:  >6h → sever line into two

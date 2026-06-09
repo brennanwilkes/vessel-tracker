@@ -1,4 +1,4 @@
-import { VIEWSHEDS, DIRECT_BOUNDING_BOX, LOCAL_BOUNDING_BOX, MOVING_SPEED_KN, TIER_STYLE, TRAIL_GAP_SEVER_MS, LIVE_TTL_MS } from '../config.js';
+import { VIEWSHEDS, DIRECT_BOUNDING_BOX, LOCAL_BOUNDING_BOX, MOVING_SPEED_KN, TIER_STYLE, TRAIL_GAP_SEVER_MS, LIVE_TTL_MS, FADE_TTL_MS } from '../config.js';
 import { subscribe as subscribeVessels } from './store.js';
 import { subscribe as subscribeSettings, getSettings, passesExtentFilter, vesselCategory } from './settings_store.js';
 import { haversineNm, bearingDeg } from './geo.js';
@@ -33,8 +33,15 @@ function isMoving(vessel) {
 
 function markerOpacity(vessel) {
   const age = Date.now() - vessel.last_seen;
-  const ttl = LIVE_TTL_MS[vessel.max_extent] ?? LIVE_TTL_MS.local;
-  return Math.max(0, Math.min(1, 1 - age / ttl));
+  const ttl = FADE_TTL_MS[vessel.max_extent] ?? FADE_TTL_MS.local;
+  const remaining = Math.max(0, 1 - age / ttl);
+  return Math.max(0.15, remaining * remaining);
+}
+
+function setMarkerOpacity(marker, opacity) {
+  if (marker._icon) {
+    marker._icon.style.setProperty('opacity', String(opacity), 'important');
+  }
 }
 
 function makeArrowIcon(vessel, heading, opacity) {
@@ -275,6 +282,7 @@ function drawTrail(vessel, points, token) {
   }
 
   const color = vesselColor(vessel);
+  const trailFade = markerOpacity(vessel);
   const segments = segmentsByTier(allPoints, TRAIL_GAP_SEVER_MS);
   const layers = [];
   let globalPts = [];
@@ -291,7 +299,7 @@ function drawTrail(vessel, points, token) {
         className: 'vessel-trail',
         interactive: false,
       });
-      layer._targetOpacity = style.opacity;
+      layer._targetOpacity = style.opacity * trailFade;
       layer.addTo(map);
       layers.push(layer);
     }
@@ -306,7 +314,7 @@ function drawTrail(vessel, points, token) {
       className: 'vessel-trail',
       interactive: false,
     });
-    layer._targetOpacity = style.opacity;
+    layer._targetOpacity = style.opacity * trailFade;
     layer.addTo(map);
     layers.push(layer);
   }
@@ -368,15 +376,19 @@ function render() {
           ? bearingDeg(prev.lat, prev.lon, vessel.lat, vessel.lon)
           : existing._effectiveHeading ?? null
       );
-      existing.setIcon(makeVesselIcon(vessel, effectiveHeading, markerOpacity(vessel)));
+      const opacity = markerOpacity(vessel);
+      existing.setIcon(makeVesselIcon(vessel, effectiveHeading, opacity));
+      setMarkerOpacity(existing, opacity);
       existing._vessel = vessel;
       existing._effectiveHeading = effectiveHeading;
     } else {
-      const marker = L.marker([vessel.lat, vessel.lon], { icon: makeVesselIcon(vessel, vessel.heading, markerOpacity(vessel)) });
+      const opacity = markerOpacity(vessel);
+      const marker = L.marker([vessel.lat, vessel.lon], { icon: makeVesselIcon(vessel, vessel.heading, opacity) });
       marker._vessel = vessel;
       marker._effectiveHeading = vessel.heading;
       marker.on('click', () => openSheet(marker._vessel));
       marker.addTo(map);
+      setMarkerOpacity(marker, opacity);
       markers.set(vessel.mmsi, marker);
     }
   }
