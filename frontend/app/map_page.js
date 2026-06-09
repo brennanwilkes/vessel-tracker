@@ -1,4 +1,4 @@
-import { VIEWSHEDS, DIRECT_BOUNDING_BOX, MOVING_SPEED_KN, TIER_STYLE } from '../config.js';
+import { VIEWSHEDS, DIRECT_BOUNDING_BOX, MOVING_SPEED_KN, TIER_STYLE, TRAIL_GAP_SEVER_MS } from '../config.js';
 import { subscribe as subscribeVessels } from './store.js';
 import { subscribe as subscribeSettings, getSettings, passesExtentFilter, vesselCategory } from './settings_store.js';
 import { haversineNm, bearingDeg } from './geo.js';
@@ -195,16 +195,23 @@ function catmullRomPoints(pts, samples = 12) {
   return result;
 }
 
-function segmentsByTier(points) {
+function segmentsByTier(points, gapByTier) {
   const segments = [];
   if (points.length === 0) return segments;
 
   let current = { tier: points[0].tier, pts: [[points[0].lat, points[0].lon]] };
   for (let i = 1; i < points.length; i++) {
     const p = points[i];
+    const gapMs = p.t - points[i - 1].t;
+    const threshold = gapByTier[current.tier];
+
     if (p.tier !== current.tier) {
       // carry one overlap point so segments connect visually
       current.pts.push([p.lat, p.lon]);
+      segments.push(current);
+      current = { tier: p.tier, pts: [[p.lat, p.lon]] };
+    } else if (threshold !== null && gapMs > threshold) {
+      // time gap — clean break, no overlap
       segments.push(current);
       current = { tier: p.tier, pts: [[p.lat, p.lon]] };
     } else {
@@ -262,12 +269,31 @@ function drawTrail(vessel, points, token) {
   }
 
   const color = vesselColor(vessel);
-  const segments = segmentsByTier(allPoints);
+  const segments = segmentsByTier(allPoints, TRAIL_GAP_SEVER_MS);
   const layers = [];
+  let globalPts = [];
 
   for (const seg of segments) {
-    const style = TIER_STYLE[seg.tier];
-    const layer = L.polyline(catmullRomPoints(seg.pts), {
+    if (seg.tier === 'global') {
+      globalPts = globalPts.concat(catmullRomPoints(seg.pts));
+    } else {
+      const style = TIER_STYLE[seg.tier];
+      const layer = L.polyline(catmullRomPoints(seg.pts), {
+        color,
+        weight: style.weight,
+        opacity: 0,
+        className: 'vessel-trail',
+        interactive: false,
+      });
+      layer._targetOpacity = style.opacity;
+      layer.addTo(map);
+      layers.push(layer);
+    }
+  }
+
+  if (globalPts.length > 1) {
+    const style = TIER_STYLE.global;
+    const layer = L.polyline(globalPts, {
       color,
       weight: style.weight,
       opacity: 0,
