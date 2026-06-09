@@ -41,7 +41,7 @@ const MID_TO_ISO2 = {
 };
 
 const CATEGORY_COLORS = {
-  cargo:      '#f97316',  // orange-500  — shipping family (warm, stands out)
+  cargo:      '#ea580c',  // orange-600  — deeper rust, distinct from cruise gold
   tanker:     '#dc2626',  // red-600     — deeper red, same warm shipping family
   cruise:     '#facc15',  // yellow-400  — bright gold, luxury/passenger
   ferry:      '#06b6d4',  // cyan-500    — cool contrast, dependable commuter
