@@ -8,7 +8,7 @@ Three cron schedules in `wrangler.toml [triggers]`, all handled in `scheduled` (
 
 - `* * * * *` — direct scan every 1 min: drain DIRECT box (apartment view, ≤45s), write every vessel as of_interest=1.
 - `*/5 * * * *` — local scan every 5 min: drain LOCAL box (~90s), write only large vessels (≥50m / cargo / tanker) or already-of-interest vessels.
-- `0 6 * * *` — global scan once/day: drain global box filtered to of-interest MMSIs (~30s), widen max_extent.
+- `30 16 * * *` — global scan once/day (9:30am Pacific during PDT): drain global box filtered to of-interest MMSIs in retrying batches, widen max_extent.
 
 **Why cron not Durable Objects:** Durable Objects require the paid Workers plan. Scheduled Workers are free-tier and sufficient. See `docs/decisions.md`.
 
@@ -59,7 +59,7 @@ Drop a new `NNN_my_change.sql` file in `worker/migrations/`. On next push to mai
 
 ## HTTP API
 
-- `GET /current` → of-interest vessels heard within last 90 min (snake_case fields from D1)
+- `GET /current` → of-interest vessels within tier TTLs: direct/local 6h, global 72h. Stale local vessels inside the global window are projected as `max_extent='global'` for distant-view rendering.
 - `GET /vessel/:mmsi/track?tier=direct,local` → movement event positions, `Cache-Control: public, max-age=60`
 - `OPTIONS *` → CORS preflight
 

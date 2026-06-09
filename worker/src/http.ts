@@ -2,9 +2,7 @@ import { JSON_CT } from './constants';
 import { corsHeaders } from './cors';
 import type { Env } from './types';
 
-type JsonValue = null | boolean | number | string | JsonValue[] | { [k: string]: JsonValue };
-
-export function json(req: Request, env: Env, status: number, body: JsonValue, extra: Record<string, string> = {}): Response {
+export function json(req: Request, env: Env, status: number, body: unknown, extra: Record<string, string> = {}): Response {
   const headers = new Headers(corsHeaders(req, env));
   headers.set('Content-Type', JSON_CT);
   for (const [k, v] of Object.entries(extra)) headers.set(k, v);

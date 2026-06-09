@@ -31,7 +31,6 @@ export async function drainAisStream(opts: DrainOptions): Promise<DrainResult> {
   console.log(`[aisstream] connecting — box ${JSON.stringify(opts.boundingBox)}, drain ${opts.drainMs}ms, mmsis: ${opts.mmsis?.length ?? 'all'}`);
 
   await new Promise<void>((resolve, reject) => {
-    // @ts-expect-error — CF Workers WebSocket constructor
     const ws = new WebSocket('wss://stream.aisstream.io/v0/stream');
 
     const closeAndResolve = (): void => { ws.close(); resolve(); };

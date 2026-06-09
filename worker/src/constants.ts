@@ -41,13 +41,19 @@ export const PHANTOM_STALL_MS     = 20 * 60 * 1000;
 export const HEARTBEAT_MS = 10 * 60 * 1000;
 
 // Max age before a vessel is dropped from the /current response.
-// Direct and local vessels update every 1-5 min, so 90 min is generous.
-// Global vessels update once daily at 6am — keep them visible for 25h so
-// they persist through the full gap between scans.
-export const LIVE_TTL_MS        = 90 * 60 * 1000;
-export const LIVE_TTL_GLOBAL_MS = 25 * 60 * 60 * 1000;
+// Direct/local vessels can miss multiple drain windows; keep them visible for a workday.
+// Global vessels update once daily at 6am; keep them through missed daily scans.
+export const LIVE_TTL_DIRECT_MS = 6 * 60 * 60 * 1000;
+export const LIVE_TTL_LOCAL_MS  = 6 * 60 * 60 * 1000;
+export const LIVE_TTL_GLOBAL_MS = 72 * 60 * 60 * 1000;
 
 // Drain windows per tier (ms). Direct cron is every 1 min — leave headroom.
 export const DIRECT_DRAIN_MS  = 45_000;
 export const LOCAL_DRAIN_MS   = 90_000;
 export const GLOBAL_DRAIN_MS  = 30_000;
+
+// Global scans target many specific MMSIs. Query in batches and retry misses so
+// one quiet drain window doesn't decide the day's global data.
+export const GLOBAL_MMSI_CHUNK_SIZE = 75;
+export const GLOBAL_SCAN_ATTEMPTS   = 3;
+export const GLOBAL_SCAN_BUDGET_MS  = 14 * 60 * 1000;

@@ -32,7 +32,8 @@ Browser
         │
         ▼
 CF Worker fetch handler
-  └─► D1 vessels WHERE of_interest=1 AND last_seen >= now-90min → return JSON
+  └─► D1 vessels WHERE of_interest=1 AND last_seen is inside tier TTL → return JSON
+      Stale local vessels inside the global window are returned as distant/global rows.
 
 Browser
   └─► GET /vessel/:mmsi/track?tier=direct,local (lazy trail fetch)
@@ -59,6 +60,8 @@ A liveness heartbeat updates `last_seen` at most every 10 min for vessels presen
 ## Of-interest definition
 
 A vessel is `of_interest=1` once it has entered the DIRECT bounding box at least once. Only of-interest vessels are returned by `/current` and targeted by the global scan. Large local vessels that have not yet entered the direct view still get a `vessels` row (pre-entry approach track) but are not rendered.
+
+The daily global scan queries of-interest MMSIs in batches and retries misses for several rounds. A missed global ping does not remove the vessel from global visibility; `/current` can still render its last known local/global position until the global TTL expires. Direct/local rows remain visible for 6h to tolerate missed short-interval scans.
 
 ## Why D1-only (no KV)
 

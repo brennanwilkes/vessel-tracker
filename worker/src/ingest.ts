@@ -4,6 +4,7 @@ import {
   MOVE_THRESHOLD_NM, HEARTBEAT_MS,
   DIRECT_DRAIN_MS, LOCAL_DRAIN_MS, GLOBAL_DRAIN_MS,
   PHANTOM_SPEED_MIN_KN, PHANTOM_STALL_MS,
+  GLOBAL_MMSI_CHUNK_SIZE, GLOBAL_SCAN_ATTEMPTS, GLOBAL_SCAN_BUDGET_MS,
 } from './constants';
 import { drainAisStream } from './aisstream';
 import { pointInBox, isLargeVessel, isConfirmedSmall } from './ais';
@@ -71,6 +72,53 @@ function computeDirectEntryCount(prev: VesselState | undefined, currentTier: Tie
   const prevInDirect = prev !== undefined && prev.last_lat !== null && prev.last_lon !== null
     && tierOf(prev.last_lat, prev.last_lon) === 'direct';
   return prevInDirect ? prevCount : prevCount + 1;
+}
+
+function chunks<T>(items: T[], size: number): T[][] {
+  const result: T[][] = [];
+  for (let i = 0; i < items.length; i += size) result.push(items.slice(i, i + size));
+  return result;
+}
+
+async function drainGlobalMmsis(env: Env, mmsis: number[], startedAt: number): Promise<{ vessels: Vessel[]; staticOnly: Parameters<typeof enrichStaticData>[1]; missed: number[]; attempts: number }> {
+  const heard = new Map<number, Vessel>();
+  const staticUpdates = new Map<number, Parameters<typeof enrichStaticData>[1][number]>();
+  let pending = [...mmsis];
+  let attempts = 0;
+  const deadline = startedAt + GLOBAL_SCAN_BUDGET_MS;
+
+  for (let round = 1; round <= GLOBAL_SCAN_ATTEMPTS && pending.length > 0; round++) {
+    const roundStartCount = pending.length;
+    let roundHeard = 0;
+
+    for (const chunk of chunks(pending, GLOBAL_MMSI_CHUNK_SIZE)) {
+      if (Date.now() + GLOBAL_DRAIN_MS > deadline) {
+        console.warn(`[ingest] GLOBAL_SCAN_BUDGET_REACHED pending=${pending.length} attempts=${attempts} heard=${heard.size}`);
+        return { vessels: [...heard.values()], staticOnly: [...staticUpdates.values()], missed: pending, attempts };
+      }
+
+      attempts++;
+      const result = await drainAisStream({
+        apiKey: env.AISSTREAM_API_KEY,
+        boundingBox: GLOBAL_BOUNDING_BOX,
+        mmsis: chunk,
+        drainMs: GLOBAL_DRAIN_MS,
+      });
+
+      for (const v of result.vessels) {
+        if (!heard.has(v.mmsi)) roundHeard++;
+        heard.set(v.mmsi, v);
+      }
+      for (const update of result.staticOnly) {
+        staticUpdates.set(update.mmsi, update);
+      }
+    }
+
+    pending = pending.filter(mmsi => !heard.has(mmsi));
+    console.log(`[ingest] GLOBAL_SCAN_ROUND round=${round}/${GLOBAL_SCAN_ATTEMPTS} heard=${roundHeard}/${roundStartCount} pending=${pending.length} total_heard=${heard.size}`);
+  }
+
+  return { vessels: [...heard.values()], staticOnly: [...staticUpdates.values()], missed: pending, attempts };
 }
 
 export async function runDirectScan(env: Env): Promise<void> {
@@ -230,26 +278,25 @@ export async function runLocalScan(env: Env): Promise<void> {
 
 export async function runGlobalScan(env: Env): Promise<void> {
   const start = Date.now();
-  console.log('[ingest] global scan starting');
+  console.log('[ingest] GLOBAL_SCAN_START');
 
   const mmsis = await getOfInterestMmsis(env);
   if (mmsis.length === 0) {
-    console.log('[ingest] global scan skipped — no of-interest vessels yet');
+    console.log('[ingest] GLOBAL_SCAN_SKIPPED reason=no_of_interest_vessels');
     return;
   }
 
-  console.log(`[ingest] global scan — querying ${mmsis.length} of-interest MMSIs`);
+  console.log(
+    `[ingest] GLOBAL_SCAN_PLAN candidates=${mmsis.length}` +
+    ` chunk_size=${GLOBAL_MMSI_CHUNK_SIZE} attempts=${GLOBAL_SCAN_ATTEMPTS}` +
+    ` drain_ms=${GLOBAL_DRAIN_MS} budget_ms=${GLOBAL_SCAN_BUDGET_MS}`
+  );
 
-  const { vessels, staticOnly } = await drainAisStream({
-    apiKey: env.AISSTREAM_API_KEY,
-    boundingBox: GLOBAL_BOUNDING_BOX,
-    mmsis,
-    drainMs: GLOBAL_DRAIN_MS,
-  });
+  const { vessels, staticOnly, missed, attempts } = await drainGlobalMmsis(env, mmsis, start);
 
   if (vessels.length === 0) {
     if (staticOnly.length > 0) await enrichStaticData(env, staticOnly);
-    console.log(`[ingest] global scan — 0 of ${mmsis.length} queried vessels heard (outside coverage or not transmitting)`);
+    console.log(`[ingest] GLOBAL_SCAN_SUMMARY heard=0 candidates=${mmsis.length} drains=${attempts} missed=${missed.length} static_only=${staticOnly.length}`);
     return;
   }
 
@@ -311,11 +358,12 @@ export async function runGlobalScan(env: Env): Promise<void> {
   }
 
   console.log(
-    `[ingest] global scan — ${vessels.length}/${mmsis.length} heard` +
-    ` | by zone: ${tierCounts.direct} direct, ${tierCounts.local} local, ${tierCounts.global} global` +
-    ` | ${nMoved} moved, ${nHeartbeat} heartbeat, ${nPhantom} phantom, ${nSkipped} no-change`
+    `[ingest] GLOBAL_SCAN_SUMMARY heard=${vessels.length} candidates=${mmsis.length}` +
+    ` drains=${attempts} missed=${missed.length} static_only=${staticOnly.length}` +
+    ` zone_direct=${tierCounts.direct} zone_local=${tierCounts.local} zone_global=${tierCounts.global}` +
+    ` moved=${nMoved} heartbeat=${nHeartbeat} phantom=${nPhantom} skipped=${nSkipped}`
   );
   await commitScan(env, upserts, positions);
   await enrichStaticData(env, staticOnly);
-  console.log(`[ingest] global scan done — ${upserts.length} writes (${positions.length} pos), ${staticOnly.length} static-only enrichments in ${Date.now() - start}ms`);
+  console.log(`[ingest] GLOBAL_SCAN_DONE vessel_writes=${upserts.length} position_writes=${positions.length} static_only=${staticOnly.length} duration_ms=${Date.now() - start}`);
 }
