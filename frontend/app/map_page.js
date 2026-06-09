@@ -361,7 +361,6 @@ function render() {
 
     if (existing !== undefined) {
       existing.setLatLng([vessel.lat, vessel.lon]);
-      existing.setOpacity(markerOpacity(vessel));
       const prev = existing._vessel;
       const posChanged = prev.lat !== vessel.lat || prev.lon !== vessel.lon;
       const effectiveHeading = vessel.heading ?? (
@@ -380,6 +379,7 @@ function render() {
       }
       existing._vessel = vessel;
       existing._effectiveHeading = effectiveHeading;
+      existing.setOpacity(markerOpacity(vessel));
     } else {
       const marker = L.marker([vessel.lat, vessel.lon], { icon: makeVesselIcon(vessel, vessel.heading), opacity: markerOpacity(vessel) });
       marker._vessel = vessel;
