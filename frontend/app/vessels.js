@@ -41,15 +41,16 @@ const MID_TO_ISO2 = {
 };
 
 const CATEGORY_COLORS = {
-  ferry:      '#00e5ff',  // bright cyan  — regular commuter/ferry traffic
-  cruise:     '#fbbf24',  // amber gold   — large passenger cruise ships
-  cargo:      '#4a9eff',  // steel blue   — commercial cargo
-  tanker:     '#ff6b35',  // orange       — tankers / bulk carriers
-  tug:        '#c084fc',  // purple       — tugs and service vessels
-  fishing:    '#86efac',  // light green  — fishing vessels
-  pleasure:   '#f9a8d4',  // pink         — private / recreational
-  government: '#fb923c',  // amber        — coast guard / government
-  unknown:    '#4a5568',  // slate grey   — de-emphasised
+  ferry:      '#06b6d4',  // cyan-400    — dependable commuter traffic
+  cruise:     '#f59e0b',  // amber-400   — warm gold, luxury/passenger
+  cargo:      '#3b82f6',  // blue-500    — commercial cargo (most-tracked)
+  tanker:     '#ef4444',  // red-500     — distinct red, hazardous cargo
+  tug:        '#8b5cf6',  // violet-500  — muted purple, lower interest
+  fishing:    '#22c55e',  // green-500   — fishing vessels
+  pleasure:   '#ec4899',  // pink-500    — private / recreational
+  government: '#f97316',  // orange-500  — coast guard / government
+  military:   '#64748b',  // slate-500   — deliberately low-key
+  unknown:    '#525252',  // neutral-600 — de-emphasised
 };
 
 const CATEGORY_LABELS = {
@@ -61,6 +62,7 @@ const CATEGORY_LABELS = {
   fishing:    'Fishing',
   pleasure:   'Pleasure Craft',
   government: 'Government',
+  military:   'Military',
   unknown:    'Unknown',
 };
 
@@ -77,7 +79,6 @@ export function classifyVessel(vessel) {
     name.startsWith('WSF ') ||
     name.startsWith('QUEEN OF') ||
     name.startsWith('SALISH ') ||
-    name.startsWith('SPIRIT OF') ||
     name.includes('CLIPPER') ||
     name.includes(' FERRY')
   ) return 'ferry';
@@ -103,22 +104,35 @@ export function classifyVessel(vessel) {
     name.includes('KONINGSDAM') || name.includes('OOSTERDAM') ||
     name.includes('NIEUW') || name.includes('ROTTERDAM') ||
     // Other lines
-    name.includes('POESIA') || name.includes('PRINCESS') ||
-    name.includes('DISCOVERY') || name.includes('OVATION') ||
+    name.includes('POESIA') || name.includes('OVATION') ||
     name.includes('RADIANCE') || name.includes('SERENADE') ||
     name.includes('QUANTUM') || name.includes('BLISS') ||
     name.includes('ENCORE') || name.includes('JOY')
   ) return 'cruise';
 
-  if (t === null) return 'unknown';
+  if (t === null) {
+    if (len !== null && len > 150) return 'cargo';
+    if (
+      name.startsWith('CCGS ') ||
+      name.startsWith('USCGC ') ||
+      name.startsWith('CDN WARSHIP') ||
+      name.startsWith('YDT ') ||
+      name.startsWith('RV ') ||
+      name.startsWith('R/V ') ||
+      name.startsWith('CG')
+    ) return 'government';
+    return 'unknown';
+  }
   if (t >= 70 && t <= 79) return 'cargo';
   if (t >= 80 && t <= 89) return 'tanker';
   if (t >= 60 && t <= 69) return (len !== null && len > 200) ? 'cruise' : 'ferry';
   if (t >= 40 && t <= 49) return 'ferry';
+  if (t === 35) return 'military';
   if (t === 36 || t === 37) return 'pleasure';
   if (t === 30) return 'fishing';
-  if (t >= 31 && t <= 35 || t === 52 || t === 53) return 'tug';
-  if (t === 35 || (t >= 55 && t <= 58)) return 'government';
+  if ((t >= 31 && t <= 32) || t === 52 || t === 53) return 'tug';
+  if ((t >= 33 && t <= 34) || (t >= 50 && t <= 51) || t === 54 || (t >= 55 && t <= 59)) return 'government';
+  if (t >= 90 && t <= 99) return 'government';
   return 'unknown';
 }
 

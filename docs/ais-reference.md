@@ -60,16 +60,24 @@
 
 ## AIS vessel type codes → categories
 
-| Range | Category |
-|-------|----------|
-| 60–69 | Passenger |
-| 70–79 | Cargo |
-| 80–89 | Tanker |
-| 40–49 | High speed / Ferry |
-| 30    | Fishing |
-| 31–32 | Tug / push |
-| 36–37 | Pleasure craft |
-| other | Unknown |
+| Range   | Category           |
+|---------|--------------------|
+| 60–69   | Passenger          |
+| 70–79   | Cargo              |
+| 80–89   | Tanker             |
+| 40–49   | High speed / Ferry |
+| 35      | Military           |
+| 30      | Fishing            |
+| 31–32   | Tug / push         |
+| 33–34   | Dredging / Diving  |
+| 36–37   | Pleasure craft     |
+| 50–51   | Pilot / SAR        |
+| 52–53   | Tug                |
+| 54      | Anti-pollution     |
+| 55–59   | Government         |
+| 90–99   | Other (govt/aux)   |
+| null    | —                  | Name/length heuristics: govt name prefixes → `government`, length >150m → `cargo` |
+| other   | Unknown            |
 
 Full table: https://www.maritec.co.za/tools/aisvdmvdodecoding/
 
