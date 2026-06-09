@@ -296,12 +296,13 @@ function drawTrail(vessel, points, token) {
       const smoothed = catmullRomPoints(seg.pts);
       const fadePairs = Math.min(seg.pts.length - 1, 10);
       const fadeSmooth = Math.min(fadePairs * 12, smoothed.length);
-      const steps = 10;
+      const steps = Math.min(10, fadeSmooth);
 
       for (let i = 0; i < steps; i++) {
         const start = Math.floor(i * fadeSmooth / steps);
         const end = Math.floor((i + 1) * fadeSmooth / steps);
-        if (start >= end || start >= smoothed.length) break;
+        if (start >= smoothed.length) break;
+        if (start === end) continue;
         const pct = (i + 1) / steps;
         const layer = L.polyline(smoothed.slice(start, end), {
           color,
@@ -333,12 +334,13 @@ function drawTrail(vessel, points, token) {
   if (globalPts.length > 1) {
     const style = TIER_STYLE.global;
     const fadeSmooth = Math.min(10 * 12, globalPts.length);
-    const steps = 10;
+    const steps = Math.min(10, fadeSmooth);
 
     for (let i = 0; i < steps; i++) {
       const start = Math.floor(i * fadeSmooth / steps);
       const end = Math.floor((i + 1) * fadeSmooth / steps);
-      if (start >= end || start >= globalPts.length) break;
+      if (start >= globalPts.length) break;
+      if (start === end) continue;
       const pct = (i + 1) / steps;
       const layer = L.polyline(globalPts.slice(start, end), {
         color,
