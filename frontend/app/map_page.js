@@ -1,4 +1,4 @@
-import { VIEWSHEDS, DIRECT_BOUNDING_BOX, MOVING_SPEED_KN, TIER_STYLE, TRAIL_GAP_SEVER_MS } from '../config.js';
+import { VIEWSHEDS, DIRECT_BOUNDING_BOX, MOVING_SPEED_KN, TIER_STYLE, TRAIL_GAP_SEVER_MS, LIVE_TTL_MS } from '../config.js';
 import { subscribe as subscribeVessels } from './store.js';
 import { subscribe as subscribeSettings, getSettings, passesExtentFilter, vesselCategory } from './settings_store.js';
 import { haversineNm, bearingDeg } from './geo.js';
@@ -29,6 +29,12 @@ let trailReqToken = 0;
 
 function isMoving(vessel) {
   return vessel.speed !== null && vessel.speed > MOVING_SPEED_KN;
+}
+
+function markerOpacity(vessel) {
+  const age = Date.now() - vessel.last_seen;
+  const ttl = LIVE_TTL_MS[vessel.max_extent] ?? LIVE_TTL_MS.local;
+  return Math.max(0, Math.min(1, 1 - age / ttl));
 }
 
 function makeArrowIcon(vessel, heading) {
@@ -355,6 +361,7 @@ function render() {
 
     if (existing !== undefined) {
       existing.setLatLng([vessel.lat, vessel.lon]);
+      existing.setOpacity(markerOpacity(vessel));
       const prev = existing._vessel;
       const posChanged = prev.lat !== vessel.lat || prev.lon !== vessel.lon;
       const effectiveHeading = vessel.heading ?? (
@@ -374,7 +381,7 @@ function render() {
       existing._vessel = vessel;
       existing._effectiveHeading = effectiveHeading;
     } else {
-      const marker = L.marker([vessel.lat, vessel.lon], { icon: makeVesselIcon(vessel, vessel.heading) });
+      const marker = L.marker([vessel.lat, vessel.lon], { icon: makeVesselIcon(vessel, vessel.heading), opacity: markerOpacity(vessel) });
       marker._vessel = vessel;
       marker._effectiveHeading = vessel.heading;
       marker.on('click', () => openSheet(marker._vessel));

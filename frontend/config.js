@@ -28,6 +28,14 @@ export const MOVING_SPEED_KN = 0.5;
 // Trail cache TTL — refetch only when older than this
 export const TRAIL_TTL_MS = 120_000;
 
+// How long a tier's vessels stay on screen after last_seen.
+// Must stay in sync with worker/src/constants.ts LIVE_TTL_*_MS.
+export const LIVE_TTL_MS = {
+  direct: 6 * 60 * 60 * 1000,
+  local:  72 * 60 * 60 * 1000,
+  global: 72 * 60 * 60 * 1000,
+};
+
 // Time-gap thresholds for trail line behavior per tier.
 //   direct: >2h → sever line into two
 //   local:  >6h → sever line into two
