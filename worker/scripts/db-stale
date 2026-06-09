@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Vessels not seen within the given time window — useful for identifying
+# vessels that have left the area or gone silent.
+#
+# Includes hours_ago to show how long since last contact.
+#
+# Usage:  db-stale [--local] [--db <name>] [--pretty] [--hours N]
+#
+# Examples:
+#   db-stale
+#   db-stale --hours 6
+#   db-stale --hours 72 --pretty
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+show_help() { cat <<'EOF'
+Usage: db-stale [--local] [--db <name>] [--pretty] [--hours N]
+
+Vessels not seen within the given hours window. Default 24 hours.
+
+Options:
+  --hours N      Hours threshold (default: 24)
+  --local        Query local D1 (default: remote)
+  --db <name>    Database name (default: vessel-tracker)
+  --pretty       Human-readable table instead of JSON
+  --help, -h     Show this help
+
+Output (JSON mode): array of { mmsi, name, of_interest, max_extent,
+  last_seen_utc, hours_ago }
+
+Examples:
+  db-stale
+  db-stale --hours 6
+  db-stale --hours 72 --pretty
+EOF
+}
+
+source "$SCRIPT_DIR/db-common"
+
+HOURS=24
+args=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --hours) HOURS="$2"; validate_int "hours" "$HOURS"; shift 2 ;;
+        *) args+=("$1"); shift ;;
+    esac
+done
+set -- "${args[@]}"
+parse_common_flags "$@"
+
+d1_query "
+SELECT mmsi, name, of_interest, max_extent,
+       datetime(last_seen/1000,'unixepoch') as last_seen_utc,
+       CAST((CAST(strftime('%s','now') AS INTEGER) * 1000 - last_seen) / 3600000 AS INTEGER) as hours_ago
+FROM vessels
+WHERE last_seen < CAST(strftime('%s','now') AS INTEGER) * 1000 - ($HOURS * 3600000)
+ORDER BY last_seen DESC;
+"

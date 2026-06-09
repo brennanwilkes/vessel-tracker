@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# Shared helpers for D1 inspection scripts.
+# Source this from other db-* scripts:  source "$(dirname "$0")/db-common"
+set -euo pipefail
+
+DB_NAME="vessel-tracker"
+LOCAL_FLAG=""
+PRETTY_FLAG=""
+
+# Default help — scripts define their own before sourcing db-common to override
+if ! declare -f show_help >/dev/null 2>&1; then
+    show_help() {
+        echo "Usage: $(basename "$0") [--local] [--db <name>] [--pretty]"
+    }
+fi
+
+# Validate a positive integer argument (e.g. --limit, --hours, --min).
+# Dies with an error message on failure.
+validate_int() {
+    local name="$1" value="$2"
+    if [[ ! "$value" =~ ^[1-9][0-9]*$ ]]; then
+        echo "Error: $name must be a positive integer, got '$value'" >&2
+        exit 1
+    fi
+}
+
+# Validate MMSI — positive integer, reasonable range for real AIS identifiers.
+validate_mmsi() {
+    local value="$1"
+    if [[ ! "$value" =~ ^[1-9][0-9]{5,8}$ ]]; then
+        echo "Error: MMSI must be a 6-9 digit positive integer, got '$value'" >&2
+        exit 1
+    fi
+}
+
+# Sanitize a value for use inside a SQLite LIKE single-quoted string.
+# Doubles single quotes (SQLite escape) — safe to interpolate in: LIKE '%<safe>%'
+sanitize_like() {
+    local s="$1"
+    s="${s//\'/''}"
+    printf '%s' "$s"
+}
+
+# Consume flags up to the separator (--) or end of args.
+# Sets LOCAL_FLAG, DB_NAME, PRETTY_FLAG; leaves remaining args in $@.
+parse_common_flags() {
+    local remaining=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --local)    LOCAL_FLAG="--local"; shift ;;
+            --db)       DB_NAME="$2"; shift 2 ;;
+            --pretty)   PRETTY_FLAG="1"; shift ;;
+            --)         shift; remaining+=("$@"); break ;;
+            --help|-h)  show_help; exit 0 ;;
+            *)          remaining+=("$1"); shift ;;
+        esac
+    done
+    set -- "${remaining[@]}"
+}
+
+# Run a D1 query (JSON output by default, ASCII table with --pretty).
+d1_query() {
+    local sql="$1"
+    if [[ -n "$PRETTY_FLAG" ]]; then
+        npx wrangler d1 execute "$DB_NAME" --command "$sql" $LOCAL_FLAG 2>/dev/null
+    else
+        npx wrangler d1 execute "$DB_NAME" --json --command "$sql" $LOCAL_FLAG 2>/dev/null
+    fi
+}

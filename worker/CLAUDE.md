@@ -30,7 +30,27 @@ migrations/
   002_rebuild_d1.sql — D1-only rebuild: event-based positions schema
 scripts/
   ensure-bindings.mjs — idempotent: creates D1, patches wrangler.toml, applies migrations
+  db-common           — shared lib (sourced by db-*): flag parsing, MMSI/numeric validation, d1_query()
+  db-stats            — vessel/position counts by category and tier
+  db-list-ships       — all vessels with key fields, sorted by last_seen
+  db-ship <mmsi>      — full row + per-tier position stats for one vessel
+  db-positions <mmsi> — movement-event timeline for a vessel (--tier, --limit)
+  db-of-interest      — vessels that entered the direct bounding box (map candidates)
+  db-recent           — most recently seen vessels with moving/stopped status
+  db-timeline         — recent position events across all vessels (--tier, --limit)
+  db-stale            — vessels not seen within N hours (--hours, default 24)
+  db-by-extent        — vessel count by max_extent (direct/local/global)
+  db-by-type          — vessel count by AIS type code (--min N)
+  db-tiers            — position stats per scan tier (count, vessels, avg speed)
+  db-search <term>    — search vessels by MMSI or name fragment
+  db-raw <sql>        — run arbitrary SQL (read-only guard; --write to bypass)
+  README.md           — quick-reference for AI agents
 ```
+All db-* scripts output JSON by default (--pretty for tables). Use with:
+  ./scripts/db-stats --local        # local dev
+  ./scripts/db-stats                 # remote (production)
+  ./scripts/db-ship 316123456       # single vessel
+See scripts/README.md for full reference.
 
 ## D1 schema (see migrations/002_rebuild_d1.sql)
 

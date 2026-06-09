@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Full detail for a single vessel — row + tier-level position stats.
+#
+# Runs 3 queries and returns them as a JSON array of result sets:
+#   1. All columns from vessels row for the given MMSI
+#   2. Position count + time range per tier (direct/local/global)
+#   3. Total position count
+#
+# Usage:  db-ship <mmsi> [--local] [--db <name>] [--pretty]
+#
+# Examples:
+#   db-ship 316123456
+#   db-ship 316123456 --pretty
+#   db-ship 316123456 --pretty --local
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+show_help() { cat <<'EOF'
+Usage: db-ship <mmsi> [--local] [--db <name>] [--pretty]
+
+Full detail for a single vessel by MMSI. Returns the vessels row, per-tier
+position statistics, and total position count.
+
+Arguments:
+  mmsi           6-9 digit AIS vessel identifier
+
+Options:
+  --local        Query local D1 (default: remote)
+  --db <name>    Database name (default: vessel-tracker)
+  --pretty       Human-readable table instead of JSON
+  --help, -h     Show this help
+
+Output (JSON mode): array of 3 result sets:
+  [0] vessels row (all columns)
+  [1] per-tier stats: { tier, pos_count, first_pos_utc, last_pos_utc }
+  [2] total position count: { total_positions }
+
+Examples:
+  db-ship 316123456
+  db-ship 316123456 --pretty
+EOF
+}
+
+source "$SCRIPT_DIR/db-common"
+
+MMSI=""
+args=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --help|-h) show_help; exit 0 ;;
+        *) args+=("$1"); shift ;;
+    esac
+done
+set -- "${args[@]}"
+MMSI="${1:-}"; shift || true
+parse_common_flags "$@"
+
+if [[ -z "$MMSI" ]]; then
+    echo "Error: MMSI is required" >&2
+    echo "Usage: db-ship <mmsi> [--local] [--db <name>] [--pretty]" >&2
+    exit 1
+fi
+validate_mmsi "$MMSI"
+
+d1_query "
+SELECT * FROM vessels WHERE mmsi = $MMSI;
+SELECT tier, COUNT(*) as pos_count,
+       MIN(datetime(ts/1000,'unixepoch')) as first_pos_utc,
+       MAX(datetime(ts/1000,'unixepoch')) as last_pos_utc
+FROM positions WHERE mmsi = $MMSI GROUP BY tier ORDER BY tier;
+SELECT COUNT(*) as total_positions FROM positions WHERE mmsi = $MMSI;
+"

@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Most recent position events across ALL vessels (global event log).
+#
+# Output fields (JSON): id, mmsi, name, lat, lon, speed, tier, ts_utc
+# Sorted by ts desc. Use --tier to filter to a single scan tier.
+#
+# Usage:  db-timeline [--local] [--db <name>] [--pretty] [--limit N] [--tier direct|local|global]
+#
+# Examples:
+#   db-timeline
+#   db-timeline --tier direct --limit 10
+#   db-timeline --pretty
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+show_help() { cat <<'EOF'
+Usage: db-timeline [--local] [--db <name>] [--pretty] [--limit N] [--tier direct|local|global]
+
+Recent position events across all vessels. Movement events only (not time-sampled).
+
+Options:
+  --limit N      Max rows (default: 50)
+  --tier TIER    Filter to a single tier: direct, local, or global
+  --local        Query local D1 (default: remote)
+  --db <name>    Database name (default: vessel-tracker)
+  --pretty       Human-readable table instead of JSON
+  --help, -h     Show this help
+
+Output (JSON mode): array of { id, mmsi, name, lat, lon, speed, tier, ts_utc }
+
+Examples:
+  db-timeline
+  db-timeline --tier direct --limit 10
+  db-timeline --pretty
+EOF
+}
+
+source "$SCRIPT_DIR/db-common"
+
+LIMIT=50
+TIER_FILTER=""
+args=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --limit) LIMIT="$2"; validate_int "limit" "$LIMIT"; shift 2 ;;
+        --tier)  TIER="$2"; TIER_FILTER="WHERE p.tier = '$TIER'"; shift 2 ;;
+        *) args+=("$1"); shift ;;
+    esac
+done
+set -- "${args[@]}"
+parse_common_flags "$@"
+
+d1_query "
+SELECT p.id, p.mmsi, COALESCE(v.name, '?') as name, p.lat, p.lon, p.speed, p.tier,
+       datetime(p.ts/1000,'unixepoch') as ts_utc
+FROM positions p
+LEFT JOIN vessels v ON p.mmsi = v.mmsi
+$TIER_FILTER
+ORDER BY p.ts DESC
+LIMIT $LIMIT;
+"

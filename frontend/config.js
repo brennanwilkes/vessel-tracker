@@ -40,7 +40,7 @@ export const LIVE_TTL_MS = {
 //   The marker fades from 1.0 → floor over this window, then holds at floor.
 export const FADE_TTL_MS = {
   direct: 2 * 60 * 60 * 1000,
-  local:  6 * 60 * 60 * 1000,
+  local:  24 * 60 * 60 * 1000,
   global: 24 * 60 * 60 * 1000,
 };
 

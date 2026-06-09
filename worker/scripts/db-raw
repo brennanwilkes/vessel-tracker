@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# WARNING: Run arbitrary SQL against D1. This is a POWER TOOL — it can
+# DELETE or MODIFY data. Use with extreme caution.
+#
+# By default this is READ-ONLY: the script prepends "SELECT 1; " and only
+# executes your query if it appears to start with SELECT. To bypass the
+# read-only guard, pass --write.
+#
+# Usage:  db-raw "<sql>" [--local] [--db <name>] [--pretty] [--write]
+#
+# Examples:
+#   db-raw "SELECT COUNT(*) FROM vessels"
+#   db-raw "SELECT * FROM vessels WHERE mmsi = 316123456"
+#   db-raw "DELETE FROM positions WHERE tier = 'global'" --write     # DANGER
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+show_help() { cat <<'EOF'
+Usage: db-raw "<sql>" [--local] [--db <name>] [--pretty] [--write]
+
+Run arbitrary SQL against the D1 database. READ-ONLY by default — only
+SELECT queries execute without --write.
+
+WARNING: This tool can delete or modify data. Double-check your SQL
+before using --write.
+
+Arguments:
+  sql            SQL query string (required, quote it)
+
+Options:
+  --write        Allow writes (INSERT/UPDATE/DELETE/ALTER/DROP — DANGER)
+  --local        Query local D1 (default: remote)
+  --db <name>    Database name (default: vessel-tracker)
+  --pretty       Human-readable table instead of JSON
+  --help, -h     Show this help
+
+Output (JSON mode): array of result sets, same as wrangler d1 execute --json
+
+Examples:
+  db-raw "SELECT COUNT(*) FROM vessels"
+  db-raw "SELECT * FROM positions ORDER BY ts DESC LIMIT 5"
+  db-raw "DELETE FROM positions WHERE ts < 1000000000000" --write
+EOF
+}
+
+source "$SCRIPT_DIR/db-common"
+
+SQL=""
+WRITE_FLAG=""
+args=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --help|-h) show_help; exit 0 ;;
+        --write) WRITE_FLAG="1"; shift ;;
+        *) args+=("$1"); shift ;;
+    esac
+done
+set -- "${args[@]}"
+SQL="${1:-}"; shift || true
+parse_common_flags "$@"
+
+if [[ -z "$SQL" ]]; then
+    echo "Error: SQL query is required" >&2; exit 1
+fi
+
+# Read-only guard: strip whitespace and check the first keyword
+SQL_TRIMMED="$(echo "$SQL" | sed 's/^[[:space:]]*//')"
+FIRST_WORD="$(echo "$SQL_TRIMMED" | awk '{print toupper($1)}')"
+
+if [[ -z "$WRITE_FLAG" && "$FIRST_WORD" != "SELECT" && "$FIRST_WORD" != "WITH" ]]; then
+    echo "Error: Read-only mode — only SELECT/WITH queries are allowed." >&2
+    echo "Pass --write to allow writes (DANGER). Query was: $SQL" >&2
+    exit 1
+fi
+
+d1_query "$SQL"

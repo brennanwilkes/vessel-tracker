@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Most recently seen vessels by last_seen heartbeat time.
+#
+# Includes moving/stopped status based on last_speed (threshold 1.5 kn).
+#
+# Usage:  db-recent [--local] [--db <name>] [--pretty] [--limit N]
+#
+# Examples:
+#   db-recent
+#   db-recent --limit 5
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+show_help() { cat <<'EOF'
+Usage: db-recent [--local] [--db <name>] [--pretty] [--limit N]
+
+Most recently seen vessels (by last_seen timestamp). Includes a 'status'
+field: 'moving' if speed >= 1.5 kn, 'stopped' otherwise.
+
+Options:
+  --local        Query local D1 (default: remote)
+  --db <name>    Database name (default: vessel-tracker)
+  --pretty       Human-readable table instead of JSON
+  --limit N      Max rows (default: 30)
+  --help, -h     Show this help
+
+Output (JSON mode): array of { mmsi, name, vessel_type, last_speed, of_interest,
+  max_extent, last_seen_utc, status }
+
+Examples:
+  db-recent
+  db-recent --limit 5 --pretty
+EOF
+}
+
+source "$SCRIPT_DIR/db-common"
+
+LIMIT=30
+args=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --limit) LIMIT="$2"; validate_int "limit" "$LIMIT"; shift 2 ;;
+        *) args+=("$1"); shift ;;
+    esac
+done
+set -- "${args[@]}"
+parse_common_flags "$@"
+
+d1_query "
+SELECT mmsi, name, vessel_type, last_speed, of_interest, max_extent,
+       datetime(last_seen/1000,'unixepoch') as last_seen_utc,
+       CASE WHEN last_speed IS NOT NULL AND last_speed >= 1.5 THEN 'moving' ELSE 'stopped' END as status
+FROM vessels
+ORDER BY last_seen DESC
+LIMIT $LIMIT;
+"

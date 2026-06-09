@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Distribution of vessels by their max_extent tier (direct / local / global).
+#
+# Shows how many vessels have been tracked at each tier, plus percentage.
+#
+# Usage:  db-by-extent [--local] [--db <name>] [--pretty]
+#
+# Examples:
+#   db-by-extent
+#   db-by-extent --pretty
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+show_help() { cat <<'EOF'
+Usage: db-by-extent [--local] [--db <name>] [--pretty]
+
+Vessels grouped by max_extent (farthest tier observed).
+
+Options:
+  --local        Query local D1 (default: remote)
+  --db <name>    Database name (default: vessel-tracker)
+  --pretty       Human-readable table instead of JSON
+  --help, -h     Show this help
+
+Output (JSON mode): array of { max_extent, cnt, pct }
+
+Valid extents: direct < local < global
+
+Examples:
+  db-by-extent
+  db-by-extent --pretty
+EOF
+}
+
+source "$SCRIPT_DIR/db-common"
+
+parse_common_flags "$@"
+
+d1_query "
+SELECT max_extent, COUNT(*) as cnt,
+       ROUND(100.0 * COUNT(*) / (SELECT COUNT(*) FROM vessels), 1) as pct
+FROM vessels GROUP BY max_extent ORDER BY cnt DESC;
+"

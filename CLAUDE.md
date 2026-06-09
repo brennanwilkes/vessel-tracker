@@ -46,3 +46,29 @@ See `frontend/CLAUDE.md`, `worker/CLAUDE.md`, `model/CLAUDE.md` for subsystem de
 - `docs/ais-reference.md` — aisstream message shapes, AIS vessel-type codes, bounding box
 - `docs/architecture.md` — data flow diagram, KV/D1 usage, cron model
 - `docs/decisions.md` — architectural decisions (why cron not Durable Objects, etc.)
+
+## D1 inspection tools (`worker/scripts/db-*`)
+
+Shell scripts wrapping `npx wrangler d1 execute` for inspecting the live (or local) D1
+database. All output JSON by default (`--pretty` for human-readable tables). Run from
+repo root: `worker/scripts/db-stats`.
+
+| Command | What it returns |
+|---------|----------------|
+| `db-stats` | Vessel/position counts by category and tier |
+| `db-list-ships` | All vessels with key fields, last_seen desc |
+| `db-ship <mmsi>` | Full vessels row + per-tier position stats |
+| `db-positions <mmsi>` | Movement-event timeline for one vessel (--tier, --limit) |
+| `db-of-interest` | Vessels that entered the direct bounding box (map candidates) |
+| `db-recent` | Most recently seen vessels with moving/stopped status |
+| `db-timeline` | Recent position events across all vessels (--tier, --limit) |
+| `db-stale [--hours N]` | Vessels not seen within N hours (default 24) |
+| `db-by-extent` | Vessel count by max_extent (direct/local/global) |
+| `db-by-type [--min N]` | Vessel count by AIS type code |
+| `db-tiers` | Position stats per scan tier |
+| `db-search <term>` | Search vessels by MMSI or name fragment |
+| `db-raw "<sql>"` | Arbitrary SQL (read-only guard; --write to allow mutations) |
+
+Common flags: `--local` for local D1, `--db <name>` to change database, `--pretty` for
+tables. MMSI and numeric args are validated before SQL interpolation; search terms are
+single-quote-escaped. Use these anytime you need to see what's in the database.

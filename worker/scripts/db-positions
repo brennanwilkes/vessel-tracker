@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Movement-event timeline for a vessel — lat, lon, speed, heading, tier, timestamp.
+#
+# Output fields (JSON): id, mmsi, name, lat, lon, speed, heading, tier, ts_utc
+# Sorted by ts desc (most recent first). Optionally filter by tier.
+#
+# Usage:  db-positions <mmsi> [--local] [--db <name>] [--pretty] [--limit N] [--tier direct|local|global]
+#
+# Examples:
+#   db-positions 316123456
+#   db-positions 316123456 --tier direct
+#   db-positions 316123456 --limit 20 --pretty
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+show_help() { cat <<'EOF'
+Usage: db-positions <mmsi> [--local] [--db <name>] [--pretty] [--limit N] [--tier direct|local|global]
+
+Position timeline for a vessel. Movement events only (not time-sampled).
+
+Arguments:
+  mmsi           6-9 digit AIS vessel identifier
+
+Options:
+  --limit N      Max rows (default: 100)
+  --tier TIER    Filter by scan tier: direct, local, or global
+  --local        Query local D1 (default: remote)
+  --db <name>    Database name (default: vessel-tracker)
+  --pretty       Human-readable table instead of JSON
+  --help, -h     Show this help
+
+Output (JSON mode): array of { id, mmsi, name, lat, lon, speed, heading, tier, ts_utc }
+
+Examples:
+  db-positions 316123456
+  db-positions 316123456 --tier direct
+  db-positions 316123456 --limit 20 --pretty
+EOF
+}
+
+source "$SCRIPT_DIR/db-common"
+
+MMSI=""
+LIMIT=100
+TIER_FILTER=""
+args=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --help|-h) show_help; exit 0 ;;
+        --limit) LIMIT="$2"; validate_int "limit" "$LIMIT"; shift 2 ;;
+        --tier)  TIER="$2"; TIER_FILTER="AND p.tier = '$TIER'"; shift 2 ;;
+        *) args+=("$1"); shift ;;
+    esac
+done
+set -- "${args[@]}"
+MMSI="${1:-}"; shift || true
+parse_common_flags "$@"
+
+if [[ -z "$MMSI" ]]; then
+    echo "Error: MMSI is required" >&2; exit 1
+fi
+validate_mmsi "$MMSI"
+
+d1_query "
+SELECT p.id, p.mmsi, v.name, p.lat, p.lon, p.speed, p.heading, p.tier,
+       datetime(p.ts/1000,'unixepoch') as ts_utc
+FROM positions p
+LEFT JOIN vessels v ON p.mmsi = v.mmsi
+WHERE p.mmsi = $MMSI $TIER_FILTER
+ORDER BY p.ts DESC
+LIMIT $LIMIT;
+"
