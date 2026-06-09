@@ -70,9 +70,22 @@ function isMoving(vessel) {
   return vessel.speed !== null && vessel.speed > MOVING_SPEED_KN;
 }
 
+function currentExtent(vessel) {
+  const { lat, lon } = vessel;
+  if (lat >= DIRECT_BOUNDING_BOX.sw[0] && lat <= DIRECT_BOUNDING_BOX.ne[0] &&
+      lon >= DIRECT_BOUNDING_BOX.sw[1] && lon <= DIRECT_BOUNDING_BOX.ne[1]) {
+    return 'direct';
+  }
+  if (lat >= LOCAL_BOUNDING_BOX.sw[0] && lat <= LOCAL_BOUNDING_BOX.ne[0] &&
+      lon >= LOCAL_BOUNDING_BOX.sw[1] && lon <= LOCAL_BOUNDING_BOX.ne[1]) {
+    return 'local';
+  }
+  return 'global';
+}
+
 function markerOpacity(vessel) {
   const age = Date.now() - vessel.last_seen;
-  const ttl = FADE_TTL_MS[vessel.max_extent] ?? FADE_TTL_MS.local;
+  const ttl = FADE_TTL_MS[currentExtent(vessel)] ?? FADE_TTL_MS.local;
   const remaining = Math.max(0, 1 - age / ttl);
   return Math.max(0.30, remaining);
 }
