@@ -25,6 +25,44 @@ let lastVessels = [];
 let lastSettings = getSettings();
 let trailReqToken = 0;
 
+// ── Trail fade helpers ────────────────────────────────────────────────────────
+
+function hexToRgb(hex) {
+  const v = parseInt(hex.slice(1), 16);
+  return [(v >> 16) & 255, (v >> 8) & 255, v & 255];
+}
+
+// Gradient-faded polyline: single CanvasGradient stroke from transparent (oldest)
+// to full trailFade (newest). One path = no anti-aliasing seams.
+function makeFadePolyline(pts, color, weight, trailFade) {
+  const [r, g, b] = hexToRgb(color);
+  const layer = L.polyline(pts, {
+    color: `rgb(${r},${g},${b})`,
+    weight,
+    opacity: 1,
+    className: 'vessel-trail',
+    interactive: false,
+  });
+  const tailOpacity = trailFade;
+  const headOpacity = trailFade * 0.1;
+
+  const origUpdate = L.Polyline.prototype._updatePath;
+  layer._updatePath = function () {
+    if (this._renderer && this._renderer._ctx && this._map && this._latlngs && this._latlngs[0] && this._latlngs[0].length >= 2) {
+      const ctx = this._renderer._ctx;
+      const lls = this._latlngs[0];
+      const first = this._map.latLngToLayerPoint(lls[0]);
+      const last = this._map.latLngToLayerPoint(lls[lls.length - 1]);
+      const g = ctx.createLinearGradient(first.x, first.y, last.x, last.y);
+      g.addColorStop(0, `rgba(${r},${g},${b},${headOpacity})`);
+      g.addColorStop(1, `rgba(${r},${g},${b},${tailOpacity})`);
+      this.options.color = g;
+    }
+    origUpdate.call(this);
+  };
+  return layer;
+}
+
 // ── Icon helpers ─────────────────────────────────────────────────────────────
 
 function isMoving(vessel) {
@@ -293,14 +331,8 @@ function drawTrail(vessel, points, token) {
       globalPts = globalPts.concat(catmullRomPoints(seg.pts));
     } else {
       const style = TIER_STYLE[seg.tier];
-      const layer = L.polyline(catmullRomPoints(seg.pts), {
-        color,
-        weight: style.weight,
-        opacity: 0,
-        className: 'vessel-trail',
-        interactive: false,
-      });
-      layer._targetOpacity = style.opacity * trailFade;
+      const smooth = catmullRomPoints(seg.pts);
+      const layer = makeFadePolyline(smooth, color, style.weight, style.opacity * trailFade);
       layer.addTo(map);
       layers.push(layer);
     }
@@ -308,25 +340,12 @@ function drawTrail(vessel, points, token) {
 
   if (globalPts.length > 1) {
     const style = TIER_STYLE.global;
-    const layer = L.polyline(globalPts, {
-      color,
-      weight: style.weight,
-      opacity: 0,
-      className: 'vessel-trail',
-      interactive: false,
-    });
-    layer._targetOpacity = style.opacity * trailFade;
+    const layer = makeFadePolyline(globalPts, color, style.weight, style.opacity * trailFade);
     layer.addTo(map);
     layers.push(layer);
   }
 
   trailLayers.set(mmsi, layers);
-
-  requestAnimationFrame(() => {
-    for (const layer of layers) {
-      layer.setStyle({ opacity: layer._targetOpacity });
-    }
-  });
 }
 
 async function scheduleTrails(visibleVessels, token) {
