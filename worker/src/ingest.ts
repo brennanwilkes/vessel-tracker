@@ -5,6 +5,7 @@ import {
   DIRECT_DRAIN_MS, LOCAL_DRAIN_MS, GLOBAL_DRAIN_MS,
   PHANTOM_SPEED_MIN_KN, PHANTOM_STALL_MS,
   GLOBAL_MMSI_CHUNK_SIZE, GLOBAL_SCAN_ATTEMPTS, GLOBAL_SCAN_BUDGET_MS,
+  LIVE_TTL_LOCAL_MS,
 } from './constants';
 import { drainAisStream } from './aisstream';
 import { pointInBox, isLargeVessel, isConfirmedSmall } from './ais';
@@ -93,8 +94,9 @@ async function drainGlobalMmsis(env: Env, mmsis: number[], startedAt: number): P
 
     for (const chunk of chunks(pending, GLOBAL_MMSI_CHUNK_SIZE)) {
       if (Date.now() + GLOBAL_DRAIN_MS > deadline) {
-        console.warn(`[ingest] GLOBAL_SCAN_BUDGET_REACHED pending=${pending.length} attempts=${attempts} heard=${heard.size}`);
-        return { vessels: [...heard.values()], staticOnly: [...staticUpdates.values()], missed: pending, attempts };
+        const missed = pending.filter(mmsi => !heard.has(mmsi));
+        console.warn(`[ingest] GLOBAL_SCAN_BUDGET_REACHED pending=${missed.length} attempts=${attempts} heard=${heard.size}`);
+        return { vessels: [...heard.values()], staticOnly: [...staticUpdates.values()], missed, attempts };
       }
 
       attempts++;
@@ -280,7 +282,8 @@ export async function runGlobalScan(env: Env): Promise<void> {
   const start = Date.now();
   console.log('[ingest] GLOBAL_SCAN_START');
 
-  const mmsis = await getOfInterestMmsis(env);
+  const staleCutoffMs = start - LIVE_TTL_LOCAL_MS;
+  const mmsis = await getOfInterestMmsis(env, staleCutoffMs);
   if (mmsis.length === 0) {
     console.log('[ingest] GLOBAL_SCAN_SKIPPED reason=no_of_interest_vessels');
     return;

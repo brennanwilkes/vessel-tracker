@@ -198,11 +198,7 @@ export async function getCurrentVessels(env: Env, directTtlMs: number, localTtlM
     .prepare(
       `SELECT mmsi,name,vessel_type,length,destination,
               last_lat AS lat,last_lon AS lon,last_speed AS speed,last_heading AS heading,
-              last_pos_ts,last_seen,
-              CASE
-                WHEN max_extent = 'local' AND last_seen < ?2 THEN 'global'
-                ELSE max_extent
-              END AS max_extent,
+              last_pos_ts,last_seen,max_extent,
               first_direct_at,direct_entry_count
        FROM vessels WHERE of_interest = 1 AND first_direct_at IS NOT NULL
          AND (
@@ -233,9 +229,30 @@ export async function getTrack(env: Env, mmsi: number, tiers: Tier[], limit: num
   return result.results;
 }
 
-export async function getOfInterestMmsis(env: Env): Promise<number[]> {
+export async function getOfInterestMmsis(env: Env, staleCutoffMs?: number): Promise<number[]> {
+  if (staleCutoffMs !== undefined) {
+    const result = await env.VESSELS_DB
+      .prepare(
+        `SELECT mmsi FROM vessels
+         WHERE of_interest = 1
+         ORDER BY
+           CASE
+             WHEN max_extent = 'global' THEN 0
+             WHEN max_extent = 'local' AND last_seen < ?1 THEN 1
+             WHEN max_extent = 'direct' AND last_seen < ?1 THEN 2
+             WHEN max_extent = 'local' THEN 3
+             WHEN max_extent = 'direct' THEN 4
+             ELSE 5
+           END,
+           last_seen ASC`
+      )
+      .bind(staleCutoffMs)
+      .all<{ mmsi: number }>();
+    return result.results.map(r => r.mmsi);
+  }
+
   const result = await env.VESSELS_DB
-    .prepare(`SELECT mmsi FROM vessels WHERE of_interest = 1`)
+    .prepare(`SELECT mmsi FROM vessels WHERE of_interest = 1 ORDER BY last_seen ASC`)
     .all<{ mmsi: number }>();
   return result.results.map(r => r.mmsi);
 }

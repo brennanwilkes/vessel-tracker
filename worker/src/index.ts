@@ -51,7 +51,7 @@ export default {
       ctx.waitUntil(
         runLocalScan(env).catch(err => console.error('[scheduled] local scan failed:', err))
       );
-    } else if (event.cron === '30 16 * * *') {
+    } else if (event.cron === '0 * * * *') {
       ctx.waitUntil(
         runGlobalScan(env).catch(err => console.error('[scheduled] global scan failed:', err))
       );
