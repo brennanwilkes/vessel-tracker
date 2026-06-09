@@ -54,10 +54,10 @@ function makeFadePolyline(pts, color, weight, trailFade) {
       const ctx = this._renderer._ctx;
       const first = this._map.latLngToLayerPoint(firstLatLon);
       const last = this._map.latLngToLayerPoint(lastLatLon);
-      const g = ctx.createLinearGradient(first.x, first.y, last.x, last.y);
-      g.addColorStop(0, `rgba(${r},${g},${b},${headOpacity})`);
-      g.addColorStop(1, `rgba(${r},${g},${b},${tailOpacity})`);
-      this.options.color = g;
+      const grad = ctx.createLinearGradient(first.x, first.y, last.x, last.y);
+      grad.addColorStop(0, `rgba(${r},${g},${b},${headOpacity})`);
+      grad.addColorStop(1, `rgba(${r},${g},${b},${tailOpacity})`);
+      this.options.color = grad;
     }
     origUpdate.call(this);
   };
@@ -74,7 +74,7 @@ function markerOpacity(vessel) {
   const age = Date.now() - vessel.last_seen;
   const ttl = FADE_TTL_MS[vessel.max_extent] ?? FADE_TTL_MS.local;
   const remaining = Math.max(0, 1 - age / ttl);
-  return Math.max(0.30, remaining * remaining);
+  return Math.max(0.30, remaining);
 }
 
 function setMarkerOpacity(marker, opacity) {
