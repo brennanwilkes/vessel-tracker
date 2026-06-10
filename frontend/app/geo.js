@@ -168,8 +168,8 @@ function pathLengthKm(path) {
 // Main entry point: given two [lat,lon] points and a list of land polygons
 // with pre-computed bounding boxes, returns the synthetic perimeter path
 // around the first intersected landmass, or null if no land is crossed.
-// The path is simplified (Douglas-Peucker) using simplifyToleranceKm to
-// create a visual buffer between the trail and the coastline.
+// Tolerance scales with gap distance so short crossings are tight (harbour
+// features) while long crossings (entire peninsulas) produce loose arcs.
 export function routeAroundLand(a, b, polygons, bboxes, simplifyToleranceKm) {
   const minKm = 5;
   const dist = haversineKm(a[0], a[1], b[0], b[1]);
@@ -207,7 +207,8 @@ export function routeAroundLand(a, b, polygons, bboxes, simplifyToleranceKm) {
         }
       }
       if (perimeter.length > 2 && simplifyToleranceKm > 0) {
-        return simplifyPath(perimeter, simplifyToleranceKm);
+        const adaptiveTol = Math.max(simplifyToleranceKm, dist * 0.2);
+        return simplifyPath(perimeter, adaptiveTol);
       }
       return perimeter;
     }

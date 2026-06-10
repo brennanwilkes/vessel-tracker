@@ -68,7 +68,7 @@ export const LAND_AVOIDANCE = {
   minSegmentKm: 5,        // skip segments shorter than this (avoids near-coast false positives)
   dashArray: '4 4',       // SVG dash pattern for synthetic (inferred) trail portions
   fadeRatio: 0.7,         // opacity multiplier for synthetic segments (vs the tier's normal opacity)
-  simplifyToleranceKm: 1, // Douglas-Peucker tolerance for coastline perimeters (creates visual buffer)
+  simplifyToleranceKm: 1, // floor tolerance; scales with gap distance (×0.2) for long crossings
 };
 
 export const DEFAULT_EXTENT_FILTERS = { local_boat: true, passing_through: true, distant_visitor: true };

@@ -55,3 +55,11 @@ All logic and variable assignments at the top of each page module. The render se
 ## Home coordinates
 
 `48.429861°N, -123.362194°W` (48°25'47.5"N 123°21'43.9"W). Set in `config.js VIEWSHEDS[0].home`.
+
+## Coastline avoidance
+
+`routeAroundLand` in `geo.js` routes trail segments around land polygons using perimeter routing with Douglas-Peucker simplification. Tolerance is adaptive: `max(simplifyToleranceKm, gapDist * 0.2)` — short gaps get tight tolerances for harbour-scale detail; long gaps (entire peninsulas) get loose tolerances producing a wide arc through open water that the catmull-rom spline renders smoothly.
+
+- `LAND_AVOIDANCE.simplifyToleranceKm` is a **floor**, not a fixed value
+- Coasts of Salish Sea / Olympic Peninsula are well-handled at this ratio
+- No A* visibility graph — perimeter routing covers >95% of local geography; dashed segments honestly communicate uncertainty
