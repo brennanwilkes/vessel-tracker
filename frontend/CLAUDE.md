@@ -21,8 +21,8 @@ app/
   api.js            — fetchVessels (→ /current), fetchVessel, fetchTrack (→ /vessel/:mmsi/track)
   store.js          — 30s polling loop, pub/sub (subscribe returns an unsubscribe fn)
   settings_store.js — extent + trail filter state, localStorage persistence, passesExtentFilter()
-  geo.js            — haversineNm, haversineKm, bearingDeg (pure math)
-  map_page.js       — Leaflet map, dot/arrow markers, trail polylines, extent filter, settings subscription
+  geo.js            — haversineNm, haversineKm, bearingDeg, routeAroundLand, segmentsIntersect, intersectionPoint, walkPolygonPerimeter
+  map_page.js       — Leaflet map, dot/arrow markers, trail polylines with coastline avoidance (augmentSegment, buildSubSegments), extent filter, settings subscription
   list_page.js      — distance-sorted vessel list, extent filter, unit toggle (nm/km in localStorage)
   trails.js         — lazy trail fetch + in-memory cache (TTL + tier-union widening)
   settings_page.js  — settings page: extent bucket toggles + trail tier toggles

@@ -1,9 +1,10 @@
-import { VIEWSHEDS, DIRECT_BOUNDING_BOX, LOCAL_BOUNDING_BOX, MOVING_SPEED_KN, TIER_STYLE, TRAIL_GAP_SEVER_MS, LIVE_TTL_MS, FADE_TTL_MS } from '../config.js';
+import { VIEWSHEDS, DIRECT_BOUNDING_BOX, LOCAL_BOUNDING_BOX, MOVING_SPEED_KN, TIER_STYLE, TRAIL_GAP_SEVER_MS, LIVE_TTL_MS, FADE_TTL_MS, LAND_AVOIDANCE } from '../config.js';
 import { subscribe as subscribeVessels } from './store.js';
 import { subscribe as subscribeSettings, getSettings, passesExtentFilter, vesselCategory } from './settings_store.js';
-import { haversineNm, bearingDeg } from './geo.js';
+import { haversineNm, bearingDeg, haversineKm, routeAroundLand } from './geo.js';
 import { vesselColor, vesselCategoryLabel, vesselFlag } from './vessels.js';
 import { getTrail, pruneTrails } from './trails.js';
+import { LAND_POLYGONS } from '../coastline.js';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -25,6 +26,107 @@ let lastVessels = [];
 let lastSettings = getSettings();
 let trailReqToken = 0;
 
+// ── Coastline data ──────────────────────────────────────────────────────────
+
+const POLYGON_BBOXES = LAND_POLYGONS.map(poly => {
+  let minLat = 90, maxLat = -90, minLon = 180, maxLon = -180;
+  for (const [lat, lon] of poly) {
+    if (lat < minLat) minLat = lat;
+    if (lat > maxLat) maxLat = lat;
+    if (lon < minLon) minLon = lon;
+    if (lon > maxLon) maxLon = lon;
+  }
+  return { minLat, maxLat, minLon, maxLon };
+});
+
+// Insert synthetic perimeter waypoints around land for any consecutive pair
+// that crosses a coastline. Returns a new array of { lat, lon, t, tier, synthetic }.
+function augmentSegment(pts, segT0, segT1) {
+  if (pts.length < 2) return pts.map(([lat, lon], i) => {
+    const t = segT0 + (segT1 - segT0) * (i / Math.max(pts.length - 1, 1));
+    return { lat, lon, t, tier: 'direct', synthetic: false };
+  });
+
+  const result = [];
+  for (let i = 0; i < pts.length; i++) {
+    const [lat, lon] = pts[i];
+    const frac = pts.length > 1 ? i / (pts.length - 1) : 0;
+    const t = segT0 + (segT1 - segT0) * frac;
+    result.push({ lat, lon, t, synthetic: false });
+
+    if (i < pts.length - 1) {
+      const a = pts[i], b = pts[i + 1];
+      const perimeter = routeAroundLand(a, b, LAND_POLYGONS, POLYGON_BBOXES);
+      if (perimeter && perimeter.length > 0) {
+        const t0 = t;
+        const t1 = segT0 + (segT1 - segT0) * ((i + 1) / Math.max(pts.length - 1, 1));
+        const dt = (t1 - t0) / (perimeter.length + 1);
+        for (let j = 0; j < perimeter.length; j++) {
+          result.push({
+            lat: perimeter[j][0],
+            lon: perimeter[j][1],
+            t: t0 + dt * (j + 1),
+            synthetic: true,
+          });
+        }
+      }
+    }
+  }
+  return result;
+}
+
+// Split augmented points into sub-segments at real↔synthetic boundaries,
+// then merge short (<2 pt) sub-segments into their neighbors so no orphan
+// isolated real point creates a gap after a land crossing.
+function buildSubSegments(augmented) {
+  if (augmented.length === 0) return [];
+
+  const segs = [];
+  let cur = [{ lat: augmented[0].lat, lon: augmented[0].lon, t: augmented[0].t }];
+  let curSynth = augmented[0].synthetic;
+  let segT0 = augmented[0].t;
+
+  function flush(endT) {
+    if (cur.length >= 1) {
+      segs.push({
+        pts: cur.map(p => [p.lat, p.lon]),
+        synthetic: curSynth,
+        t0: segT0,
+        t1: endT,
+      });
+    }
+  }
+
+  for (let i = 1; i < augmented.length; i++) {
+    const p = augmented[i];
+    if (p.synthetic !== curSynth) {
+      flush(augmented[i - 1].t);
+      cur = [{ lat: augmented[i - 1].lat, lon: augmented[i - 1].lon, t: augmented[i - 1].t }];
+      curSynth = p.synthetic;
+      segT0 = augmented[i - 1].t;
+    }
+    cur.push({ lat: p.lat, lon: p.lon, t: p.t });
+  }
+  flush(augmented[augmented.length - 1].t);
+
+  // Merge short sub-segments into neighbors
+  for (let i = segs.length - 1; i > 0; i--) {
+    if (segs[i - 1].pts.length < 2) {
+      segs[i].pts = [...segs[i - 1].pts, ...segs[i].pts];
+      segs[i].t0 = segs[i - 1].t0;
+      segs[i].synthetic = segs[i].synthetic || segs[i - 1].synthetic;
+      segs.splice(i - 1, 1);
+    } else if (segs[i].pts.length < 2) {
+      segs[i - 1].pts = [...segs[i - 1].pts, ...segs[i].pts];
+      segs[i - 1].t1 = segs[i].t1;
+      segs[i - 1].synthetic = segs[i - 1].synthetic || segs[i].synthetic;
+      segs.splice(i, 1);
+    }
+  }
+
+  return segs.filter(s => s.pts.length >= 2);
+}
+
 // ── Trail fade helpers ────────────────────────────────────────────────────────
 
 function hexToRgb(hex) {
@@ -32,19 +134,13 @@ function hexToRgb(hex) {
   return [(v >> 16) & 255, (v >> 8) & 255, v & 255];
 }
 
-// Gradient-faded polyline: single CanvasGradient stroke from transparent (oldest)
-// to full trailFade (newest). One path = no anti-aliasing seams.
+// Gradient-faded polylines: split the trail into chunks, each with flat opacity
+// based on its path-position fraction. This avoids the screen-space banding
+// artifacts of a single CanvasGradient on curved trails.
 // trailBounds { t0, t1 } — overall trail time range; each segment only paints its
-// window of the gradient so there are no opacity seams at tier boundaries.
-function makeFadePolyline(pts, color, weight, trailFade, trailBounds, segTimes) {
+// window of the gradient so there are no opacity seams at segment boundaries.
+function makeFadePolylines(pts, color, weight, trailFade, trailBounds, segTimes, dashArray) {
   const [r, g, b] = hexToRgb(color);
-  const layer = L.polyline(pts, {
-    color: `rgb(${r},${g},${b})`,
-    weight,
-    opacity: 1,
-    className: 'vessel-trail',
-    interactive: false,
-  });
 
   const range = trailFade * 0.9;
   const base = trailFade * 0.1;
@@ -59,23 +155,29 @@ function makeFadePolyline(pts, color, weight, trailFade, trailBounds, segTimes) 
     tailOpacity = base + range * frac1;
   }
 
-  const firstLatLon = pts[0];
-  const lastLatLon = pts[pts.length - 1];
+  const delta = tailOpacity - headOpacity;
+  const layers = [];
+  const CHUNK_PTS = 8;
 
-  const origUpdate = L.Polyline.prototype._updatePath;
-  layer._updatePath = function () {
-    if (this._renderer && this._renderer._ctx && this._map && pts.length >= 2) {
-      const ctx = this._renderer._ctx;
-      const first = this._map.latLngToLayerPoint(firstLatLon);
-      const last = this._map.latLngToLayerPoint(lastLatLon);
-      const grad = ctx.createLinearGradient(first.x, first.y, last.x, last.y);
-      grad.addColorStop(0, `rgba(${r},${g},${b},${headOpacity})`);
-      grad.addColorStop(1, `rgba(${r},${g},${b},${tailOpacity})`);
-      this.options.color = grad;
-    }
-    origUpdate.call(this);
-  };
-  return layer;
+  for (let i = 0; i < pts.length - 1; i += CHUNK_PTS) {
+    const end = Math.min(i + CHUNK_PTS + 1, pts.length);
+    const chunk = pts.slice(i, end);
+    if (chunk.length < 2) continue;
+
+    const frac = (i + (end - i - 1) / 2) / (pts.length - 1);
+    const opacity = headOpacity + delta * frac;
+
+    const opts = {
+      color: `rgba(${r},${g},${b},${opacity})`,
+      weight,
+      className: 'vessel-trail',
+      interactive: false,
+    };
+    if (dashArray) opts.dashArray = dashArray;
+    const layer = L.polyline(chunk, opts);
+    layers.push(layer);
+  }
+  return layers;
 }
 
 // ── Icon helpers ─────────────────────────────────────────────────────────────
@@ -234,7 +336,7 @@ function preSmooth(pts) {
   let cur = pts.slice();
   cur = laplacianPass(cur, +1, 0.2); // inward: denoise (pass 1)
   cur = laplacianPass(cur, +1, 0.2); // inward: denoise (pass 2)
-  cur = laplacianPass(cur, -1, 0.8); // outward: expand past data
+  cur = laplacianPass(cur, -1, 0.3); // outward: gentle expand past data
   return cur;
 }
 
@@ -244,7 +346,18 @@ function preSmooth(pts) {
 // Pre-smoothed so sparse/noisy AIS data produces gentle curves rather than kinks.
 function catmullRomPoints(pts, samples = 12) {
   if (pts.length < 2) return pts;
-  pts = preSmooth(pts);
+  if (window._debugTrail) {
+    const before = pts.map(p => [p[0], p[1]]);
+    pts = preSmooth(pts);
+    let maxDelta = 0, maxIdx = -1;
+    for (let di = 0; di < pts.length; di++) {
+      const d = Math.sqrt((pts[di][0] - before[di][0])**2 + (pts[di][1] - before[di][1])**2);
+      if (d > maxDelta) { maxDelta = d; maxIdx = di; }
+    }
+    console.log(`[trail]       preSmooth pts=${pts.length} maxMove=${(maxDelta * 111000).toFixed(1)}m at idx=${maxIdx}/${pts.length}`);
+  } else {
+    pts = preSmooth(pts);
+  }
 
   function knot(t, a, b) {
     const dx = b[0] - a[0], dy = b[1] - a[1];
@@ -357,7 +470,25 @@ function drawTrail(vessel, points, token) {
   const trailFade = markerOpacity(vessel);
   const segments = segmentsByTier(allPoints, TRAIL_GAP_SEVER_MS);
 
-  // Trail-wide time range so each segment paints only its window of the gradient
+  if (window._debugTrail) {
+    console.log(`[trail] mmsi=${mmsi} name=${vessel.name}`);
+    console.log(`[trail] raw points=${allPoints.length} segments=${segments.length} fade=${trailFade.toFixed(3)}`);
+    const tierRuns = [];
+    for (let ri = 0; ri < allPoints.length; ri++) {
+      const p = allPoints[ri];
+      const lastRun = tierRuns[tierRuns.length - 1];
+      if (!lastRun || lastRun.tier !== p.tier) tierRuns.push({ tier: p.tier, idx: ri, count: 1 });
+      else lastRun.count++;
+    }
+    console.log(`[trail]   tiers:`, tierRuns.map(r => `${r.tier}×${r.count}@${r.idx}`).join(' → '));
+    for (let si = 0; si < segments.length; si++) {
+      const seg = segments[si];
+      const first = seg.pts[0], last = seg.pts[seg.pts.length - 1];
+      console.log(`[trail]   seg[${si}] pts=${seg.pts.length} t0=${seg.t0} t1=${seg.t1}`);
+      console.log(`[trail]     first=(${first[0].toFixed(4)},${first[1].toFixed(4)}) last=(${last[0].toFixed(4)},${last[1].toFixed(4)})`);
+    }
+  }
+
   const trailBounds = {
     t0: allPoints[0].t,
     t1: allPoints[allPoints.length - 1].t,
@@ -367,12 +498,78 @@ function drawTrail(vessel, points, token) {
   const layers = [];
 
   for (const seg of segments) {
-    const smooth = catmullRomPoints(seg.pts);
-    if (smooth.length < 2) continue;
-    const segTimes = { t0: seg.t0, t1: seg.t1 };
-    const layer = makeFadePolyline(smooth, color, style.weight, style.opacity * trailFade, trailBounds, segTimes);
-    layer.addTo(map);
-    layers.push(layer);
+    const augmented = augmentSegment(seg.pts, seg.t0, seg.t1);
+    const subSegs = buildSubSegments(augmented);
+
+    if (window._debugTrail) {
+      console.log(`[trail]   seg augment=${augmented.length} subSegs=${subSegs.length}`);
+      for (let si = 0; si < subSegs.length; si++) {
+        const sub = subSegs[si];
+        console.log(`[trail]     sub[${si}] pts=${sub.pts.length} synth=${sub.synthetic} t0=${sub.t0}`);
+      }
+    }
+
+    for (const sub of subSegs) {
+      const origLen = sub.pts.length;
+      const smooth = catmullRomPoints(sub.pts);
+      if (smooth.length < 2) continue;
+      if (window._debugTrail) {
+        const dLat = smooth.slice(-1)[0][0] - smooth[0][0];
+        const dLon = smooth.slice(-1)[0][1] - smooth[0][1];
+        console.log(`[trail]     sub smooth=${smooth.length} orig=${origLen} dir=(Δlat=${dLat.toFixed(4)} Δlon=${dLon.toFixed(4)})`);
+
+        // Check original data for heading reversals (dot-product sign flips)
+        if (origLen >= 3) {
+          let revCount = 0;
+          for (let k = 1; k < origLen - 1; k++) {
+            const [ax, ay] = sub.pts[k - 1], [bx, by] = sub.pts[k], [cx, cy] = sub.pts[k + 1];
+            const dx1 = bx - ax, dy1 = by - ay, dx2 = cx - bx, dy2 = cy - by;
+            const dot = dx1 * dx2 + dy1 * dy2;
+            if (dot < -1e-10) revCount++;
+          }
+          if (revCount > 0) console.log(`[trail]     ⚡ ORIG BACKTRACK: ${revCount}/${origLen - 2} points have negative dot product`);
+          // min/max of dot to see how tight the turns are
+          let minDot = 1, maxDot = -1;
+          for (let k = 1; k < origLen - 1; k++) {
+            const [ax, ay] = sub.pts[k - 1], [bx, by] = sub.pts[k], [cx, cy] = sub.pts[k + 1];
+            const dx1 = bx - ax, dy1 = by - ay, dx2 = cx - bx, dy2 = cy - by;
+            const len1 = Math.sqrt(dx1*dx1 + dy1*dy1), len2 = Math.sqrt(dx2*dx2 + dy2*dy2);
+            if (len1 < 1e-10 || len2 < 1e-10) continue;
+            const dot = (dx1 * dx2 + dy1 * dy2) / (len1 * len2);
+            if (dot < minDot) minDot = dot;
+            if (dot > maxDot) maxDot = dot;
+          }
+          if (minDot < -0.3) console.log(`[trail]     ⚡ SHARP TURN in orig: minDot=${minDot.toFixed(3)} maxDot=${maxDot.toFixed(3)}`);
+        }
+
+        // Check smoothed output for curvature reversals
+        if (smooth.length >= 4) {
+          let sign = 0, revs = 0;
+          for (let k = 1; k < smooth.length - 1; k++) {
+            const dx1 = smooth[k][0] - smooth[k-1][0], dy1 = smooth[k][1] - smooth[k-1][1];
+            const dx2 = smooth[k+1][0] - smooth[k][0], dy2 = smooth[k+1][1] - smooth[k][1];
+            const cross = dx1 * dy2 - dy1 * dx2;
+            if (Math.abs(cross) > 1e-8) {
+              const curSign = cross > 0 ? 1 : -1;
+              if (sign !== 0 && curSign !== sign) revs++;
+              sign = curSign;
+            }
+          }
+          if (revs > 0) console.log(`[trail]     ⚡ SMOOTH ZIGZAG: ${revs} curvature reversals in ${smooth.length} points`);
+        }
+      }
+      const segTimes = { t0: sub.t0, t1: sub.t1 };
+      const opacityMul = sub.synthetic ? LAND_AVOIDANCE.fadeRatio : 1;
+      const segLayers = makeFadePolylines(
+        smooth, color, style.weight, style.opacity * opacityMul * trailFade,
+        trailBounds, segTimes,
+        sub.synthetic ? LAND_AVOIDANCE.dashArray : null
+      );
+      for (const layer of segLayers) {
+        layer.addTo(map);
+        layers.push(layer);
+      }
+    }
   }
 
   trailLayers.set(mmsi, layers);
