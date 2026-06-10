@@ -41,6 +41,8 @@ See `frontend/CLAUDE.md`, `worker/CLAUDE.md`, `model/CLAUDE.md` for subsystem de
 - View/template files: all logic at top, pure rendering at bottom.
 - Comments only for non-obvious WHY, never for WHAT.
 - Helpers only when used ≥2× (big) or ≥4× (small).
+- Vessel API returns MMSI as **number** — use `===` comparison with number literals, never string.
+- Trail debug logging: use `mmsi === 357777000 || mmsi === 563303100` checks against number literals.
 
 ## Key reference docs
 

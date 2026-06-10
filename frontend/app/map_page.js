@@ -44,7 +44,10 @@ const POLYGON_BBOXES = LAND_POLYGONS.map(poly => {
 });
 
 // Insert synthetic perimeter waypoints around land for any consecutive pair
-// that crosses a coastline. Returns a new array of { lat, lon, t, tier, synthetic }.
+// that crosses a coastline. When multiple consecutive pairs all cross land
+// (a "crossing run"), ONE perimeter is generated for the full span so the
+// coastline path stays continuous — no zigzag between different coastline
+// sections. Returns a new array of { lat, lon, t, tier, synthetic }.
 function augmentSegment(pts, segT0, segT1) {
   if (pts.length < 2) return pts.map(([lat, lon], i) => {
     const t = segT0 + (segT1 - segT0) * (i / Math.max(pts.length - 1, 1));
@@ -52,29 +55,55 @@ function augmentSegment(pts, segT0, segT1) {
   });
 
   const result = [];
-  for (let i = 0; i < pts.length; i++) {
+  let i = 0;
+  while (i < pts.length) {
     const [lat, lon] = pts[i];
     const frac = pts.length > 1 ? i / (pts.length - 1) : 0;
     const t = segT0 + (segT1 - segT0) * frac;
-    result.push({ lat, lon, t, synthetic: false });
 
     if (i < pts.length - 1) {
       const a = pts[i], b = pts[i + 1];
       const perimeter = routeAroundLand(a, b, LAND_POLYGONS, POLYGON_BBOXES, LAND_AVOIDANCE.simplifyToleranceKm);
       if (perimeter && perimeter.length > 0) {
-        const t0 = t;
-        const t1 = segT0 + (segT1 - segT0) * ((i + 1) / Math.max(pts.length - 1, 1));
-        const dt = (t1 - t0) / (perimeter.length + 1);
-        for (let j = 0; j < perimeter.length; j++) {
-          result.push({
-            lat: perimeter[j][0],
-            lon: perimeter[j][1],
-            t: t0 + dt * (j + 1),
-            synthetic: true,
-          });
+        // Start of a crossing run — scan forward to find the last consecutive
+        // pair that also crosses land, so we generate ONE perimeter for the
+        // entire span instead of fragmented per-pair perimeters that zigzag.
+        let j = i;
+        while (j < pts.length - 2) {
+          const nextPerim = routeAroundLand(pts[j + 1], pts[j + 2], LAND_POLYGONS, POLYGON_BBOXES, LAND_AVOIDANCE.simplifyToleranceKm);
+          if (!nextPerim || nextPerim.length === 0) break;
+          j++;
+        }
+        // pts[i]→pts[i+1] through pts[j]→pts[j+1] all cross land.
+        // Generate ONE perimeter for the full span pts[i]→pts[j+1].
+        const spanPerim = routeAroundLand(pts[i], pts[j + 1], LAND_POLYGONS, POLYGON_BBOXES, LAND_AVOIDANCE.simplifyToleranceKm);
+        if (spanPerim && spanPerim.length > 0) {
+          result.push({ lat, lon, t, synthetic: true });
+          const t0 = t;
+          const t1 = segT0 + (segT1 - segT0) * ((j + 1) / Math.max(pts.length - 1, 1));
+          const dt = (t1 - t0) / (spanPerim.length + 1);
+          for (let k = 0; k < spanPerim.length; k++) {
+            result.push({
+              lat: spanPerim[k][0],
+              lon: spanPerim[k][1],
+              t: t0 + dt * (k + 1),
+              synthetic: true,
+            });
+          }
+          // Exit trail point is in the gap region — mark synthetic so it
+          // stays part of this one synthetic sub-segment.
+          const [exitLat, exitLon] = pts[j + 1];
+          const exitFrac = (j + 1) / (pts.length - 1);
+          const exitT = segT0 + (segT1 - segT0) * exitFrac;
+          result.push({ lat: exitLat, lon: exitLon, t: exitT, synthetic: true });
+          i = j + 2;
+          continue;
         }
       }
     }
+
+    result.push({ lat, lon, t, synthetic: false });
+    i++;
   }
   return result;
 }
@@ -525,49 +554,6 @@ function drawTrail(vessel, points, token) {
   }
 
   trailLayers.set(mmsi, layers);
-
-  // Debug: dump full rendering output for specific vessels
-  if (mmsi === 357777000 || mmsi === 563303100) {
-    console.log(`[TRAIL ${mmsi}] ${allPoints.length} trail pts, ${segments.length} segs`);
-    for (let si = 0; si < segments.length; si++) {
-      const seg = segments[si];
-      const augmented = augmentSegment(seg.pts, seg.t0, seg.t1);
-      const subSegs = buildSubSegments(augmented);
-      console.log(`  Seg ${si}: ${seg.pts.length} trail pts → ${subSegs.length} sub-segs`);
-      for (let j = 0; j < subSegs.length; j++) {
-        const sub = subSegs[j];
-        const ctrl = sub.pts;
-        const smooth = catmullRomPoints(ctrl, 12, sub.synthetic);
-        console.log(`  Sub ${j} (${ctrl.length} ctrl, synth=${sub.synthetic}) → ${smooth.length} spline pts`);
-        // Print ALL control points for synthetic sub-segments
-        if (sub.synthetic) {
-          console.log('    Ctrl:');
-          for (let ci = 0; ci < ctrl.length; ci++) {
-            console.log(`      [${ci}]: ${ctrl[ci][0].toFixed(5)},${ctrl[ci][1].toFixed(5)}`);
-          }
-          // Print ALL spline points
-          console.log('    Spline:');
-          for (let pi = 0; pi < smooth.length; pi++) {
-            console.log(`      ${pi}: ${smooth[pi][0].toFixed(5)},${smooth[pi][1].toFixed(5)}`);
-          }
-        }
-        // For real sub-segments, just print first/last 5 spline pts
-        if (!sub.synthetic) {
-          const head = smooth.slice(0, 5);
-          const tail = smooth.slice(-5);
-          console.log('    Spline (first 5):');
-          for (let pi = 0; pi < head.length; pi++) {
-            console.log(`      ${pi}: ${head[pi][0].toFixed(5)},${head[pi][1].toFixed(5)}`);
-          }
-          if (smooth.length > 10) console.log('    ...');
-          console.log('    Spline (last 5):');
-          for (let pi = 0; pi < tail.length; pi++) {
-            console.log(`      ${smooth.length - 5 + pi}: ${tail[pi][0].toFixed(5)},${tail[pi][1].toFixed(5)}`);
-          }
-        }
-      }
-    }
-  }
 }
 
 async function scheduleTrails(visibleVessels, token) {
