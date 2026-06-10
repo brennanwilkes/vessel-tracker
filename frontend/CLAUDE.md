@@ -69,16 +69,26 @@ continuously. The pipeline (`map_page.js`, all functions exported for testing):
    gap > `TRAIL_GAP_SEVER_MS[tier]`. (Displacement across the gap is irrelevant —
    the vessel may resurface far away.)
 3. `buildControlPoints` — cos-weighted Laplacian `denoise` of real fixes (a point
-   that would move onto land keeps its original position), then for each
-   consecutive pair that is a **data gap** (`LAND_AVOIDANCE.gapMinMs` /
-   `gapMinKm`) AND whose straight line crosses land, splice the `routeWater`
-   waypoints inline. Final dedup collapses near-duplicate spliced points.
-4. `catmullRom` — ONE centripetal Catmull-Rom (α=0.5) over the whole journey's
+   that would move onto land keeps its original position), then for **every**
+   consecutive pair whose straight line crosses land, splice the `routeWater`
+   waypoints inline. With accurate coastline a crossing means the vessel really
+   went around, so we route it regardless of gap size; the detour is marked
+   `inferred` (dashed) **only** when it also spans a data gap
+   (`LAND_AVOIDANCE.gapMinMs`/`gapMinKm`) — routing that fills dense tracking
+   around an island is confident movement, drawn solid. Final dedup collapses
+   near-duplicate spliced points. (Pass `route=false` for the instant first paint
+   — see Performance.)
+4. `repairOffLand` — re-splines and, for any output run that lands on land,
+   inserts a nearest-water control point to pull the curve off, then re-splines
+   (bounded passes). Catches **spline bulges** across small islands where the
+   straight chord between two control points is clear, so `routeWater` never
+   fired — the dominant residual once the coastline is high-resolution.
+5. `catmullRom` — ONE centripetal Catmull-Rom (α=0.5) over the whole journey's
    control points. One spline ⇒ continuous derivative everywhere, including
    real→inferred transitions. No pre-smoothing here (control points are already
    clean). Each output sample carries an interpolated time and an `inferred`
    flag (either control endpoint synthetic) for styling.
-5. `runsBySynthetic` — split samples into solid (real) / dashed-faint (inferred)
+6. `runsBySynthetic` — split samples into solid (real) / dashed-faint (inferred)
    runs; `makeFadePolylines` renders each, fading by sample age.
 
 ### `routeWater` (the water router, `geo.js`)
@@ -95,12 +105,45 @@ snap-to-water net.
   coast so the smoothing spline has slack to cut corners without clipping land.
   If inflation closes the only passage (channel narrower than clearance, or an
   endpoint in a cove), the search retries with zero clearance.
-- **Adaptive cell size** (`cellKm`, 0.4–2 km by gap length) and **margin**
-  (`marginKm`, 15–90 km) keep big offshore detours and tight island threading
-  both tractable (~40–150 ms/gap).
-- Out of coverage (the coastline data is clipped to `[47,-128.7]→[51.2,-122]`):
+- **Coast-proximity cost** (`proximityKm` 4 km, `proximityWeight` 2): edge cost
+  is scaled up near land so the route bows into open water (wider, more natural
+  detours around the Olympic Peninsula) and holds channel-centers between
+  islands instead of hugging. Soft cost — narrow channels with no open-water
+  option still route. It only changes cost, never passability, so water-tightness
+  is unaffected. The ring search is depth-capped (`maxProxCells` ≤ 8) so it
+  doesn't dominate runtime at fine cell sizes.
+- **Adaptive cell size** (`cellKm`, 0.2–1 km by gap length) and **margin**
+  (`marginKm`, 12–90 km). The 0.2 km floor lets it thread Gulf Island channels
+  and harbour mouths now that the coastline is high-resolution.
+- Out of coverage (the coastline data is clipped to `[46.9,-128.8]→[51.3,-121.9]`):
   `routeWater` returns `null` and the gap is bridged with a straight spline
   segment — still C¹ since it's just more control points.
+
+### Performance: cached geometry + staggered routing
+
+The spline + A* work depends only on the trail points, not on highlight/fade
+state, so it's cached per vessel in `trailGeom` keyed on a trail signature
+(`length|firstT|lastT|lastLatLon`) and recomputed only when the trail changes;
+re-styling on every redraw (poll / highlight / settings) is cheap (`drawRuns`).
+Without this, every highlight toggle re-ran A* for all vessels — jank.
+
+First paint stays slick via **quick-first + staggered routing**: on a cache miss
+`drawTrail` paints instant straight bridges (`computeRuns(allPoints, false)` — no
+A*) immediately, then enqueues the full routed compute on `routeQueue`, pumped
+**one vessel per macrotask** (`setTimeout`). The routed curves fill in
+boat-by-boat without blocking; each is cached and the vessel redrawn if still on
+screen. Queue is filtered to visible vessels and cleared on unmount.
+
+### Coastline data
+
+`coastline.js` is generated from **OpenStreetMap `natural=coastline`** (sub-100 m;
+resolves harbours, breakwaters, Deception Pass, every Gulf Island). See
+`worker/CLAUDE.md` → "Coastline data generation" for the regenerate / expand-
+coverage steps. (Earlier it was Natural Earth 1:10,000,000 — "10m" = ten
+*million*, the coarsest tier, NOT 10-metre — which dropped sub-km features and
+caused routes to cut unmapped islands and mis-route Deception Pass. If a curve
+crosses land that `pointInAnyLand` reports as water, it's a data-coverage gap,
+not a router bug — see `tests/README.md` §1.)
 
 ### Validation
 

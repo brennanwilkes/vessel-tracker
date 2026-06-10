@@ -108,8 +108,10 @@ const NEIGHBORS = [[-1,0],[1,0],[0,-1],[0,1],[-1,-1],[-1,1],[1,-1],[1,1]];
 
 export function routeWater(a, b, polygons, bboxes, opts = {}) {
   const directKm = haversineKm(a[0], a[1], b[0], b[1]);
-  const cellKm = opts.cellKm ?? Math.min(2.0, Math.max(0.4, directKm / 150));
-  const marginKm = opts.marginKm ?? Math.min(90, Math.max(15, directKm * 0.6));
+  // Fine enough to thread Gulf Island channels and harbour mouths (~150 m floor)
+  // while staying coarse on long offshore detours.
+  const cellKm = opts.cellKm ?? Math.min(1.0, Math.max(0.2, directKm / 250));
+  const marginKm = opts.marginKm ?? Math.min(90, Math.max(12, directKm * 0.6));
   const clearanceCells = opts.clearanceCells ?? 1;
 
   // Equirectangular grid with ~square cells (km), local to this gap.
@@ -149,6 +151,40 @@ export function routeWater(a, b, polygons, bboxes, opts = {}) {
     }
     blockedMemo[k] = v;
     return v === 1;
+  };
+
+  // Coast-proximity cost. Shortest-path alone hugs the coast and threads
+  // archipelagos in long straight LOS runs; penalizing cells close to land
+  // makes the route bow into open water (wider, more natural detours) and
+  // hold channel-centers between islands (more real turns, so string-pull
+  // keeps weaving waypoints instead of one long straight cut). It's a soft
+  // cost — narrow channels with no open-water option still route, just dearer.
+  const proximityKm = opts.proximityKm ?? 4;
+  const proximityWeight = opts.proximityWeight ?? 2;
+  // Cap the ring-search depth: at a fine cell size proximityKm/cellKm would be
+  // huge and the per-cell ring search O(d^2) would dominate runtime.
+  const maxProxCells = Math.min(8, Math.max(1, Math.round(proximityKm / cellKm)));
+  const proxMemo = new Int16Array(rows * cols).fill(-1); // Chebyshev cells to nearest land
+  const nearness = (r, c) => {
+    const k = r * cols + c;
+    let d = proxMemo[k];
+    if (d === -1) {
+      d = maxProxCells;
+      for (let radius = 1; radius <= maxProxCells; radius++) {
+        let hit = false;
+        for (let dr = -radius; dr <= radius && !hit; dr++) {
+          for (let dc = -radius; dc <= radius; dc++) {
+            if (Math.max(Math.abs(dr), Math.abs(dc)) !== radius) continue;
+            const nr = r + dr, nc = c + dc;
+            if (nr < 0 || nr >= rows || nc < 0 || nc >= cols) continue;
+            if (cellIsLand(nr, nc)) { hit = true; break; }
+          }
+        }
+        if (hit) { d = radius; break; }
+      }
+      proxMemo[k] = d;
+    }
+    return (maxProxCells - d) / maxProxCells; // 1 at the shore → 0 once clear
   };
 
   // Snap an endpoint to the nearest water cell (ring search) if it landed on a
@@ -201,7 +237,8 @@ export function routeWater(a, b, polygons, bboxes, opts = {}) {
         if (nr < 0 || nr >= rows || nc < 0 || nc >= cols) continue;
         const n = idx(nr, nc);
         if (closed[n] || (n !== goalN && !passable(nr, nc))) continue;
-        const tentative = gScore[node] + haversineKm(cellLat(r), cellLon(c), cellLat(nr), cellLon(nc));
+        const step = haversineKm(cellLat(r), cellLon(c), cellLat(nr), cellLon(nc));
+        const tentative = gScore[node] + step * (1 + proximityWeight * nearness(nr, nc));
         if (tentative < gScore[n]) { gScore[n] = tentative; parent[n] = node; heap.push(n, tentative + hCost(nr, nc)); }
       }
     }

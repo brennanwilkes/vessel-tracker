@@ -16,7 +16,7 @@ globalThis.L = new Proxy({}, { get: () => () => ({ addTo() {}, remove() {} }) })
 globalThis.localStorage = { getItem: () => null, setItem() {}, removeItem() {} };
 globalThis.document = { createElement: () => ({ style: {} }), querySelector: () => null };
 
-const { dedup, splitJourneys, buildControlPoints, catmullRom } = await import('../frontend/app/map_page.js');
+const { dedup, splitJourneys, buildControlPoints, repairOffLand, catmullRom } = await import('../frontend/app/map_page.js');
 
 // Acceptance thresholds.
 const MAX_LAND_PENETRATION_M = 60;   // a clip deeper than this is a real defect
@@ -59,7 +59,7 @@ for (const file of readdirSync(new URL('./fixtures/', import.meta.url)).filter(f
   let splinePts = 0, defects = 0, maxOvershootKm = 0, maxPenM = 0;
   for (const journey of splitJourneys(dedup(chronological))) {
     if (journey.length < 2) continue;
-    const ctrl = buildControlPoints(journey);
+    const ctrl = repairOffLand(buildControlPoints(journey));
     const smooth = catmullRom(ctrl);
     splinePts += smooth.length;
 

@@ -19,6 +19,7 @@ const TILE_ATTR = '&copy; <a href="https://www.openstreetmap.org/copyright">Open
 let map = null;
 let markers = new Map();
 let trailLayers = new Map();   // mmsi → [L.polyline, ...]
+let trailGeom = new Map();     // mmsi → { sig, runs } — cached spline geometry (the A*/spline work)
 let unsubscribeVessels = null;
 let unsubscribeSettings = null;
 let unsubscribeHighlight = null;
@@ -113,18 +114,23 @@ function denoise(points, passes = 2, factor = 0.2) {
 // Build the spline control points for one journey: denoised real fixes, with
 // water-routed waypoints spliced into every land-crossing gap. Each control
 // point carries its time and whether it's an inferred (synthetic) waypoint.
-export function buildControlPoints(journey) {
+export function buildControlPoints(journey, route = true) {
   const real = denoise(journey);
   const ctrl = [{ lat: real[0][0], lon: real[0][1], t: journey[0].t, synthetic: false }];
   for (let i = 1; i < real.length; i++) {
     const a = real[i - 1], b = real[i];
-    const isGap = (journey[i].t - journey[i - 1].t) > LAND_AVOIDANCE.gapMinMs || haversineKm(a[0], a[1], b[0], b[1]) > LAND_AVOIDANCE.gapMinKm;
-    if (isGap && segmentCrossesLand(a, b, LAND_POLYGONS, POLYGON_BBOXES)) {
+    // Route around land whenever the straight line crosses it — with accurate
+    // coastline, a crossing means the vessel really went around. Mark the
+    // detour inferred (dashed) only when it spans a real data gap; routing that
+    // fills in dense tracking around an island is confident movement (solid).
+    // `route` is false for the instant first-paint pass (no A*).
+    if (route && segmentCrossesLand(a, b, LAND_POLYGONS, POLYGON_BBOXES)) {
       const route = routeWater(a, b, LAND_POLYGONS, POLYGON_BBOXES);
       if (route && route.length > 2) {
+        const isGap = (journey[i].t - journey[i - 1].t) > LAND_AVOIDANCE.gapMinMs || haversineKm(a[0], a[1], b[0], b[1]) > LAND_AVOIDANCE.gapMinKm;
         const t0 = journey[i - 1].t, t1 = journey[i].t;
         for (let k = 1; k < route.length - 1; k++) {
-          ctrl.push({ lat: route[k][0], lon: route[k][1], t: t0 + (t1 - t0) * (k / (route.length - 1)), synthetic: true });
+          ctrl.push({ lat: route[k][0], lon: route[k][1], t: t0 + (t1 - t0) * (k / (route.length - 1)), synthetic: isGap });
         }
       }
     }
@@ -386,6 +392,65 @@ export function runsBySynthetic(samples) {
   return runs;
 }
 
+const SPLINE_SAMPLES = 12;
+
+// Find the nearest water point to an on-land point, then step a little further
+// into water so the re-splined curve clears the shore. Spiral ring search.
+function nearestWaterBeyond(lat, lon) {
+  const marginKm = 0.2;
+  for (let radKm = 0.1; radKm <= 3; radKm += 0.1) {
+    const dLat = radKm / 111.32, dLon = radKm / (111.32 * Math.cos(lat * Math.PI / 180));
+    for (let a = 0; a < 24; a++) {
+      const th = a / 24 * 2 * Math.PI;
+      const wlat = lat + dLat * Math.sin(th), wlon = lon + dLon * Math.cos(th);
+      if (!pointOnLand(wlat, wlon, LAND_POLYGONS, POLYGON_BBOXES)) {
+        const ext = (radKm + marginKm) / radKm;
+        return [lat + dLat * Math.sin(th) * ext, lon + dLon * Math.cos(th) * ext];
+      }
+    }
+  }
+  return null;
+}
+
+// Repair spline bulges: re-spline the journey and, for any run of output
+// samples that lands on land, insert a control point at the nearest water just
+// past the bulge, then re-spline. Bounded passes. Catches spline overshoot
+// across small islands where the straight chord between two control points is
+// clear (so routeWater never fired) — the dominant residual once the coastline
+// is high-resolution.
+export function repairOffLand(ctrl, maxPasses = 4) {
+  for (let pass = 0; pass < maxPasses; pass++) {
+    const sm = catmullRom(ctrl, SPLINE_SAMPLES);
+    const inserts = [];
+    let runStart = -1;
+    for (let i = 0; i <= sm.length; i++) {
+      const onLand = i < sm.length && pointOnLand(sm[i].lat, sm[i].lon, LAND_POLYGONS, POLYGON_BBOXES);
+      if (onLand && runStart < 0) runStart = i;
+      else if (!onLand && runStart >= 0) {
+        const mid = (runStart + i - 1) >> 1;
+        const seg = Math.min(ctrl.length - 2, Math.floor(mid / SPLINE_SAMPLES));
+        const water = nearestWaterBeyond(sm[mid].lat, sm[mid].lon);
+        if (water) {
+          const frac = (mid - seg * SPLINE_SAMPLES) / SPLINE_SAMPLES;
+          inserts.push({
+            seg,
+            ctrlPt: {
+              lat: water[0], lon: water[1],
+              t: ctrl[seg].t + (ctrl[seg + 1].t - ctrl[seg].t) * Math.max(0, Math.min(1, frac)),
+              synthetic: ctrl[seg].synthetic || ctrl[seg + 1].synthetic,
+            },
+          });
+        }
+        runStart = -1;
+      }
+    }
+    if (inserts.length === 0) break;
+    inserts.sort((a, b) => b.seg - a.seg);
+    for (const ins of inserts) ctrl.splice(ins.seg + 1, 0, ins.ctrlPt);
+  }
+  return ctrl;
+}
+
 function removeTrailLayers(mmsi) {
   const layers = trailLayers.get(mmsi);
   if (layers !== undefined) {
@@ -394,13 +459,77 @@ function removeTrailLayers(mmsi) {
   }
 }
 
+// Compute the spline runs for a trail. route=false skips A* (instant straight
+// bridges) for the first paint; route=true does the full water-routing + repair.
+function computeRuns(allPoints, route) {
+  const runs = [];
+  // One spline per journey (journeys break only at stops); within a journey the
+  // trail is C1-continuous across real→inferred transitions.
+  for (const journey of splitJourneys(dedup(allPoints))) {
+    if (journey.length < 2) continue;
+    let ctrl = buildControlPoints(journey, route);
+    if (route) ctrl = repairOffLand(ctrl);
+    for (const run of runsBySynthetic(catmullRom(ctrl))) {
+      if (run.samples.length >= 2) runs.push(run);
+    }
+  }
+  return runs;
+}
+
+// Render precomputed runs for a vessel (cheap — styling only). Re-reads current
+// highlight/fade so deferred redraws pick up the latest state.
+function drawRuns(vessel, runs, bounds) {
+  const mmsi = vessel.mmsi;
+  removeTrailLayers(mmsi);
+  const isHighlighted = mmsi === highlightedMmsi;
+  const color = vesselColor(vessel);
+  const trailFade = isHighlighted ? 1.0 : markerOpacity(vessel);
+  const trailBounds = isHighlighted ? 'flat' : bounds;
+  const style = isHighlighted ? { opacity: 1.0, weight: 3 } : TIER_STYLE.direct;
+  const layers = [];
+  for (const run of runs) {
+    const opacityMul = run.synthetic ? LAND_AVOIDANCE.fadeRatio : 1;
+    const runLayers = makeFadePolylines(
+      run.samples, color, style.weight, style.opacity * opacityMul * trailFade,
+      trailBounds, run.synthetic ? LAND_AVOIDANCE.dashArray : null
+    );
+    for (const layer of runLayers) { layer.addTo(map); layers.push(layer); }
+  }
+  trailLayers.set(mmsi, layers);
+}
+
+// Deferred full-geometry computation queue. The expensive A* runs one vessel
+// per macrotask so the first paint stays slick: trails appear immediately as
+// straight bridges, then the routed curves fill in boat-by-boat.
+let routeQueue = [];
+let pumping = false;
+
+function pumpRouteQueue() {
+  if (pumping) return;
+  pumping = true;
+  const step = () => {
+    const job = routeQueue.shift();
+    if (job === undefined || map === null) { pumping = false; return; }
+    const { vessel, allPoints, sig, bounds } = job;
+    const existing = trailGeom.get(vessel.mmsi);
+    if (existing === undefined || existing.sig !== sig) {
+      const runs = computeRuns(allPoints, true);
+      trailGeom.set(vessel.mmsi, { sig, runs });
+      // Redraw only if this trail is still the one on screen.
+      const live = lastVessels.find(v => v.mmsi === vessel.mmsi);
+      if (live !== undefined && trailLayers.has(vessel.mmsi)) drawRuns(live, runs, bounds);
+    }
+    setTimeout(step, 0);
+  };
+  setTimeout(step, 0);
+}
+
 function drawTrail(vessel, points, token) {
   if (token !== trailReqToken) return;
   if (map === null) return;
 
   const mmsi = vessel.mmsi;
-  removeTrailLayers(mmsi);
-  if (points.length === 0) return;
+  if (points.length === 0) { removeTrailLayers(mmsi); return; }
 
   // API returns points newest-first; reverse to chronological order for drawing.
   const chronological = [...points].reverse();
@@ -433,40 +562,37 @@ function drawTrail(vessel, points, token) {
     }
   }
 
-  const isHighlighted = vessel.mmsi === highlightedMmsi;
-  const color = vesselColor(vessel);
-  const trailFade = isHighlighted ? 1.0 : markerOpacity(vessel);
-  const trailBounds = isHighlighted ? 'flat' : { t0: allPoints[0].t, t1: allPoints[allPoints.length - 1].t };
-  const style = isHighlighted ? { opacity: 1.0, weight: 3 } : TIER_STYLE.direct;
-  const layers = [];
+  const lastPt = allPoints[allPoints.length - 1];
+  const bounds = { t0: allPoints[0].t, t1: lastPt.t };
+  const sig = `${allPoints.length}|${allPoints[0].t}|${lastPt.t}|${lastPt.lat},${lastPt.lon}`;
 
-  // One spline per journey (journeys break only at stops); within a journey the
-  // trail is C1-continuous across real→inferred transitions.
-  for (const journey of splitJourneys(dedup(allPoints))) {
-    if (journey.length < 2) continue;
-    const smooth = catmullRom(buildControlPoints(journey));
-    for (const run of runsBySynthetic(smooth)) {
-      if (run.samples.length < 2) continue;
-      const opacityMul = run.synthetic ? LAND_AVOIDANCE.fadeRatio : 1;
-      const runLayers = makeFadePolylines(
-        run.samples, color, style.weight, style.opacity * opacityMul * trailFade,
-        trailBounds, run.synthetic ? LAND_AVOIDANCE.dashArray : null
-      );
-      for (const layer of runLayers) { layer.addTo(map); layers.push(layer); }
-    }
+  // Full routed geometry is cached per vessel keyed on trail content, and the
+  // expensive A* depends only on the points (not highlight/fade). Cache hit →
+  // draw the curves immediately. Cache miss → paint instant straight bridges
+  // now and queue the routing to fill in.
+  const cached = trailGeom.get(mmsi);
+  if (cached !== undefined && cached.sig === sig) {
+    drawRuns(vessel, cached.runs, bounds);
+    return;
   }
-
-  trailLayers.set(mmsi, layers);
+  drawRuns(vessel, computeRuns(allPoints, false), bounds);
+  routeQueue = routeQueue.filter(j => j.vessel.mmsi !== mmsi);
+  routeQueue.push({ vessel, allPoints, sig, bounds });
+  pumpRouteQueue();
 }
 
 async function scheduleTrails(visibleVessels, token) {
   const liveSet = new Set(visibleVessels.map(v => v.mmsi));
   pruneTrails(liveSet);
 
-  // Remove trail layers for vessels no longer visible
+  // Remove trail layers + cached geometry for vessels no longer visible
   for (const mmsi of trailLayers.keys()) {
     if (!liveSet.has(mmsi)) removeTrailLayers(mmsi);
   }
+  for (const mmsi of trailGeom.keys()) {
+    if (!liveSet.has(mmsi)) trailGeom.delete(mmsi);
+  }
+  routeQueue = routeQueue.filter(j => liveSet.has(j.vessel.mmsi));
 
   const TRAIL_TIERS = ['direct', 'local'];
 
@@ -634,6 +760,8 @@ export function unmount() {
     for (const layer of layers) layer.remove();
   }
   trailLayers.clear();
+  trailGeom.clear();
+  routeQueue = [];
   trailReqToken++;
   container = null;
   statusEl = null;

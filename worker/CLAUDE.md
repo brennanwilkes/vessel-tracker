@@ -86,3 +86,45 @@ Drop a new `NNN_my_change.sql` file in `worker/migrations/`. On next push to mai
 ## Secrets
 
 - `AISSTREAM_API_KEY` — set via `wrangler secret put` in deploy workflow. Template in `.dev.vars.example`.
+
+## Coastline data generation (`frontend/app/coastline.js`)
+
+The frontend's land-avoidance router needs land polygons. `coastline.js` is generated from
+**OpenStreetMap `natural=coastline`** (high-resolution: resolves harbours, breakwaters, narrow
+passes like Deception Pass, and every Gulf Island). NOT Natural Earth — its "10m" is 1:10,000,000
+*scale* (coarsest tier), which drops sub-km features and was the cause of routes cutting unmapped
+islands. OSM coastline ways are sub-100 m.
+
+### Pipeline
+- `scripts/lib-osm-coastline.mjs` — `stitchCoastline` (joins directed coastline ways into chains by
+  shared node id; a join pass merges fragments) and `closeOpenChains` (clips chains to the bbox and
+  closes mainland masses along the boundary keeping land-on-left, `ccw=true`).
+- `scripts/build-coastline.mjs` — fetches nothing itself; reads an Overpass dump, assembles, then
+  **distance-weighted Douglas-Peucker**: fine (~25 m) within ~60 km of the viewshed, ~120 m to
+  160 km, ~600 m beyond — and drops tiny islands by the same tiers. Emits `[lat,lon]` polygons.
+
+### Regenerate (run from `worker/`)
+```bash
+# 1. Fetch OSM coastline for the region (bbox = south,west,north,east):
+curl -sS -H "User-Agent: vessel-tracker/1.0" \
+  "https://overpass-api.de/api/interpreter" \
+  --data-urlencode 'data=[out:json][timeout:170];(way["natural"="coastline"](46.9,-128.8,51.3,-121.9););out body geom;' \
+  -o /tmp/osm_coast.json
+# 2. Assemble + simplify + emit frontend/app/coastline.js:
+node --max-old-space-size=2048 scripts/build-coastline.mjs /tmp/osm_coast.json
+# 3. Validate routing against the new data:
+node ../tests/trail.test.mjs
+```
+The build prints polygon/vertex counts and final KB. Current region ≈ 500 KB (gzips small).
+
+### Expanding coverage (Portland river, Alaska, foreign ports, …)
+1. Edit `BB` in **both** `build-coastline.mjs` and the Overpass bbox in step 1 (and `HOME`/`TIERS`
+   if the fine zone should move). Overpass bbox order is `south,west,north,east`.
+2. Larger regions return more data — raise the Overpass `timeout`, and `--max-old-space-size`.
+3. Add a representative fixture per new regime in `tests/fixtures/` and re-run the test (a
+   river/port has narrow channels — verify `routeWater`'s `cellKm` floor is fine enough; see
+   `tests/README.md` §6). Validate assembly with known land/water points before trusting it
+   (`closeOpenChains` orientation is set by `ccw`; flip if water reads as land — see
+   `tests/README.md` §1).
+4. Keep the simplify tiers honest: distant coarse coverage keeps the shipped file small; only the
+   viewshed needs harbour-grade detail.
