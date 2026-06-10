@@ -673,7 +673,7 @@ export function mount(root) {
 
   unsubscribeVessels = subscribeVessels(onVesselsUpdate);
   unsubscribeSettings = subscribeSettings(onSettingsUpdate);
-  unsubscribeHighlight = subscribeHighlight(mmsi => {
+  unsubscribeHighlight = subscribeHighlight((mmsi, pan) => {
     highlightedMmsi = mmsi;
     if (pan && mmsi !== null && map !== null) {
       const v = lastVessels.find(v => v.mmsi === mmsi);
