@@ -405,12 +405,8 @@ export function routeAroundLand(a, b, polygons, bboxes, simplifyToleranceKm, vis
       if (DBG) {
         console.log('[routeAroundLand] polyIdx=%d crossing entryExitKm=%f rawPerimeter=%d pts',
           i, entryExitKm, perimeter.length);
-        if (perimeter.length > 1) {
-          const mid = Math.floor(perimeter.length / 2);
-          console.log('[routeAroundLand]  first=%f,%f mid=%f,%f last=%f,%f',
-            perimeter[0][0], perimeter[0][1],
-            perimeter[mid][0], perimeter[mid][1],
-            perimeter[perimeter.length - 1][0], perimeter[perimeter.length - 1][1]);
+        for (let pi = 0; pi < perimeter.length; pi++) {
+          console.log('  raw[%d] %f,%f', pi, perimeter[pi][0], perimeter[pi][1]);
         }
       }
 
@@ -429,15 +425,15 @@ export function routeAroundLand(a, b, polygons, bboxes, simplifyToleranceKm, vis
         }
       }
       if (perimeter.length > 2 && simplifyToleranceKm > 0) {
-        const adaptiveTol = Math.max(1, dist * 0.05);
+        const adaptiveTol = Math.max(1, entryExitKm * 0.05);
         let simplified = simplifyPath(perimeter, adaptiveTol);
-        simplified = offsetPathSeaward(simplified, polygon, polygons, dist);
+        simplified = offsetPathSeaward(simplified, polygon, polygons, entryExitKm);
 
         if (DBG) {
-          console.log('[routeAroundLand]  simplifyTol=%f simplified=%d pts offsetPath first=%f,%f last=%f,%f',
-            adaptiveTol, simplified.length,
-            simplified[0][0], simplified[0][1],
-            simplified[simplified.length - 1][0], simplified[simplified.length - 1][1]);
+          console.log('[routeAroundLand]  simplifyTol=%f simplified=%d pts', adaptiveTol, simplified.length);
+          for (let si = 0; si < simplified.length; si++) {
+            console.log('  off[%d] %f,%f', si, simplified[si][0], simplified[si][1]);
+          }
         }
 
         // Recursive routing: each segment of the offset path may cross another

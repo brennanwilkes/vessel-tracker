@@ -89,6 +89,9 @@ function augmentSegment(pts, segT0, segT1) {
             pts[perimEndIdx][0], pts[perimEndIdx][1]);
           console.log('[augmentSegment] perimeter=%d pts spanPerim=%s usePerim=%d pts',
             perimeter.length, spanPerim ? spanPerim.length + 'pts' : 'null', usePerim.length);
+          for (let ki = 0; ki < usePerim.length; ki++) {
+            console.log('  usePerim[%d] %f,%f', ki, usePerim[ki][0], usePerim[ki][1]);
+          }
         }
 
         // Start the synthetic sub-segment with the first perimeter point
@@ -194,10 +197,10 @@ function buildSubSegments(augmented) {
     console.log('[buildSubSegments] %d sub-segments produced:', filtered.length);
     for (let si = 0; si < filtered.length; si++) {
       const s = filtered[si];
-      console.log('  seg[%d] synthetic=%s pts=%d: first=%f,%f last=%f,%f',
-        si, s.synthetic, s.pts.length,
-        s.pts[0][0], s.pts[0][1],
-        s.pts[s.pts.length-1][0], s.pts[s.pts.length-1][1]);
+      console.log('  seg[%d] synthetic=%s pts=%d', si, s.synthetic, s.pts.length);
+      for (let pi = 0; pi < s.pts.length; pi++) {
+        console.log('    [%d] %f,%f', pi, s.pts[pi][0], s.pts[pi][1]);
+      }
     }
   }
   return filtered;
@@ -477,14 +480,9 @@ function catmullRomPoints(pts, samples = 12, skipSmooth = false) {
 
   if (window.__DEBUG_MMSI) {
     const synth = skipSmooth ? 'synth' : 'real';
-    if (result.length >= 2) {
-      console.log('[catmullRomPoints] %s pts=%d→%d: first=%f,%f last=%f,%f',
-        synth, pts.length, result.length,
-        result[0][0], result[0][1],
-        result[result.length-1][0], result[result.length-1][1]);
-    } else {
-      console.log('[catmullRomPoints] %s pts=%d→%d: too short',
-        synth, pts.length, result.length);
+    console.log('[catmullRomPoints] %s pts=%d→%d', synth, pts.length, result.length);
+    for (let i = 0; i < result.length; i++) {
+      console.log('  [%d] %f,%f', i, result[i][0], result[i][1]);
     }
   }
 
@@ -580,12 +578,24 @@ function drawTrail(vessel, points, token) {
   const trailFade = isHighlighted ? 1.0 : markerOpacity(vessel);
   const segments = segmentsByTier(allPoints, TRAIL_GAP_SEVER_MS);
 
+  const DBG = window.__DEBUG_MMSI;
+  if (DBG) {
+    console.log('[drawTrail] %d allPoints, %d segments from segmentsByTier', allPoints.length, segments.length);
+    const boundary = allPoints.length > 20 ? allPoints.length - 20 : 0;
+    const trailSample = [];
+    for (let pi = boundary; pi < allPoints.length; pi++) {
+      trailSample.push(`[${pi}]${allPoints[pi].lat},${allPoints[pi].lon}`);
+    }
+    console.log('[drawTrail]  last 20 allPoints:%s', trailSample.join(' '));
+  }
+
   const trailBounds = isHighlighted ? 'flat' : { t0: allPoints[0].t, t1: allPoints[allPoints.length - 1].t };
 
   const style = isHighlighted ? { opacity: 1.0, weight: 3 } : TIER_STYLE.direct;
   const layers = [];
 
-  for (const seg of segments) {
+  for (const [segIdx, seg] of segments.entries()) {
+    if (DBG) console.log('[drawTrail]  seg[%d] pts=%d t0=%f t1=%f', segIdx, seg.pts.length, seg.t0, seg.t1);
     const augmented = augmentSegment(seg.pts, seg.t0, seg.t1);
     const subSegs = buildSubSegments(augmented);
 
