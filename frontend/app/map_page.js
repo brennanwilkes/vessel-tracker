@@ -494,7 +494,7 @@ function drawTrail(vessel, points, token) {
     t1: allPoints[allPoints.length - 1].t,
   };
 
-  const style = isHighlighted ? { opacity: 0.8, weight: 2 } : TIER_STYLE.direct;
+  const style = isHighlighted ? { opacity: 1.0, weight: 3 } : TIER_STYLE.direct;
   const layers = [];
 
   for (const seg of segments) {
