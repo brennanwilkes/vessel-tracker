@@ -278,8 +278,12 @@ function pointInPolygon(pt, polygon) {
 //
 // Generates a smooth open-water arc (entry→apex→exit) by finding the coastline
 // perimeter point farthest from the entry→exit chord (the apex) and pushing it
-// seaward from the polygon centroid. Unlike coastline-following approaches, the
-// 3-point arc avoids Catmull-Rom wiggles from headland vertices.
+// seaward. Each of the 3 points uses its own LOCAL seaward direction:
+//   - Apex: chord-perpendicular (midpoint→apex), creating the arc bulge
+//   - Entry/Exit: polygon edge outward normal, giving correct local heading
+// Unlike the old centroid-based approach that pushed all points in one global
+// direction (failing for large polygons like Vancouver Island + Olympic Peninsula),
+// local directions ensure each point moves correctly seaward.
 //
 // After routing around one landmass, segments of the arc are checked against
 // *other* polygons (recursion with visited set). This handles archipelago
@@ -333,38 +337,74 @@ export function routeAroundLand(a, b, polygons, bboxes, simplifyToleranceKm, vis
 
       if (maxD < 0.1) return null;
 
+      const entryPt = perimeter[0];
+      const exitPt = perimeter[perimeter.length - 1];
       const apex = perimeter[apexIdx];
 
-      // Seaward offset from polygon centroid
-      const cx = polygon.reduce((s, p) => s + p[0], 0) / polygon.length;
-      const cy = polygon.reduce((s, p) => s + p[1], 0) / polygon.length;
       const offsetKm = Math.max(2, entryExitKm * 0.15);
       const apexOffsetKm = Math.max(offsetKm * 2, entryExitKm * 0.3);
       const avgLat = polygon.reduce((s, p) => s + p[0], 0) / polygon.length;
       const lonPerDeg = 111.32 * Math.cos(avgLat * Math.PI / 180);
       const latPerDeg = 111.32;
 
-      function pushSeaward(pt, km) {
-        const dx = pt[0] - cx, dy = pt[1] - cy;
+      // Apex direction: from chord midpoint toward apex. This pushes the
+      // apex perpendicular to the chord, further onto the coastline bulge
+      // side (open water).
+      const chordMid = [(entryPt[0] + exitPt[0]) / 2, (entryPt[1] + exitPt[1]) / 2];
+      const adx = apex[0] - chordMid[0], ady = apex[1] - chordMid[1];
+      const aLen = Math.sqrt(adx * adx + ady * ady);
+      const apexDir = aLen > 1e-10 ? [adx / aLen, ady / aLen] : null;
+
+      // Entry/exit direction: outward normal of the polygon edge they're on.
+      // Tries both perpendiculars to the edge; picks the one pointing into
+      // water (not inside any polygon). This gives a locally correct seaward
+      // direction regardless of polygon winding or centroid position.
+      function edgeOutwardNormal(edgeIdx) {
+        const n = polygon.length - 1;
+        const pa = polygon[edgeIdx], pb = polygon[(edgeIdx + 1) % n];
+        const dx = pb[0] - pa[0], dy = pb[1] - pa[1];
         const len = Math.sqrt(dx * dx + dy * dy);
-        if (len < 1e-10) return pt;
-        const ux = dx / len, uy = dy / len;
-        for (const sign of [1, -1]) {
-          const c = [pt[0] + ux * (km / latPerDeg) * sign, pt[1] + uy * (km / lonPerDeg) * sign];
-          let ok = true;
+        if (len < 1e-10) return null;
+        const ex = dx / len, ey = dy / len;
+        const mx = (pa[0] + pb[0]) / 2, my = (pa[1] + pb[1]) / 2;
+        for (const [nx, ny] of [[-ey, ex], [ey, -ex]]) {
+          const probe = [mx + nx * 0.01, my + ny * 0.01];
+          let inside = false;
           for (let pi = 0; pi < polygons.length; pi++) {
-            if (pointInPolygon(c, polygons[pi])) { ok = false; break; }
+            if (pointInPolygon(probe, polygons[pi])) { inside = true; break; }
           }
-          if (ok) return c;
+          if (!inside) return [nx, ny];
         }
+        return null;
+      }
+
+      const entryDir = edgeOutwardNormal(crossing.entryEdgeIdx);
+      const exitDir = edgeOutwardNormal(crossing.exitEdgeIdx);
+
+      // For apex, also compute edge outward normal (fallback if chord-perp fails)
+      let apexEdgeDir = null;
+      const n = polygon.length - 1;
+      for (const ei of [(apexIdx - 1 + n) % n, apexIdx]) {
+        const d = edgeOutwardNormal(ei);
+        if (d) { apexEdgeDir = d; break; }
+      }
+
+      function pushPt(pt, dir, km) {
+        if (!dir) return pt;
+        const c = [pt[0] + dir[0] * (km / latPerDeg), pt[1] + dir[1] * (km / lonPerDeg)];
+        let inside = false;
+        for (let pi = 0; pi < polygons.length; pi++) {
+          if (pointInPolygon(c, polygons[pi])) { inside = true; break; }
+        }
+        if (!inside) return c;
         return pt;
       }
 
-      const arc = [
-        pushSeaward(perimeter[0], offsetKm),
-        pushSeaward(apex, apexOffsetKm),
-        pushSeaward(perimeter[perimeter.length - 1], offsetKm),
-      ];
+      const pushedEntry = pushPt(entryPt, entryDir, offsetKm);
+      const pushedApex = pushPt(apex, apexDir || apexEdgeDir, apexOffsetKm);
+      const pushedExit = pushPt(exitPt, exitDir, offsetKm);
+
+      const arc = [pushedEntry, pushedApex, pushedExit];
 
       const DBG = window.__DEBUG_MMSI;
       if (DBG) {
