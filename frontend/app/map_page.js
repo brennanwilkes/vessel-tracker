@@ -79,6 +79,18 @@ function augmentSegment(pts, segT0, segT1) {
         const spanPerim = routeAroundLand(pts[i], pts[j + 1], LAND_POLYGONS, POLYGON_BBOXES, LAND_AVOIDANCE.simplifyToleranceKm);
         const usePerim = (spanPerim && spanPerim.length > 0) ? spanPerim : perimeter;
         const perimEndIdx = (spanPerim && spanPerim.length > 0) ? (j + 1) : (i + 1);
+
+        const DBG = window.__DEBUG_MMSI;
+        if (DBG) {
+          console.log('[augmentSegment] i=%d j=%d perimEndIdx=%d', i, j, perimEndIdx);
+          console.log('[augmentSegment] a=pts[%d]=%f,%f b=pts[%d]=%f,%f', i, a[0], a[1], i+1, b[0], b[1]);
+          console.log('[augmentSegment] pts[i]=%f,%f usePerim[0]=%f,%f pts[perimEndIdx]=%f,%f',
+            pts[i][0], pts[i][1], usePerim[0][0], usePerim[0][1],
+            pts[perimEndIdx][0], pts[perimEndIdx][1]);
+          console.log('[augmentSegment] perimeter=%d pts spanPerim=%s usePerim=%d pts',
+            perimeter.length, spanPerim ? spanPerim.length + 'pts' : 'null', usePerim.length);
+        }
+
         // Start the synthetic sub-segment with the first perimeter point
         // instead of pts[i] (which may be far south of the coastline entry,
         // causing a Catmull-Rom spike from the last real context point).
@@ -120,6 +132,9 @@ function augmentSegment(pts, segT0, segT1) {
 // then merge short (<2 pt) sub-segments into their neighbors so no orphan
 // isolated real point creates a gap after a land crossing.
 function buildSubSegments(augmented) {
+  const DBG = window.__DEBUG_MMSI;
+  if (DBG) console.log('[buildSubSegments] input=%d augmented pts', augmented.length);
+
   if (augmented.length === 0) return [];
 
   const segs = [];
@@ -174,7 +189,18 @@ function buildSubSegments(augmented) {
     }
   }
 
-  return segs.filter(s => s.pts.length >= 2);
+  const filtered = segs.filter(s => s.pts.length >= 2);
+  if (window.__DEBUG_MMSI) {
+    console.log('[buildSubSegments] %d sub-segments produced:', filtered.length);
+    for (let si = 0; si < filtered.length; si++) {
+      const s = filtered[si];
+      console.log('  seg[%d] synthetic=%s pts=%d: first=%f,%f last=%f,%f',
+        si, s.synthetic, s.pts.length,
+        s.pts[0][0], s.pts[0][1],
+        s.pts[s.pts.length-1][0], s.pts[s.pts.length-1][1]);
+    }
+  }
+  return filtered;
 }
 
 // ── Trail fade helpers ────────────────────────────────────────────────────────
@@ -448,6 +474,20 @@ function catmullRomPoints(pts, samples = 12, skipSmooth = false) {
     }
   }
   result.push(pts[pts.length - 1]);
+
+  if (window.__DEBUG_MMSI) {
+    const synth = skipSmooth ? 'synth' : 'real';
+    if (result.length >= 2) {
+      console.log('[catmullRomPoints] %s pts=%d→%d: first=%f,%f last=%f,%f',
+        synth, pts.length, result.length,
+        result[0][0], result[0][1],
+        result[result.length-1][0], result[result.length-1][1]);
+    } else {
+      console.log('[catmullRomPoints] %s pts=%d→%d: too short',
+        synth, pts.length, result.length);
+    }
+  }
+
   return result;
 }
 
@@ -496,8 +536,13 @@ function drawTrail(vessel, points, token) {
   if (map === null) return;
 
   const mmsi = vessel.mmsi;
+  window.__DEBUG_MMSI = ([357777000, 563303100, 319201600].includes(mmsi)) ? mmsi : null;
+  if (window.__DEBUG_MMSI) console.log('[drawTrail] --- DRAWING MMSI=%d points=%d ---', mmsi, points.length);
   removeTrailLayers(mmsi);
-  if (points.length === 0) return;
+  if (points.length === 0) {
+    window.__DEBUG_MMSI = null;
+    return;
+  }
 
   // API returns points newest-first; reverse to chronological order for drawing.
   const chronological = [...points].reverse();
@@ -562,6 +607,7 @@ function drawTrail(vessel, points, token) {
   }
 
   trailLayers.set(mmsi, layers);
+  window.__DEBUG_MMSI = null;
 }
 
 async function scheduleTrails(visibleVessels, token) {

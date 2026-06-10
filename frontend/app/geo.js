@@ -166,7 +166,27 @@ export function walkPolygonPerimeter(polygon, entryPt, exitPt, entryEdgeIdx, exi
   const cwDist = pathLengthKm(cw);
   const ccwDist = pathLengthKm(ccw);
 
-  return cwDist <= ccwDist ? cw : ccw;
+  // Pick the walk that starts by heading toward the exit (the coastal route)
+  // rather than the one that wraps through the inland boundary.
+  // Total path distance comparison fails when both walks traverse ~99% of the
+  // same polygon (both distances are essentially equal for a 4000+ km boundary).
+  const dExitCw = haversineKm(cw[1][0], cw[1][1], exitPt[0], exitPt[1]);
+  const dExitCcw = haversineKm(ccw[1][0], ccw[1][1], exitPt[0], exitPt[1]);
+
+  const DBG = window.__DEBUG_MMSI;
+  if (DBG) {
+    console.log('[walkPolygonPerimeter] entryPt=%f,%f exitPt=%f,%f entryEdgeIdx=%d exitEdgeIdx=%d',
+      entryPt[0], entryPt[1], exitPt[0], exitPt[1], entryEdgeIdx, exitEdgeIdx);
+    console.log('[walkPolygonPerimeter] cwDist=%f ccwDist=%f dExitCw=%f dExitCcw=%f chose=%s',
+      cwDist, ccwDist, dExitCw, dExitCcw, dExitCw <= dExitCcw ? 'CW' : 'CCW');
+    console.log('[walkPolygonPerimeter] cw[1]=%f,%f ccw[1]=%f,%f',
+      cw[1][0], cw[1][1], ccw[1][0], ccw[1][1]);
+    console.log('[walkPolygonPerimeter] cw[:3]: [%f,%f],[%f,%f],[%f,%f]  ccw[:3]: [%f,%f],[%f,%f],[%f,%f]',
+      cw[0][0], cw[0][1], cw[1][0], cw[1][1], cw[2][0], cw[2][1],
+      ccw[0][0], ccw[0][1], ccw[1][0], ccw[1][1], ccw[2][0], ccw[2][1]);
+  }
+
+  return dExitCw <= dExitCcw ? cw : ccw;
 }
 
 // Ramer-Douglas-Peucker simplification of a [lat,lon] path.
@@ -351,6 +371,20 @@ export function routeAroundLand(a, b, polygons, bboxes, simplifyToleranceKm, vis
         polygon, crossing.entryPt, crossing.exitPt,
         crossing.entryEdgeIdx, crossing.exitEdgeIdx
       );
+
+      const DBG = window.__DEBUG_MMSI;
+      if (DBG) {
+        console.log('[routeAroundLand] polyIdx=%d crossing entryExitKm=%f rawPerimeter=%d pts',
+          i, entryExitKm, perimeter.length);
+        if (perimeter.length > 1) {
+          const mid = Math.floor(perimeter.length / 2);
+          console.log('[routeAroundLand]  first=%f,%f mid=%f,%f last=%f,%f',
+            perimeter[0][0], perimeter[0][1],
+            perimeter[mid][0], perimeter[mid][1],
+            perimeter[perimeter.length - 1][0], perimeter[perimeter.length - 1][1]);
+        }
+      }
+
       if (perimeter.length >= 2) {
         const first = perimeter[0], last = perimeter[perimeter.length - 1];
         if (Math.abs(first[0] - last[0]) < 1e-8 && Math.abs(first[1] - last[1]) < 1e-8) {
@@ -369,6 +403,13 @@ export function routeAroundLand(a, b, polygons, bboxes, simplifyToleranceKm, vis
         const adaptiveTol = Math.max(1, dist * 0.05);
         let simplified = simplifyPath(perimeter, adaptiveTol);
         simplified = offsetPathSeaward(simplified, polygon, polygons, dist);
+
+        if (DBG) {
+          console.log('[routeAroundLand]  simplifyTol=%f simplified=%d pts offsetPath first=%f,%f last=%f,%f',
+            adaptiveTol, simplified.length,
+            simplified[0][0], simplified[0][1],
+            simplified[simplified.length - 1][0], simplified[simplified.length - 1][1]);
+        }
 
         // Recursive routing: each segment of the offset path may cross another
         // unvisited polygon (archipelago pattern).

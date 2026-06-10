@@ -58,8 +58,13 @@ All logic and variable assignments at the top of each page module. The render se
 
 ## Coastline avoidance
 
-`routeAroundLand` in `geo.js` routes trail segments around land polygons using perimeter routing with Douglas-Peucker simplification. Tolerance is adaptive: `max(simplifyToleranceKm, gapDist * 0.2)` — short gaps get tight tolerances for harbour-scale detail; long gaps (entire peninsulas) get loose tolerances producing a wide arc through open water that the catmull-rom spline renders smoothly.
+`routeAroundLand` in `geo.js` routes trail segments around land polygons using perimeter routing with Douglas-Peucker simplification. Tolerance is adaptive: `max(1, dist * 0.05)` — `dist` is the haversine km between the trail segment endpoints. Short gaps (a few km) get tight tolerances (~1 km); long gaps (entire peninsulas, 100+ km) get coarser tolerances (~5–6 km) producing a wider arc through open water.
 
-- `LAND_AVOIDANCE.simplifyToleranceKm` is a **floor**, not a fixed value
-- Coasts of Salish Sea / Olympic Peninsula are well-handled at this ratio
-- No A* visibility graph — perimeter routing covers >95% of local geography; dashed segments honestly communicate uncertainty
+- `LAND_AVOIDANCE.simplifyToleranceKm` is NOT used directly — the adaptive formula uses `Math.max(1, dist * 0.05)`. (Originally was `dist * 0.2` at commit 76a8c16, changed to `dist * 0.05` in bec9d28.)
+- Coasts of Salish Sea / Olympic Peninsula are well-handled at this ratio.
+- No A* visibility graph — perimeter routing covers >95% of local geography; dashed segments honestly communicate uncertainty.
+- **Grazing crossing fix** (`geo.js:336`): when `segmentCrossesPolygon` entry and exit points are < 5 km apart, the polygon is skipped entirely via `visited.add(i); continue;`. Prevents tiny zigzag perimeters from island-tip intersections (Salt Spring, Gulf Islands).
+
+### Synthetic sub-segment first control point
+
+In `augmentSegment` (`map_page.js`), when a land crossing is detected between `pts[i]→pts[i+1]`, the synthetic sub-segment now starts with `usePerim[0]` (first coastline perimeter point) instead of `pts[i]`. The trail point `pts[i]` can be far from the coastline entry (e.g., 47.72N for BUENA VENTURA when the last context point is at 48.32N), causing a Catmull-Rom spike through land. Using the perimeter entry point keeps the spline hugging the coast.
