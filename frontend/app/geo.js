@@ -347,17 +347,23 @@ export function routeAroundLand(a, b, polygons, bboxes, simplifyToleranceKm, vis
       const lonPerDeg = 111.32 * Math.cos(avgLat * Math.PI / 180);
       const latPerDeg = 111.32;
 
-      // Apex direction: from chord midpoint toward apex. This is
-      // perpendicular to the chord on the coastline-bulge side (open water).
-      const chordMid = [(entryPt[0] + exitPt[0]) / 2, (entryPt[1] + exitPt[1]) / 2];
-      const adx = apex[0] - chordMid[0], ady = apex[1] - chordMid[1];
-      const aLen = Math.sqrt(adx * adx + ady * ady);
-      const apexDir = aLen > 1e-10 ? [adx / aLen, ady / aLen] : null;
+      // Polygon centroid — used for radial seaward push. Each perimeter vertex
+      // is pushed in the direction away from the centroid (radially outward),
+      // so east coast points go east, west coast go west, etc. This avoids the
+      // backtrack problem of uniform-direction push, where opposite sides of
+      // a wrapping coastline end up pushed into each other.
+      const polyCentroid = [
+        polygon.reduce((s, p) => s + p[0], 0) / polygon.length,
+        polygon.reduce((s, p) => s + p[1], 0) / polygon.length,
+      ];
 
       const DBG = window.__DEBUG_MMSI;
 
-      function pushPt(pt, dir, km) {
-        if (!dir) return pt;
+      function pushPtRadial(pt, km) {
+        const dx = pt[0] - polyCentroid[0], dy = pt[1] - polyCentroid[1];
+        const len = Math.sqrt(dx * dx + dy * dy);
+        if (len < 1e-10) return pt;
+        const dir = [dx / len, dy / len];
         let mult = 1;
         while (mult <= 64) {
           const c = [pt[0] + dir[0] * (km * mult / latPerDeg), pt[1] + dir[1] * (km * mult / lonPerDeg)];
@@ -366,28 +372,64 @@ export function routeAroundLand(a, b, polygons, bboxes, simplifyToleranceKm, vis
             if (pointInPolygon(c, polygons[pi])) { inside = true; break; }
           }
           if (inside) { mult *= 2; continue; }
-          if (DBG) console.log('    pushPt pt=%f,%f dir=%f,%f km=%f mult=%d c=%f,%f', pt[0], pt[1], dir[0], dir[1], km, mult, c[0], c[1]);
+          if (DBG) console.log('    pushPtRadial pt=%f,%f dir=%f,%f km=%f mult=%d c=%f,%f', pt[0], pt[1], dir[0], dir[1], km, mult, c[0], c[1]);
           return c;
         }
-        if (DBG) console.log('    pushPt FAILED pt=%f,%f dir=%f,%f — could not find water', pt[0], pt[1], dir[0], dir[1]);
+        if (DBG) console.log('    pushPtRadial FAILED pt=%f,%f — could not find water', pt[0], pt[1]);
         return pt;
       }
 
-      // Simplify the coastline perimeter and push ALL vertices in apexDir.
-      // The perimeter naturally wraps around the coastline, so the arc follows
-      // the coastline shape. All points pushed in the same direction → no
-      // headland wiggles. Aggressive simplification (5-10 km) keeps the
-      // Catmull-Rom smooth by reducing control points.
-      const simplified = simplifyPath(perimeter, Math.max(simplifyToleranceKm, 5));
-      const arc = simplified.map(p => pushPt(p, apexDir, offsetKm));
+      // Simplify the coastline perimeter then push each vertex radially
+      // outward from the polygon centroid. Each point gets its own push
+      // direction perpendicular to the coast, so the arc fans out naturally.
+      const simplified = simplifyPath(perimeter, Math.max(simplifyToleranceKm, 3));
+      let arc = simplified.map(p => pushPtRadial(p, offsetKm));
+
+      // Densify: when consecutive arc control points are > 20 km apart,
+      // insert intermediate points so the Catmull-Rom spline has enough
+      // control points to follow the coastline without oscillating through land.
+      if (arc.length >= 2) {
+        const MAX_GAP = 20;
+        const dense = [arc[0]];
+        for (let k = 0; k < simplified.length - 1; k++) {
+          const gap = haversineKm(arc[k][0], arc[k][1], arc[k+1][0], arc[k+1][1]);
+          if (gap > MAX_GAP) {
+            let aIdx = -1, bIdx = -1;
+            for (let pi = 0; pi < perimeter.length; pi++) {
+              if (perimeter[pi] === simplified[k]) aIdx = pi;
+              if (perimeter[pi] === simplified[k+1]) bIdx = pi;
+            }
+            let inserted = 0;
+            if (aIdx !== -1 && bIdx !== -1 && Math.abs(bIdx - aIdx) > 1) {
+              const step = (bIdx > aIdx) ? 1 : -1;
+              for (let pi = aIdx + step; pi !== bIdx; pi += step) {
+                dense.push(pushPtRadial(perimeter[pi], offsetKm));
+                inserted++;
+              }
+            }
+            if (inserted === 0) {
+              const n = Math.ceil(gap / MAX_GAP);
+              for (let s = 1; s < n; s++) {
+                const frac = s / n;
+                const mid = [
+                  simplified[k][0] + (simplified[k+1][0] - simplified[k][0]) * frac,
+                  simplified[k][1] + (simplified[k+1][1] - simplified[k][1]) * frac,
+                ];
+                dense.push(pushPtRadial(mid, offsetKm));
+              }
+            }
+          }
+          dense.push(arc[k + 1]);
+        }
+        arc = dense;
+      }
 
       if (DBG) {
-        console.log('[routeAroundLand] polyIdx=%d entryExitKm=%f apexDist=%f offsetKm=%f perimPts=%d→%d',
-          i, entryExitKm, maxD, offsetKm, perimeter.length, simplified.length);
-        console.log('  entryPt=%f,%f exitPt=%f,%f apex=%f,%f chordMid=%f,%f apexDir=%f,%f',
+        console.log('[routeAroundLand] polyIdx=%d entryExitKm=%f apexDist=%f offsetKm=%f perimPts=%d→%d→%d',
+          i, entryExitKm, maxD, offsetKm, perimeter.length, simplified.length, arc.length);
+        console.log('  entryPt=%f,%f exitPt=%f,%f apex=%f,%f centroid=%f,%f',
           entryPt[0], entryPt[1], exitPt[0], exitPt[1],
-          apex[0], apex[1], chordMid[0], chordMid[1],
-          apexDir ? apexDir[0] : 0, apexDir ? apexDir[1] : 0);
+          apex[0], apex[1], polyCentroid[0], polyCentroid[1]);
         for (let ki = 0; ki < arc.length; ki++) {
           console.log('  arc[%d] %f,%f', ki, arc[ki][0], arc[ki][1]);
         }
