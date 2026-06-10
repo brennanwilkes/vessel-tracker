@@ -280,10 +280,10 @@ function pointInPolygon(pt, polygon) {
 // perimeter point farthest from the entry→exit chord (the apex) and pushing it
 // seaward. Each of the 3 points uses its own LOCAL seaward direction:
 //   - Apex: chord-perpendicular (midpoint→apex), creating the arc bulge
-//   - Entry/Exit: polygon edge outward normal, giving correct local heading
-// Unlike the old centroid-based approach that pushed all points in one global
-// direction (failing for large polygons like Vancouver Island + Olympic Peninsula),
-// local directions ensure each point moves correctly seaward.
+//   - Entry/Exit: trail direction (entryPt→a, exitPt→b), which was in open
+//     water before hitting land — no edge-normal computation needed
+// Unlike centroid or edge-normal approaches that fail on large/complex polygons,
+// trail direction is geometry-independent and always points seaward.
 //
 // After routing around one landmass, segments of the arc are checked against
 // *other* polygons (recursion with visited set). This handles archipelago
@@ -355,32 +355,19 @@ export function routeAroundLand(a, b, polygons, bboxes, simplifyToleranceKm, vis
       const aLen = Math.sqrt(adx * adx + ady * ady);
       const apexDir = aLen > 1e-10 ? [adx / aLen, ady / aLen] : null;
 
-      // Direction for entry/exit: outward normal of the polygon edge they're on.
-      // Tries both perpendiculars to the edge; picks the one pointing into
-      // water (not inside any polygon). Returns null for -1 (inside-polygon
-      // entry/exit from recursive routing), caller falls back to apexDir.
-      function edgeOutwardNormal(edgeIdx) {
-        if (edgeIdx < 0) return null;
-        const n = polygon.length - 1;
-        const pa = polygon[edgeIdx], pb = polygon[(edgeIdx + 1) % n];
-        const dx = pb[0] - pa[0], dy = pb[1] - pa[1];
+      // Entry/exit direction: the trail segment a→b was in open water before
+      // hitting land. Pushing entryPt back toward a, and exitPt toward b,
+      // pushes seaward — no edge-normal computation needed, works regardless
+      // of polygon geometry. Falls back to apexDir when a or b is directly
+      // on the entry/exit point (inside-polygon recursive routing).
+      function dirFromTo(from, to) {
+        const dx = to[0] - from[0], dy = to[1] - from[1];
         const len = Math.sqrt(dx * dx + dy * dy);
-        if (len < 1e-10) return null;
-        const ex = dx / len, ey = dy / len;
-        const mx = (pa[0] + pb[0]) / 2, my = (pa[1] + pb[1]) / 2;
-        for (const [nx, ny] of [[-ey, ex], [ey, -ex]]) {
-          const probe = [mx + nx * 0.01, my + ny * 0.01];
-          let inside = false;
-          for (let pi = 0; pi < polygons.length; pi++) {
-            if (pointInPolygon(probe, polygons[pi])) { inside = true; break; }
-          }
-          if (!inside) return [nx, ny];
-        }
-        return null;
+        return len > 1e-10 ? [dx / len, dy / len] : null;
       }
 
-      const entryDir = edgeOutwardNormal(crossing.entryEdgeIdx) || apexDir;
-      const exitDir = edgeOutwardNormal(crossing.exitEdgeIdx) || apexDir;
+      const entryDir = dirFromTo(entryPt, a) || apexDir;
+      const exitDir = dirFromTo(exitPt, b) || apexDir;
 
       function pushPt(pt, dir, km) {
         if (!dir) return pt;
