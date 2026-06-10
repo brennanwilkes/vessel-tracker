@@ -166,27 +166,56 @@ export function walkPolygonPerimeter(polygon, entryPt, exitPt, entryEdgeIdx, exi
   const cwDist = pathLengthKm(cw);
   const ccwDist = pathLengthKm(ccw);
 
-  // Pick the walk that starts by heading toward the exit (the coastal route)
-  // rather than the one that wraps through the inland boundary.
-  // Total path distance comparison fails when both walks traverse ~99% of the
-  // same polygon (both distances are essentially equal for a 4000+ km boundary).
-  const dExitCw = haversineKm(cw[1][0], cw[1][1], exitPt[0], exitPt[1]);
-  const dExitCcw = haversineKm(ccw[1][0], ccw[1][1], exitPt[0], exitPt[1]);
+  // Walk along `path` from start until `minKm` of cumulative haversine
+  // distance has been accumulated, then return that point.  Used to find
+  // a point far enough from the entry that the two walks have diverged
+  // geographically (cw[1] vs ccw[1] are adjacent vertices ~1 km apart and
+  // cannot distinguish direction).
+  function advanceAlong(path) {
+    const MIN_ADVANCE_KM = 25;
+    let total = 0;
+    for (let i = 1; i < path.length; i++) {
+      total += haversineKm(path[i-1][0], path[i-1][1], path[i][0], path[i][1]);
+      if (total >= MIN_ADVANCE_KM) return { point: path[i], km: total };
+    }
+    return { point: path[path.length - 1], km: total };
+  }
+
+  const ADVANCE_RATIO = 0.15; // 15% threshold
+  const minDist = Math.min(cwDist, ccwDist);
+  const maxDist = Math.max(cwDist, ccwDist);
+
+  // When one walk is clearly shorter, use total-distance comparison.
+  // Only when distances are similar (antipodal entry/exit) use the
+  // advance-and-compare heuristic, which gives a geographic signal
+  // rather than a noise-driven total-distance comparison.
+  let chosen;
+  if (maxDist - minDist > minDist * ADVANCE_RATIO) {
+    chosen = cwDist <= ccwDist ? cw : ccw;
+  } else {
+    const cwAdv = advanceAlong(cw);
+    const ccwAdv = advanceAlong(ccw);
+    const dCw = haversineKm(cwAdv.point[0], cwAdv.point[1], exitPt[0], exitPt[1]);
+    const dCcw = haversineKm(ccwAdv.point[0], ccwAdv.point[1], exitPt[0], exitPt[1]);
+    chosen = dCw <= dCcw ? cw : ccw;
+  }
 
   const DBG = window.__DEBUG_MMSI;
   if (DBG) {
+    const cwAdv = advanceAlong(cw);
+    const ccwAdv = advanceAlong(ccw);
+    const dCw = haversineKm(cwAdv.point[0], cwAdv.point[1], exitPt[0], exitPt[1]);
+    const dCcw = haversineKm(ccwAdv.point[0], ccwAdv.point[1], exitPt[0], exitPt[1]);
     console.log('[walkPolygonPerimeter] entryPt=%f,%f exitPt=%f,%f entryEdgeIdx=%d exitEdgeIdx=%d',
       entryPt[0], entryPt[1], exitPt[0], exitPt[1], entryEdgeIdx, exitEdgeIdx);
-    console.log('[walkPolygonPerimeter] cwDist=%f ccwDist=%f dExitCw=%f dExitCcw=%f chose=%s',
-      cwDist, ccwDist, dExitCw, dExitCcw, dExitCw <= dExitCcw ? 'CW' : 'CCW');
-    console.log('[walkPolygonPerimeter] cw[1]=%f,%f ccw[1]=%f,%f',
-      cw[1][0], cw[1][1], ccw[1][0], ccw[1][1]);
-    console.log('[walkPolygonPerimeter] cw[:3]: [%f,%f],[%f,%f],[%f,%f]  ccw[:3]: [%f,%f],[%f,%f],[%f,%f]',
-      cw[0][0], cw[0][1], cw[1][0], cw[1][1], cw[2][0], cw[2][1],
-      ccw[0][0], ccw[0][1], ccw[1][0], ccw[1][1], ccw[2][0], ccw[2][1]);
+    console.log('[walkPolygonPerimeter] cwDist=%f ccwDist=%f ratio=%f chose=%s',
+      cwDist, ccwDist, cwDist > ccwDist ? ccwDist/cwDist : cwDist/ccwDist, chosen === cw ? 'CW' : 'CCW');
+    console.log('[walkPolygonPerimeter] cwAdv[km=%f]=%f,%f ccwAdv[km=%f]=%f,%f dCw=%f dCcw=%f',
+      cwAdv.km, cwAdv.point[0], cwAdv.point[1],
+      ccwAdv.km, ccwAdv.point[0], ccwAdv.point[1], dCw, dCcw);
   }
 
-  return dExitCw <= dExitCcw ? cw : ccw;
+  return chosen;
 }
 
 // Ramer-Douglas-Peucker simplification of a [lat,lon] path.
