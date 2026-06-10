@@ -527,7 +527,7 @@ function drawTrail(vessel, points, token) {
   trailLayers.set(mmsi, layers);
 
   // Debug: dump full rendering output for specific vessels
-  if (mmsi === '357777000' || mmsi === '563303100') {
+  if (mmsi === 357777000 || mmsi === 563303100) {
     console.log(`[TRAIL ${mmsi}] ${allPoints.length} trail pts, ${segments.length} segs`);
     for (let si = 0; si < segments.length; si++) {
       const seg = segments[si];
