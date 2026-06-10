@@ -355,6 +355,8 @@ export function routeAroundLand(a, b, polygons, bboxes, simplifyToleranceKm, vis
       const aLen = Math.sqrt(adx * adx + ady * ady);
       const apexDir = aLen > 1e-10 ? [adx / aLen, ady / aLen] : null;
 
+      const DBG = window.__DEBUG_MMSI;
+
       // Entry/exit get pushed in the same chord-perpendicular direction as the
       // apex. This pushes all three points perpendicular to the chord, toward
       // the coastline bulge side (open water). Using a single consistent direction
@@ -363,12 +365,18 @@ export function routeAroundLand(a, b, polygons, bboxes, simplifyToleranceKm, vis
 
       function pushPt(pt, dir, km) {
         if (!dir) return pt;
-        const c = [pt[0] + dir[0] * (km / latPerDeg), pt[1] + dir[1] * (km / lonPerDeg)];
-        let inside = false;
-        for (let pi = 0; pi < polygons.length; pi++) {
-          if (pointInPolygon(c, polygons[pi])) { inside = true; break; }
+        let mult = 1;
+        while (mult <= 64) {
+          const c = [pt[0] + dir[0] * (km * mult / latPerDeg), pt[1] + dir[1] * (km * mult / lonPerDeg)];
+          let inside = false;
+          for (let pi = 0; pi < polygons.length; pi++) {
+            if (pointInPolygon(c, polygons[pi])) { inside = true; break; }
+          }
+          if (inside) { mult *= 2; continue; }
+          if (DBG) console.log('    pushPt pt=%f,%f dir=%f,%f km=%f mult=%d c=%f,%f', pt[0], pt[1], dir[0], dir[1], km, mult, c[0], c[1]);
+          return c;
         }
-        if (!inside) return c;
+        if (DBG) console.log('    pushPt FAILED pt=%f,%f dir=%f,%f — could not find water', pt[0], pt[1], dir[0], dir[1]);
         return pt;
       }
 
@@ -378,10 +386,13 @@ export function routeAroundLand(a, b, polygons, bboxes, simplifyToleranceKm, vis
 
       const arc = [pushedEntry, pushedApex, pushedExit];
 
-      const DBG = window.__DEBUG_MMSI;
       if (DBG) {
         console.log('[routeAroundLand] polyIdx=%d entryExitKm=%f apexDist=%f offsetKm=%f apexOffsetKm=%f',
           i, entryExitKm, maxD, offsetKm, apexOffsetKm);
+        console.log('  entryPt=%f,%f exitPt=%f,%f apex=%f,%f chordMid=%f,%f apexDir=%f,%f',
+          entryPt[0], entryPt[1], exitPt[0], exitPt[1],
+          apex[0], apex[1], chordMid[0], chordMid[1],
+          apexDir ? apexDir[0] : 0, apexDir ? apexDir[1] : 0);
         for (let ki = 0; ki < arc.length; ki++) {
           console.log('  arc[%d] %f,%f', ki, arc[ki][0], arc[ki][1]);
         }
