@@ -88,28 +88,33 @@ export function classifyVessel(vessel) {
   // Cruise lines operating in the Pacific Northwest.
   // Name matching is best-effort — AIS type 60-69 + length > 200 is more reliable
   // and kicks in once a vessel's static data has been received.
+  // Only apply name heuristics when type is null (no static data yet) or passenger type,
+  // so that non-passenger type codes (fishing 30, cargo 70-79, tanker 80-89, etc.)
+  // take precedence.
   if (
-    name.startsWith('MSC ') ||
-    name.startsWith('CELEBRITY ') ||
-    name.startsWith('CARNIVAL ') ||
-    name.startsWith('NORWEGIAN ') ||
-    name.startsWith('VIKING ') ||
-    name.startsWith('SILVER ') ||
-    name.startsWith('SEABOURN ') ||
-    name.startsWith('SEVEN SEAS') ||
-    name.startsWith('QUEEN ELIZABETH') ||
-    name.startsWith('QUEEN VICTORIA') ||
-    name.startsWith('QUEEN MARY') ||
-    // Holland America (most end in -DAM)
-    name.includes('NOORDAM') || name.includes('VOLENDAM') ||
-    name.includes('WESTERDAM') || name.includes('ZUIDERDAM') ||
-    name.includes('KONINGSDAM') || name.includes('OOSTERDAM') ||
-    name.includes('NIEUW') || name.includes('ROTTERDAM') ||
-    // Other lines
-    name.includes('POESIA') || name.includes('OVATION') ||
-    name.includes('RADIANCE') || name.includes('SERENADE') ||
-    name.includes('QUANTUM') || name.includes('BLISS') ||
-    name.includes('ENCORE') || name.includes('JOY')
+    (t === null || (t >= 60 && t <= 69)) && (
+      name.startsWith('MSC ') ||
+      name.startsWith('CELEBRITY ') ||
+      name.startsWith('CARNIVAL ') ||
+      name.startsWith('NORWEGIAN ') ||
+      name.startsWith('VIKING ') ||
+      name.startsWith('SILVER ') ||
+      name.startsWith('SEABOURN ') ||
+      name.startsWith('SEVEN SEAS') ||
+      name.startsWith('QUEEN ELIZABETH') ||
+      name.startsWith('QUEEN VICTORIA') ||
+      name.startsWith('QUEEN MARY') ||
+      // Holland America (most end in -DAM)
+      name.includes('NOORDAM') || name.includes('VOLENDAM') ||
+      name.includes('WESTERDAM') || name.includes('ZUIDERDAM') ||
+      name.includes('KONINGSDAM') || name.includes('OOSTERDAM') ||
+      name.includes('NIEUW') || name.includes('ROTTERDAM') ||
+      // Other lines
+      name.includes('POESIA') || name.includes('OVATION') ||
+      name.includes('RADIANCE') || name.includes('SERENADE') ||
+      name.includes('QUANTUM') ||
+      name.includes('ENCORE') || name.includes('JOY')
+    )
   ) return 'cruise';
 
   if (t === null) {

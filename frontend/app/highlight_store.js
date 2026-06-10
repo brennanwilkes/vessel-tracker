@@ -7,9 +7,9 @@ export function subscribe(fn) {
   return () => subscribers.delete(fn);
 }
 
-export function setHighlight(mmsi) {
+export function setHighlight(mmsi, pan = true) {
   highlightedMmsi = mmsi;
-  for (const fn of subscribers) fn(mmsi);
+  for (const fn of subscribers) fn(mmsi, pan);
 }
 
 export function clearHighlight() {

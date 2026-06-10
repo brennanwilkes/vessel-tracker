@@ -169,7 +169,7 @@ function makeFadePolylines(pts, color, weight, trailFade, trailBounds, segTimes,
     if (chunk.length < 2) continue;
 
     const frac = (i + (end - i - 1) / 2) / (pts.length - 1);
-    const opacity = headOpacity + delta * frac;
+    const opacity = trailBounds === 'flat' ? trailFade : headOpacity + delta * frac;
 
     const opts = {
       color: `rgba(${r},${g},${b},${opacity})`,
@@ -315,7 +315,7 @@ function openSheet(vessel) {
     if (highlightedMmsi === mmsi) {
       clearHighlight();
     } else {
-      setHighlight(mmsi);
+      setHighlight(mmsi, false);
     }
     closeSheet();
   });
@@ -489,10 +489,7 @@ function drawTrail(vessel, points, token) {
   const trailFade = isHighlighted ? 1.0 : markerOpacity(vessel);
   const segments = segmentsByTier(allPoints, TRAIL_GAP_SEVER_MS);
 
-  const trailBounds = {
-    t0: allPoints[0].t,
-    t1: allPoints[allPoints.length - 1].t,
-  };
+  const trailBounds = isHighlighted ? 'flat' : { t0: allPoints[0].t, t1: allPoints[allPoints.length - 1].t };
 
   const style = isHighlighted ? { opacity: 1.0, weight: 3 } : TIER_STYLE.direct;
   const layers = [];
@@ -678,7 +675,7 @@ export function mount(root) {
   unsubscribeSettings = subscribeSettings(onSettingsUpdate);
   unsubscribeHighlight = subscribeHighlight(mmsi => {
     highlightedMmsi = mmsi;
-    if (mmsi !== null && map !== null) {
+    if (pan && mmsi !== null && map !== null) {
       const v = lastVessels.find(v => v.mmsi === mmsi);
       if (v !== undefined) map.setView([v.lat, v.lon], map.getZoom(), { animate: true });
     }
