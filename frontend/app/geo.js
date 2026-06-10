@@ -276,14 +276,15 @@ function pointInPolygon(pt, polygon) {
 // with pre-computed bounding boxes, returns the synthetic perimeter path
 // around the first intersected landmass, or null if no land is crossed.
 //
-// Generates a smooth open-water arc (entry→apex→exit) by finding the coastline
-// perimeter point farthest from the entry→exit chord (the apex) and pushing it
-// seaward. Each of the 3 points uses its own LOCAL seaward direction:
-//   - Apex: chord-perpendicular (midpoint→apex), creating the arc bulge
-//   - Entry/Exit: trail direction (entryPt→a, exitPt→b), which was in open
-//     water before hitting land — no edge-normal computation needed
-// Unlike centroid or edge-normal approaches that fail on large/complex polygons,
-// trail direction is geometry-independent and always points seaward.
+// Routes around land by walking the coastline perimeter then simplifying it
+// (Douglas-Peucker, min 5 km tolerance). ALL simplified perimeter vertices
+// are pushed seaward in the same direction (chordMid→apex = perpendicular to
+// chord on the coastline-bulge side). Using a uniform push direction avoids
+// the centroid bug (all points pushed same global direction on large polygons),
+// the edge-normal bug (midpoint in wrong geographic context), and the
+// trail-direction bug (trail along chord axis). The perimeter naturally wraps
+// around the coastline, so the resulting arc follows the coastline shape
+// without cutting through land.
 //
 // After routing around one landmass, segments of the arc are checked against
 // *other* polygons (recursion with visited set). This handles archipelago
@@ -342,26 +343,18 @@ export function routeAroundLand(a, b, polygons, bboxes, simplifyToleranceKm, vis
       const apex = perimeter[apexIdx];
 
       const offsetKm = Math.max(2, entryExitKm * 0.15);
-      const apexOffsetKm = Math.max(offsetKm * 2, entryExitKm * 0.3);
       const avgLat = polygon.reduce((s, p) => s + p[0], 0) / polygon.length;
       const lonPerDeg = 111.32 * Math.cos(avgLat * Math.PI / 180);
       const latPerDeg = 111.32;
 
-      // Apex direction: from chord midpoint toward apex. This pushes the
-      // apex perpendicular to the chord, further onto the coastline bulge
-      // side (open water).
+      // Apex direction: from chord midpoint toward apex. This is
+      // perpendicular to the chord on the coastline-bulge side (open water).
       const chordMid = [(entryPt[0] + exitPt[0]) / 2, (entryPt[1] + exitPt[1]) / 2];
       const adx = apex[0] - chordMid[0], ady = apex[1] - chordMid[1];
       const aLen = Math.sqrt(adx * adx + ady * ady);
       const apexDir = aLen > 1e-10 ? [adx / aLen, ady / aLen] : null;
 
       const DBG = window.__DEBUG_MMSI;
-
-      // Entry/exit get pushed in the same chord-perpendicular direction as the
-      // apex. This pushes all three points perpendicular to the chord, toward
-      // the coastline bulge side (open water). Using a single consistent direction
-      // avoids the centroid bug (all points pushed same global direction) and the
-      // trail-direction bug (trail along chord rather than perpendicular to it).
 
       function pushPt(pt, dir, km) {
         if (!dir) return pt;
@@ -380,15 +373,17 @@ export function routeAroundLand(a, b, polygons, bboxes, simplifyToleranceKm, vis
         return pt;
       }
 
-      const pushedEntry = pushPt(entryPt, apexDir, offsetKm);
-      const pushedApex = pushPt(apex, apexDir, apexOffsetKm);
-      const pushedExit = pushPt(exitPt, apexDir, offsetKm);
-
-      const arc = [pushedEntry, pushedApex, pushedExit];
+      // Simplify the coastline perimeter and push ALL vertices in apexDir.
+      // The perimeter naturally wraps around the coastline, so the arc follows
+      // the coastline shape. All points pushed in the same direction → no
+      // headland wiggles. Aggressive simplification (5-10 km) keeps the
+      // Catmull-Rom smooth by reducing control points.
+      const simplified = simplifyPath(perimeter, Math.max(simplifyToleranceKm, 5));
+      const arc = simplified.map(p => pushPt(p, apexDir, offsetKm));
 
       if (DBG) {
-        console.log('[routeAroundLand] polyIdx=%d entryExitKm=%f apexDist=%f offsetKm=%f apexOffsetKm=%f',
-          i, entryExitKm, maxD, offsetKm, apexOffsetKm);
+        console.log('[routeAroundLand] polyIdx=%d entryExitKm=%f apexDist=%f offsetKm=%f perimPts=%d→%d',
+          i, entryExitKm, maxD, offsetKm, perimeter.length, simplified.length);
         console.log('  entryPt=%f,%f exitPt=%f,%f apex=%f,%f chordMid=%f,%f apexDir=%f,%f',
           entryPt[0], entryPt[1], exitPt[0], exitPt[1],
           apex[0], apex[1], chordMid[0], chordMid[1],
@@ -398,8 +393,8 @@ export function routeAroundLand(a, b, polygons, bboxes, simplifyToleranceKm, vis
         }
       }
 
-      // Recursive archipelago routing: each segment of the 3-point arc may
-      // cross another unvisited polygon.
+      // Recursive archipelago routing: each segment of the arc may cross
+      // another unvisited polygon.
       if (arc.length >= 2) {
         const merged = [arc[0]];
         for (let j = 0; j < arc.length - 1; j++) {
