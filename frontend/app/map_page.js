@@ -60,7 +60,7 @@ function augmentSegment(pts, segT0, segT1) {
 
     if (i < pts.length - 1) {
       const a = pts[i], b = pts[i + 1];
-      const perimeter = routeAroundLand(a, b, LAND_POLYGONS, POLYGON_BBOXES);
+      const perimeter = routeAroundLand(a, b, LAND_POLYGONS, POLYGON_BBOXES, LAND_AVOIDANCE.simplifyToleranceKm);
       if (perimeter && perimeter.length > 0) {
         const t0 = t;
         const t1 = segT0 + (segT1 - segT0) * ((i + 1) / Math.max(pts.length - 1, 1));
@@ -311,15 +311,13 @@ function openSheet(vessel) {
 
   sheet.querySelector('.detail-highlight-btn').addEventListener('click', e => {
     e.stopPropagation();
-    const btn = e.currentTarget;
-    const mmsi = Number(btn.dataset.mmsi);
+    const mmsi = Number(e.currentTarget.dataset.mmsi);
     if (highlightedMmsi === mmsi) {
       clearHighlight();
-      btn.innerHTML = '<span class="detail-highlight-icon">☆</span> Highlight on Map';
     } else {
       setHighlight(mmsi);
-      btn.innerHTML = '<span class="detail-highlight-icon">★</span> Remove Highlight';
     }
+    closeSheet();
   });
 
   backdrop.classList.add('open');
@@ -373,20 +371,11 @@ function preSmooth(pts) {
 // weights tangents by √distance between points. This prevents the overshoot/zigzag
 // artifacts that uniform Catmull-Rom produces when AIS points are unevenly spaced.
 // Pre-smoothed so sparse/noisy AIS data produces gentle curves rather than kinks.
-function catmullRomPoints(pts, samples = 12) {
+// skipSmooth: bypass laplacian denoise for synthetic coastline perimeter data
+// (Natural Earth vertices are already clean; smoothing pulls them inland).
+function catmullRomPoints(pts, samples = 12, skipSmooth = false) {
   if (pts.length < 2) return pts;
-  if (window._debugTrail) {
-    const before = pts.map(p => [p[0], p[1]]);
-    pts = preSmooth(pts);
-    let maxDelta = 0, maxIdx = -1;
-    for (let di = 0; di < pts.length; di++) {
-      const d = Math.sqrt((pts[di][0] - before[di][0])**2 + (pts[di][1] - before[di][1])**2);
-      if (d > maxDelta) { maxDelta = d; maxIdx = di; }
-    }
-    console.log(`[trail]       preSmooth pts=${pts.length} maxMove=${(maxDelta * 111000).toFixed(1)}m at idx=${maxIdx}/${pts.length}`);
-  } else {
-    pts = preSmooth(pts);
-  }
+  if (!skipSmooth) pts = preSmooth(pts);
 
   function knot(t, a, b) {
     const dx = b[0] - a[0], dy = b[1] - a[1];
@@ -500,25 +489,6 @@ function drawTrail(vessel, points, token) {
   const trailFade = isHighlighted ? 1.0 : markerOpacity(vessel);
   const segments = segmentsByTier(allPoints, TRAIL_GAP_SEVER_MS);
 
-  if (window._debugTrail) {
-    console.log(`[trail] mmsi=${mmsi} name=${vessel.name}`);
-    console.log(`[trail] raw points=${allPoints.length} segments=${segments.length} fade=${trailFade.toFixed(3)}`);
-    const tierRuns = [];
-    for (let ri = 0; ri < allPoints.length; ri++) {
-      const p = allPoints[ri];
-      const lastRun = tierRuns[tierRuns.length - 1];
-      if (!lastRun || lastRun.tier !== p.tier) tierRuns.push({ tier: p.tier, idx: ri, count: 1 });
-      else lastRun.count++;
-    }
-    console.log(`[trail]   tiers:`, tierRuns.map(r => `${r.tier}×${r.count}@${r.idx}`).join(' → '));
-    for (let si = 0; si < segments.length; si++) {
-      const seg = segments[si];
-      const first = seg.pts[0], last = seg.pts[seg.pts.length - 1];
-      console.log(`[trail]   seg[${si}] pts=${seg.pts.length} t0=${seg.t0} t1=${seg.t1}`);
-      console.log(`[trail]     first=(${first[0].toFixed(4)},${first[1].toFixed(4)}) last=(${last[0].toFixed(4)},${last[1].toFixed(4)})`);
-    }
-  }
-
   const trailBounds = {
     t0: allPoints[0].t,
     t1: allPoints[allPoints.length - 1].t,
@@ -531,63 +501,9 @@ function drawTrail(vessel, points, token) {
     const augmented = augmentSegment(seg.pts, seg.t0, seg.t1);
     const subSegs = buildSubSegments(augmented);
 
-    if (window._debugTrail) {
-      console.log(`[trail]   seg augment=${augmented.length} subSegs=${subSegs.length}`);
-      for (let si = 0; si < subSegs.length; si++) {
-        const sub = subSegs[si];
-        console.log(`[trail]     sub[${si}] pts=${sub.pts.length} synth=${sub.synthetic} t0=${sub.t0}`);
-      }
-    }
-
     for (const sub of subSegs) {
-      const origLen = sub.pts.length;
-      const smooth = catmullRomPoints(sub.pts);
+      const smooth = catmullRomPoints(sub.pts, 12, sub.synthetic);
       if (smooth.length < 2) continue;
-      if (window._debugTrail) {
-        const dLat = smooth.slice(-1)[0][0] - smooth[0][0];
-        const dLon = smooth.slice(-1)[0][1] - smooth[0][1];
-        console.log(`[trail]     sub smooth=${smooth.length} orig=${origLen} dir=(Δlat=${dLat.toFixed(4)} Δlon=${dLon.toFixed(4)})`);
-
-        // Check original data for heading reversals (dot-product sign flips)
-        if (origLen >= 3) {
-          let revCount = 0;
-          for (let k = 1; k < origLen - 1; k++) {
-            const [ax, ay] = sub.pts[k - 1], [bx, by] = sub.pts[k], [cx, cy] = sub.pts[k + 1];
-            const dx1 = bx - ax, dy1 = by - ay, dx2 = cx - bx, dy2 = cy - by;
-            const dot = dx1 * dx2 + dy1 * dy2;
-            if (dot < -1e-10) revCount++;
-          }
-          if (revCount > 0) console.log(`[trail]     ⚡ ORIG BACKTRACK: ${revCount}/${origLen - 2} points have negative dot product`);
-          // min/max of dot to see how tight the turns are
-          let minDot = 1, maxDot = -1;
-          for (let k = 1; k < origLen - 1; k++) {
-            const [ax, ay] = sub.pts[k - 1], [bx, by] = sub.pts[k], [cx, cy] = sub.pts[k + 1];
-            const dx1 = bx - ax, dy1 = by - ay, dx2 = cx - bx, dy2 = cy - by;
-            const len1 = Math.sqrt(dx1*dx1 + dy1*dy1), len2 = Math.sqrt(dx2*dx2 + dy2*dy2);
-            if (len1 < 1e-10 || len2 < 1e-10) continue;
-            const dot = (dx1 * dx2 + dy1 * dy2) / (len1 * len2);
-            if (dot < minDot) minDot = dot;
-            if (dot > maxDot) maxDot = dot;
-          }
-          if (minDot < -0.3) console.log(`[trail]     ⚡ SHARP TURN in orig: minDot=${minDot.toFixed(3)} maxDot=${maxDot.toFixed(3)}`);
-        }
-
-        // Check smoothed output for curvature reversals
-        if (smooth.length >= 4) {
-          let sign = 0, revs = 0;
-          for (let k = 1; k < smooth.length - 1; k++) {
-            const dx1 = smooth[k][0] - smooth[k-1][0], dy1 = smooth[k][1] - smooth[k-1][1];
-            const dx2 = smooth[k+1][0] - smooth[k][0], dy2 = smooth[k+1][1] - smooth[k][1];
-            const cross = dx1 * dy2 - dy1 * dx2;
-            if (Math.abs(cross) > 1e-8) {
-              const curSign = cross > 0 ? 1 : -1;
-              if (sign !== 0 && curSign !== sign) revs++;
-              sign = curSign;
-            }
-          }
-          if (revs > 0) console.log(`[trail]     ⚡ SMOOTH ZIGZAG: ${revs} curvature reversals in ${smooth.length} points`);
-        }
-      }
       const segTimes = { t0: sub.t0, t1: sub.t1 };
       const opacityMul = sub.synthetic ? LAND_AVOIDANCE.fadeRatio : 1;
       const segLayers = makeFadePolylines(
@@ -762,6 +678,10 @@ export function mount(root) {
   unsubscribeSettings = subscribeSettings(onSettingsUpdate);
   unsubscribeHighlight = subscribeHighlight(mmsi => {
     highlightedMmsi = mmsi;
+    if (mmsi !== null && map !== null) {
+      const v = lastVessels.find(v => v.mmsi === mmsi);
+      if (v !== undefined) map.setView([v.lat, v.lon], map.getZoom(), { animate: true });
+    }
     render();
   });
 }

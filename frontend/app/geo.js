@@ -124,6 +124,39 @@ export function walkPolygonPerimeter(polygon, entryPt, exitPt, entryEdgeIdx, exi
   return cwDist <= ccwDist ? cw : ccw;
 }
 
+// Ramer-Douglas-Peucker simplification of a [lat,lon] path.
+// toleranceKm is the maximum haversine distance a vertex can deviate from
+// the simplified line before it's kept. This smooths out small coastline
+// wiggles and creates a natural-looking buffer between the trail and land.
+export function simplifyPath(path, toleranceKm) {
+  if (path.length <= 2) return path;
+
+  let maxD = 0, maxI = 0;
+  const first = path[0], last = path[path.length - 1];
+  for (let i = 1; i < path.length - 1; i++) {
+    const d = perpendicularKm(path[i], first, last);
+    if (d > maxD) { maxD = d; maxI = i; }
+  }
+
+  if (maxD > toleranceKm) {
+    const left = simplifyPath(path.slice(0, maxI + 1), toleranceKm);
+    const right = simplifyPath(path.slice(maxI), toleranceKm);
+    return left.slice(0, -1).concat(right);
+  }
+  return [first, last];
+}
+
+// Perpendicular distance of point p from the line a→b, in km.
+function perpendicularKm(p, a, b) {
+  const dAb = haversineKm(a[0], a[1], b[0], b[1]);
+  if (dAb < 1e-10) return haversineKm(p[0], p[1], a[0], a[1]);
+  // Convert to approx meters for cross-track formula
+  const R = 6371000;
+  const d13 = R * haversineKm(p[0], p[1], a[0], a[1]) / 6371;
+  const theta = bearingDeg(a[0], a[1], p[0], p[1]) - bearingDeg(a[0], a[1], b[0], b[1]);
+  return Math.abs(Math.asin(Math.sin(d13 / R) * Math.sin(theta))) * R / 1000;
+}
+
 function pathLengthKm(path) {
   let d = 0;
   for (let i = 1; i < path.length; i++) {
@@ -135,7 +168,9 @@ function pathLengthKm(path) {
 // Main entry point: given two [lat,lon] points and a list of land polygons
 // with pre-computed bounding boxes, returns the synthetic perimeter path
 // around the first intersected landmass, or null if no land is crossed.
-export function routeAroundLand(a, b, polygons, bboxes) {
+// The path is simplified (Douglas-Peucker) using simplifyToleranceKm to
+// create a visual buffer between the trail and the coastline.
+export function routeAroundLand(a, b, polygons, bboxes, simplifyToleranceKm) {
   const minKm = 5;
   const dist = haversineKm(a[0], a[1], b[0], b[1]);
   if (dist < minKm) return null;
@@ -170,6 +205,9 @@ export function routeAroundLand(a, b, polygons, bboxes) {
           const dLast = haversineKm(b[0], b[1], perimeter[perimeter.length - 1][0], perimeter[perimeter.length - 1][1]);
           if (dLast < 0.01) perimeter.pop();
         }
+      }
+      if (perimeter.length > 2 && simplifyToleranceKm > 0) {
+        return simplifyPath(perimeter, simplifyToleranceKm);
       }
       return perimeter;
     }
