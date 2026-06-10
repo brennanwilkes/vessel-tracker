@@ -113,18 +113,18 @@ function buildSubSegments(augmented) {
   }
   flush(augmented[augmented.length - 1].t);
 
-  // Merge short sub-segments into neighbors
+  // Merge the last real sub-segment with the following synthetic sub-segment
+  // so the catmull-rom flows smoothly through the transition (no corner where
+  // two independent splines meet with different tangents). The merged region
+  // keeps synthetic styling (dashed) to honestly communicate approximation.
+  // Skip the shared boundary copy (first point of the synthetic sub-segment
+  // is always a duplicate of the real sub-segment's last point).
   for (let i = segs.length - 1; i > 0; i--) {
-    if (segs[i - 1].pts.length < 2) {
-      segs[i].pts = [...segs[i - 1].pts, ...segs[i].pts];
+    if (!segs[i - 1].synthetic && segs[i].synthetic) {
+      segs[i].pts = [...segs[i - 1].pts, ...segs[i].pts.slice(1)];
       segs[i].t0 = segs[i - 1].t0;
-      segs[i].synthetic = segs[i].synthetic || segs[i - 1].synthetic;
+      segs[i].synthetic = true;
       segs.splice(i - 1, 1);
-    } else if (segs[i].pts.length < 2) {
-      segs[i - 1].pts = [...segs[i - 1].pts, ...segs[i].pts];
-      segs[i - 1].t1 = segs[i].t1;
-      segs[i - 1].synthetic = segs[i - 1].synthetic || segs[i].synthetic;
-      segs.splice(i, 1);
     }
   }
 
@@ -499,7 +499,7 @@ function drawTrail(vessel, points, token) {
     const subSegs = buildSubSegments(augmented);
 
     for (const sub of subSegs) {
-      const smooth = catmullRomPoints(sub.pts, 12, sub.synthetic);
+      const smooth = catmullRomPoints(sub.pts, 12, false);
       if (smooth.length < 2) continue;
       const segTimes = { t0: sub.t0, t1: sub.t1 };
       const opacityMul = sub.synthetic ? LAND_AVOIDANCE.fadeRatio : 1;
@@ -675,7 +675,7 @@ export function mount(root) {
   unsubscribeSettings = subscribeSettings(onSettingsUpdate);
   unsubscribeHighlight = subscribeHighlight((mmsi, pan) => {
     highlightedMmsi = mmsi;
-    if (pan && mmsi !== null && map !== null) {
+    if (pan !== false && mmsi !== null && map !== null) {
       const v = lastVessels.find(v => v.mmsi === mmsi);
       if (v !== undefined) map.setView([v.lat, v.lon], map.getZoom(), { animate: true });
     }

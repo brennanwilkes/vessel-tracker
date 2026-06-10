@@ -353,7 +353,7 @@ export function routeAroundLand(a, b, polygons, bboxes, simplifyToleranceKm, vis
         }
       }
       if (perimeter.length > 2 && simplifyToleranceKm > 0) {
-        const adaptiveTol = Math.max(simplifyToleranceKm, dist * 0.2);
+        const adaptiveTol = Math.max(1, dist * 0.05);
         let simplified = simplifyPath(perimeter, adaptiveTol);
         simplified = offsetPathSeaward(simplified, polygon, polygons, dist);
 
