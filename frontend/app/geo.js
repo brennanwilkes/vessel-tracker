@@ -333,6 +333,19 @@ export function routeAroundLand(a, b, polygons, bboxes, simplifyToleranceKm, vis
     const polygon = polygons[i];
     const crossing = segmentCrossesPolygon(a, b, polygon);
     if (crossing) {
+      // Skip grazing crossings where entry and exit are very close — these
+      // occur when the line barely touches a polygon tip (e.g., a small
+      // island in the Gulf Islands). Routing around such a tiny intersection
+      // produces a zigzag perimeter that doesn't help the trail.
+      const entryExitKm = haversineKm(
+        crossing.entryPt[0], crossing.entryPt[1],
+        crossing.exitPt[0], crossing.exitPt[1]
+      );
+      if (entryExitKm < 5) {
+        visited.add(i);
+        continue;
+      }
+
       visited.add(i);
       const perimeter = walkPolygonPerimeter(
         polygon, crossing.entryPt, crossing.exitPt,

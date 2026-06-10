@@ -77,28 +77,36 @@ function augmentSegment(pts, segT0, segT1) {
         // pts[i]→pts[i+1] through pts[j]→pts[j+1] all cross land.
         // Generate ONE perimeter for the full span pts[i]→pts[j+1].
         const spanPerim = routeAroundLand(pts[i], pts[j + 1], LAND_POLYGONS, POLYGON_BBOXES, LAND_AVOIDANCE.simplifyToleranceKm);
-        if (spanPerim && spanPerim.length > 0) {
-          result.push({ lat, lon, t, synthetic: true });
-          const t0 = t;
-          const t1 = segT0 + (segT1 - segT0) * ((j + 1) / Math.max(pts.length - 1, 1));
-          const dt = (t1 - t0) / (spanPerim.length + 1);
-          for (let k = 0; k < spanPerim.length; k++) {
-            result.push({
-              lat: spanPerim[k][0],
-              lon: spanPerim[k][1],
-              t: t0 + dt * (k + 1),
-              synthetic: true,
-            });
-          }
-          // Exit trail point is in the gap region — mark synthetic so it
-          // stays part of this one synthetic sub-segment.
-          const [exitLat, exitLon] = pts[j + 1];
-          const exitFrac = (j + 1) / (pts.length - 1);
-          const exitT = segT0 + (segT1 - segT0) * exitFrac;
-          result.push({ lat: exitLat, lon: exitLon, t: exitT, synthetic: true });
-          i = j + 2;
-          continue;
+        const usePerim = (spanPerim && spanPerim.length > 0) ? spanPerim : perimeter;
+        const perimEndIdx = (spanPerim && spanPerim.length > 0) ? (j + 1) : (i + 1);
+        // Start the synthetic sub-segment with the first perimeter point
+        // instead of pts[i] (which may be far south of the coastline entry,
+        // causing a Catmull-Rom spike from the last real context point).
+        const t0 = t;
+        const t1 = segT0 + (segT1 - segT0) * (perimEndIdx / Math.max(pts.length - 1, 1));
+        const dt = (t1 - t0) / (usePerim.length + 1);
+        result.push({
+          lat: usePerim[0][0],
+          lon: usePerim[0][1],
+          t: t0,
+          synthetic: true,
+        });
+        for (let k = 1; k < usePerim.length; k++) {
+          result.push({
+            lat: usePerim[k][0],
+            lon: usePerim[k][1],
+            t: t0 + dt * k,
+            synthetic: true,
+          });
         }
+        // Exit trail point is in the gap region — mark synthetic so it
+        // stays part of this one synthetic sub-segment.
+        const [exitLat, exitLon] = pts[perimEndIdx];
+        const exitFrac = perimEndIdx / (pts.length - 1);
+        const exitT = segT0 + (segT1 - segT0) * exitFrac;
+        result.push({ lat: exitLat, lon: exitLon, t: exitT, synthetic: true });
+        i = perimEndIdx + 1;
+        continue;
       }
     }
 
