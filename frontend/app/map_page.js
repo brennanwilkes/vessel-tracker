@@ -32,7 +32,7 @@ let trailReqToken = 0;
 
 // ── Coastline data ──────────────────────────────────────────────────────────
 
-const POLYGON_BBOXES = LAND_POLYGONS.map(poly => {
+export const POLYGON_BBOXES = LAND_POLYGONS.map(poly => {
   let minLat = 90, maxLat = -90, minLon = 180, maxLon = -180;
   for (const [lat, lon] of poly) {
     if (lat < minLat) minLat = lat;
@@ -48,7 +48,7 @@ const POLYGON_BBOXES = LAND_POLYGONS.map(poly => {
 // (a "crossing run"), ONE perimeter is generated for the full span so the
 // coastline path stays continuous — no zigzag between different coastline
 // sections. Returns a new array of { lat, lon, t, tier, synthetic }.
-function augmentSegment(pts, segT0, segT1) {
+export function augmentSegment(pts, segT0, segT1) {
   if (pts.length < 2) return pts.map(([lat, lon], i) => {
     const t = segT0 + (segT1 - segT0) * (i / Math.max(pts.length - 1, 1));
     return { lat, lon, t, tier: 'direct', synthetic: false };
@@ -134,7 +134,7 @@ function augmentSegment(pts, segT0, segT1) {
 // Split augmented points into sub-segments at real↔synthetic boundaries,
 // then merge short (<2 pt) sub-segments into their neighbors so no orphan
 // isolated real point creates a gap after a land crossing.
-function buildSubSegments(augmented) {
+export function buildSubSegments(augmented) {
   const DBG = window.__DEBUG_MMSI;
   if (DBG) console.log('[buildSubSegments] input=%d augmented pts', augmented.length);
 
@@ -412,7 +412,7 @@ function closeSheet() {
 // Applying the outward pass directly to noisy data amplifies zigzags — the
 // inward denoise pass must come first.
 // cos-weighting (straight→full effect, turning→none) protects sharp corners.
-function preSmooth(pts) {
+export function preSmooth(pts) {
   if (pts.length < 3) return pts;
 
   function laplacianPass(cur, sign, factor) {
@@ -427,7 +427,7 @@ function preSmooth(pts) {
       const len2 = Math.sqrt(dx2 * dx2 + dy2 * dy2);
       if (len1 < 1e-10 || len2 < 1e-10) { next.push(cur[i]); continue; }
       const cos = (dx1 * dx2 + dy1 * dy2) / (len1 * len2);
-      const t = Math.max(0, cos) * factor;
+      const t = Math.max(cos * 0.5 + 0.5, 0) * factor;
       const mx = (ax + cx) / 2, my = (ay + cy) / 2;
       next.push([bx + sign * (mx - bx) * t, by + sign * (my - by) * t]);
     }
@@ -448,7 +448,7 @@ function preSmooth(pts) {
 // Pre-smoothed so sparse/noisy AIS data produces gentle curves rather than kinks.
 // skipSmooth: bypass laplacian denoise for synthetic coastline perimeter data
 // (Natural Earth vertices are already clean; smoothing pulls them inland).
-function catmullRomPoints(pts, samples = 12, skipSmooth = false) {
+export function catmullRomPoints(pts, samples = 12, skipSmooth = false) {
   if (pts.length < 2) return pts;
   if (!skipSmooth) pts = preSmooth(pts);
 
@@ -489,7 +489,7 @@ function catmullRomPoints(pts, samples = 12, skipSmooth = false) {
   return result;
 }
 
-function segmentsByTier(points, gapByTier) {
+export function segmentsByTier(points, gapByTier) {
   const segments = [];
   if (points.length === 0) return segments;
 
@@ -534,7 +534,7 @@ function drawTrail(vessel, points, token) {
   if (map === null) return;
 
   const mmsi = vessel.mmsi;
-  window.__DEBUG_MMSI = ([357777000, 563303100, 319201600].includes(mmsi)) ? mmsi : null;
+  window.__DEBUG_MMSI = ([357777000, 563303100, 319201600, 369970257].includes(mmsi)) ? mmsi : null;
   if (window.__DEBUG_MMSI) console.log('[drawTrail] --- DRAWING MMSI=%d points=%d ---', mmsi, points.length);
   removeTrailLayers(mmsi);
   if (points.length === 0) {
