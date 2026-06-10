@@ -113,18 +113,27 @@ function buildSubSegments(augmented) {
   }
   flush(augmented[augmented.length - 1].t);
 
-  // Merge the last real sub-segment with the following synthetic sub-segment
-  // so the catmull-rom flows smoothly through the transition (no corner where
-  // two independent splines meet with different tangents). The merged region
-  // keeps synthetic styling (dashed) to honestly communicate approximation.
-  // Skip the shared boundary copy (first point of the synthetic sub-segment
-  // is always a duplicate of the real sub-segment's last point).
+  // Give the synthetic sub-segment the last 3 real control points as catmull-rom
+  // context so the spline flows smoothly through the transition (no corner where
+  // two independent splines meet with different tangents). Only the last 3 real
+  // points are stolen — the rest stay in their own real sub-segment — so the
+  // vast majority of the trail remains solid.
   for (let i = segs.length - 1; i > 0; i--) {
     if (!segs[i - 1].synthetic && segs[i].synthetic) {
-      segs[i].pts = [...segs[i - 1].pts, ...segs[i].pts.slice(1)];
-      segs[i].t0 = segs[i - 1].t0;
+      const realPts = segs[i - 1].pts;
+      const n = Math.min(3, realPts.length);
+      const context = realPts.slice(-n);
+      if (n < realPts.length) {
+        segs[i - 1].pts = realPts.slice(0, -n);
+      }
+      segs[i].pts = [...context, ...segs[i].pts.slice(1)];
       segs[i].synthetic = true;
-      segs.splice(i - 1, 1);
+      // Approximate t0 for the merged synthetic sub-segment: time of first context pt
+      const total = realPts.length;
+      const tRange = segs[i - 1].t1 - segs[i - 1].t0;
+      const idx = total - n;
+      segs[i].t0 = segs[i - 1].t0 + (idx / Math.max(total - 1, 1)) * tRange;
+      if (n >= realPts.length) segs.splice(i - 1, 1);
     }
   }
 
@@ -499,7 +508,7 @@ function drawTrail(vessel, points, token) {
     const subSegs = buildSubSegments(augmented);
 
     for (const sub of subSegs) {
-      const smooth = catmullRomPoints(sub.pts, 12, false);
+      const smooth = catmullRomPoints(sub.pts, 12, sub.synthetic);
       if (smooth.length < 2) continue;
       const segTimes = { t0: sub.t0, t1: sub.t1 };
       const opacityMul = sub.synthetic ? LAND_AVOIDANCE.fadeRatio : 1;
@@ -516,6 +525,49 @@ function drawTrail(vessel, points, token) {
   }
 
   trailLayers.set(mmsi, layers);
+
+  // Debug: dump full rendering output for specific vessels
+  if (mmsi === '357777000' || mmsi === '563303100') {
+    console.log(`[TRAIL ${mmsi}] ${allPoints.length} trail pts, ${segments.length} segs`);
+    for (let si = 0; si < segments.length; si++) {
+      const seg = segments[si];
+      const augmented = augmentSegment(seg.pts, seg.t0, seg.t1);
+      const subSegs = buildSubSegments(augmented);
+      console.log(`  Seg ${si}: ${seg.pts.length} trail pts → ${subSegs.length} sub-segs`);
+      for (let j = 0; j < subSegs.length; j++) {
+        const sub = subSegs[j];
+        const ctrl = sub.pts;
+        const smooth = catmullRomPoints(ctrl, 12, sub.synthetic);
+        console.log(`  Sub ${j} (${ctrl.length} ctrl, synth=${sub.synthetic}) → ${smooth.length} spline pts`);
+        // Print ALL control points for synthetic sub-segments
+        if (sub.synthetic) {
+          console.log('    Ctrl:');
+          for (let ci = 0; ci < ctrl.length; ci++) {
+            console.log(`      [${ci}]: ${ctrl[ci][0].toFixed(5)},${ctrl[ci][1].toFixed(5)}`);
+          }
+          // Print ALL spline points
+          console.log('    Spline:');
+          for (let pi = 0; pi < smooth.length; pi++) {
+            console.log(`      ${pi}: ${smooth[pi][0].toFixed(5)},${smooth[pi][1].toFixed(5)}`);
+          }
+        }
+        // For real sub-segments, just print first/last 5 spline pts
+        if (!sub.synthetic) {
+          const head = smooth.slice(0, 5);
+          const tail = smooth.slice(-5);
+          console.log('    Spline (first 5):');
+          for (let pi = 0; pi < head.length; pi++) {
+            console.log(`      ${pi}: ${head[pi][0].toFixed(5)},${head[pi][1].toFixed(5)}`);
+          }
+          if (smooth.length > 10) console.log('    ...');
+          console.log('    Spline (last 5):');
+          for (let pi = 0; pi < tail.length; pi++) {
+            console.log(`      ${smooth.length - 5 + pi}: ${tail[pi][0].toFixed(5)},${tail[pi][1].toFixed(5)}`);
+          }
+        }
+      }
+    }
+  }
 }
 
 async function scheduleTrails(visibleVessels, token) {
