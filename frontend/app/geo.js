@@ -272,56 +272,19 @@ function pointInPolygon(pt, polygon) {
   return inside;
 }
 
-// Push each perimeter point seaward.
-// Uses the polygon centroid to determine the outward (seaward) direction for
-// every vertex. Unlike per-vertex normals — which fail at headlands where both
-// perpendiculars point into land — the centroid direction gives ALL vertices a
-// consistent outward push, preventing alternating offset/non-offset control
-// points that cause Catmull-Rom zigzags.
-function offsetPathSeaward(path, polygon, allPolygons, gapDist) {
-  if (path.length < 2) return path;
-  const offsetKm = Math.max(2, gapDist * 0.15);
-  if (offsetKm < 0.1) return path;
-  const latPerDeg = 111.32;
-  const avgLat = polygon.reduce((s, p) => s + p[0], 0) / polygon.length;
-  const lonPerDeg = 111.32 * Math.cos(avgLat * Math.PI / 180);
-
-  const cx = polygon.reduce((s, p) => s + p[0], 0) / polygon.length;
-  const cy = polygon.reduce((s, p) => s + p[1], 0) / polygon.length;
-
-  return path.map(p => {
-    const dx = p[0] - cx;
-    const dy = p[1] - cy;
-    const len = Math.sqrt(dx * dx + dy * dy);
-    if (len < 1e-10) return p;
-    const ux = dx / len, uy = dy / len;
-
-    for (const sign of [1, -1]) {
-      const candidate = [
-        p[0] + ux * (offsetKm / latPerDeg) * sign,
-        p[1] + uy * (offsetKm / lonPerDeg) * sign,
-      ];
-      let valid = true;
-      for (let pi = 0; pi < allPolygons.length; pi++) {
-        if (pointInPolygon(candidate, allPolygons[pi])) { valid = false; break; }
-      }
-      if (valid) return candidate;
-    }
-    return p;
-  });
-}
-
 // Main entry point: given two [lat,lon] points and a list of land polygons
 // with pre-computed bounding boxes, returns the synthetic perimeter path
 // around the first intersected landmass, or null if no land is crossed.
 //
-// Tolerance scales with gap distance so short crossings are tight (harbour
-// features) while long crossings (entire peninsulas) produce loose arcs.
+// Generates a smooth open-water arc (entry→apex→exit) by finding the coastline
+// perimeter point farthest from the entry→exit chord (the apex) and pushing it
+// seaward from the polygon centroid. Unlike coastline-following approaches, the
+// 3-point arc avoids Catmull-Rom wiggles from headland vertices.
 //
-// After routing around one landmass, the path is offset seaward and each
-// segment is checked against *other* polygons (recursion with visited set).
-// This handles archipelago routing (Gulf Islands) where a single arc around
-// one island would cross another.
+// After routing around one landmass, segments of the arc are checked against
+// *other* polygons (recursion with visited set). This handles archipelago
+// routing (Gulf Islands) where a single arc around one island would cross
+// another.
 export function routeAroundLand(a, b, polygons, bboxes, simplifyToleranceKm, visited = null) {
   const minKm = 5;
   const dist = haversineKm(a[0], a[1], b[0], b[1]);
@@ -343,10 +306,6 @@ export function routeAroundLand(a, b, polygons, bboxes, simplifyToleranceKm, vis
     const polygon = polygons[i];
     const crossing = segmentCrossesPolygon(a, b, polygon);
     if (crossing) {
-      // Skip grazing crossings where entry and exit are very close — these
-      // occur when the line barely touches a polygon tip (e.g., a small
-      // island in the Gulf Islands). Routing around such a tiny intersection
-      // produces a zigzag perimeter that doesn't help the trail.
       const entryExitKm = haversineKm(
         crossing.entryPt[0], crossing.entryPt[1],
         crossing.exitPt[0], crossing.exitPt[1]
@@ -362,77 +321,82 @@ export function routeAroundLand(a, b, polygons, bboxes, simplifyToleranceKm, vis
         crossing.entryEdgeIdx, crossing.exitEdgeIdx
       );
 
+      if (perimeter.length < 2) return null;
+
+      // Find coastline arc apex — the perimeter vertex farthest from the
+      // entry→exit chord. This defines the land bulge to route around.
+      let maxD = -1, apexIdx = 0;
+      for (let pi = 1; pi < perimeter.length - 1; pi++) {
+        const d = perpendicularKm(perimeter[pi], perimeter[0], perimeter[perimeter.length - 1]);
+        if (d > maxD) { maxD = d; apexIdx = pi; }
+      }
+
+      if (maxD < 0.1) return null;
+
+      const apex = perimeter[apexIdx];
+
+      // Seaward offset from polygon centroid
+      const cx = polygon.reduce((s, p) => s + p[0], 0) / polygon.length;
+      const cy = polygon.reduce((s, p) => s + p[1], 0) / polygon.length;
+      const offsetKm = Math.max(2, entryExitKm * 0.15);
+      const apexOffsetKm = Math.max(offsetKm * 2, entryExitKm * 0.3);
+      const avgLat = polygon.reduce((s, p) => s + p[0], 0) / polygon.length;
+      const lonPerDeg = 111.32 * Math.cos(avgLat * Math.PI / 180);
+      const latPerDeg = 111.32;
+
+      function pushSeaward(pt, km) {
+        const dx = pt[0] - cx, dy = pt[1] - cy;
+        const len = Math.sqrt(dx * dx + dy * dy);
+        if (len < 1e-10) return pt;
+        const ux = dx / len, uy = dy / len;
+        for (const sign of [1, -1]) {
+          const c = [pt[0] + ux * (km / latPerDeg) * sign, pt[1] + uy * (km / lonPerDeg) * sign];
+          let ok = true;
+          for (let pi = 0; pi < polygons.length; pi++) {
+            if (pointInPolygon(c, polygons[pi])) { ok = false; break; }
+          }
+          if (ok) return c;
+        }
+        return pt;
+      }
+
+      const arc = [
+        pushSeaward(perimeter[0], offsetKm),
+        pushSeaward(apex, apexOffsetKm),
+        pushSeaward(perimeter[perimeter.length - 1], offsetKm),
+      ];
+
       const DBG = window.__DEBUG_MMSI;
       if (DBG) {
-        console.log('[routeAroundLand] polyIdx=%d crossing entryExitKm=%f rawPerimeter=%d pts',
-          i, entryExitKm, perimeter.length);
-        for (let pi = 0; pi < perimeter.length; pi++) {
-          console.log('  raw[%d] %f,%f', pi, perimeter[pi][0], perimeter[pi][1]);
+        console.log('[routeAroundLand] polyIdx=%d entryExitKm=%f apexDist=%f offsetKm=%f apexOffsetKm=%f',
+          i, entryExitKm, maxD, offsetKm, apexOffsetKm);
+        for (let ki = 0; ki < arc.length; ki++) {
+          console.log('  arc[%d] %f,%f', ki, arc[ki][0], arc[ki][1]);
         }
       }
 
-      if (perimeter.length >= 2) {
-        const first = perimeter[0], last = perimeter[perimeter.length - 1];
-        if (Math.abs(first[0] - last[0]) < 1e-8 && Math.abs(first[1] - last[1]) < 1e-8) {
-          perimeter.pop();
-        }
-        if (perimeter.length > 1) {
-          const dFirst = haversineKm(a[0], a[1], perimeter[0][0], perimeter[0][1]);
-          if (dFirst < 0.01) perimeter.shift();
-        }
-        if (perimeter.length > 1) {
-          const dLast = haversineKm(b[0], b[1], perimeter[perimeter.length - 1][0], perimeter[perimeter.length - 1][1]);
-          if (dLast < 0.01) perimeter.pop();
-        }
-      }
-      if (perimeter.length > 2 && simplifyToleranceKm > 0) {
-        const adaptiveTol = Math.max(1, entryExitKm * 0.05);
-        let simplified = simplifyPath(perimeter, adaptiveTol);
-        simplified = offsetPathSeaward(simplified, polygon, polygons, entryExitKm);
-
-        if (DBG) {
-          console.log('[routeAroundLand]  simplifyTol=%f simplified=%d pts', adaptiveTol, simplified.length);
-          for (let si = 0; si < simplified.length; si++) {
-            console.log('  off[%d] %f,%f', si, simplified[si][0], simplified[si][1]);
+      // Recursive archipelago routing: each segment of the 3-point arc may
+      // cross another unvisited polygon.
+      if (arc.length >= 2) {
+        const merged = [arc[0]];
+        for (let j = 0; j < arc.length - 1; j++) {
+          const sub = routeAroundLand(arc[j], arc[j + 1], polygons, bboxes, simplifyToleranceKm, visited);
+          if (sub && sub.length > 1) {
+            for (let k = 1; k < sub.length; k++) merged.push(sub[k]);
+          } else {
+            merged.push(arc[j + 1]);
           }
         }
-
-        // Recursive routing: each segment of the offset path may cross another
-        // unvisited polygon (archipelago pattern).
-        if (simplified.length >= 2) {
-          const merged = [simplified[0]];
-          for (let j = 0; j < simplified.length - 1; j++) {
-            const subResult = routeAroundLand(
-              simplified[j], simplified[j + 1],
-              polygons, bboxes, simplifyToleranceKm, visited
-            );
-            if (subResult && subResult.length > 1) {
-              for (let k = 1; k < subResult.length; k++) {
-                merged.push(subResult[k]);
-              }
-            } else {
-              merged.push(simplified[j + 1]);
-            }
-          }
-          // Snap any remaining control points that are inside other polygons
-          // to the nearest outside position along their offset direction.
-          const snapped = snapPathToWater(merged, polygons, polygon, dist);
-          return snapped;
-        }
-        // Same snap for non-recursive path
-        const snapped = snapPathToWater(simplified, polygons, polygon, dist);
-        return snapped;
+        return snapPathToWater(merged, polygons, polygon, dist);
       }
-      return perimeter;
+      return snapPathToWater(arc, polygons, polygon, dist);
     }
   }
   return null;
 }
 
-// After offset, some control points may still be inside a polygon (mainly
-// from recursive archipelago routing). Uses the polygon centroid to push
-// outward — same seaward direction as offsetPathSeaward — rather than per-
-// vertex normals that produce inconsistent directions at headlands.
+// Safety net: some control points from recursive archipelago routing may
+// still end up inside a polygon. Pushes them seaward from polygon centroid.
 function snapPathToWater(path, allPolygons, routingPolygon, gapDist) {
   const offsetKm = Math.max(2, gapDist * 0.15);
   const latPerDeg = 111.32;

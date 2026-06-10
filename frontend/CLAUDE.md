@@ -58,12 +58,18 @@ All logic and variable assignments at the top of each page module. The render se
 
 ## Coastline avoidance
 
-`routeAroundLand` in `geo.js` routes trail segments around land polygons using perimeter routing with Douglas-Peucker simplification. Tolerance is adaptive: `max(1, dist * 0.05)` — `dist` is the haversine km between the trail segment endpoints. Short gaps (a few km) get tight tolerances (~1 km); long gaps (entire peninsulas, 100+ km) get coarser tolerances (~5–6 km) producing a wider arc through open water.
+`routeAroundLand` in `geo.js` routes trail segments around land polygons using a **3-point open-water arc** (entry→apex→exit). It walks the coastline perimeter from entry to exit, finds the perimeter vertex farthest from the entry→exit chord (the apex), and pushes all three points seaward from the polygon centroid. This produces smooth boat-like arcs that avoid Catmull-Rom wiggles from headland vertices.
 
-- `LAND_AVOIDANCE.simplifyToleranceKm` is NOT used directly — the adaptive formula uses `Math.max(1, dist * 0.05)`. (Originally was `dist * 0.2` at commit 76a8c16, changed to `dist * 0.05` in bec9d28.)
-- Coasts of Salish Sea / Olympic Peninsula are well-handled at this ratio.
-- No A* visibility graph — perimeter routing covers >95% of local geography; dashed segments honestly communicate uncertainty.
-- **Grazing crossing fix** (`geo.js:336`): when `segmentCrossesPolygon` entry and exit points are < 5 km apart, the polygon is skipped entirely via `visited.add(i); continue;`. Prevents tiny zigzag perimeters from island-tip intersections (Salt Spring, Gulf Islands).
+Key design:
+- Three control points (`pushedEntry`, `pushedApex`, `pushedExit`) are fed into Catmull-Rom as a synthetic sub-segment — no coastline-following perimeter points, so no zigzag.
+- Apex offset scales with gap: `Math.max(offsetKm * 2, entryExitKm * 0.3)` for open-water clearance.
+- Entry/exit offset: `Math.max(2, entryExitKm * 0.15)` (same as before).
+- Seaward direction determined by polygon centroid — consistent outward push for all points.
+- **Grazing crossing fix**: when `segmentCrossesPolygon` entry and exit points are < 5 km apart, the polygon is skipped entirely via `visited.add(i); continue;`. Prevents tiny arcs from island-tip intersections (Salt Spring, Gulf Islands).
+- **Archipelago recursion**: after the 3-point arc is built, each segment (entry→apex, apex→exit) is recursively checked against unvisited polygons. Handles Gulf Islands where a single arc around one island would cross another.
+- `offsetPathSeaward` removed (replaced by inline `pushSeaward` closure inside `routeAroundLand`).
+- `simplifyPath` still exported but no longer called in `routeAroundLand`.
+- `snapPathToWater` kept as final safety for recursive-route output.
 
 ### Synthetic sub-segment first control point
 
