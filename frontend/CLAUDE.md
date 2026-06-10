@@ -61,8 +61,7 @@ All logic and variable assignments at the top of each page module. The render se
 `routeAroundLand` in `geo.js` routes trail segments around land polygons using a **3-point open-water arc** (entry→apex→exit). It walks the coastline perimeter from entry to exit, finds the perimeter vertex farthest from the entry→exit chord (the apex), and pushes all three points seaward. Each point uses its own LOCAL seaward direction:
 
 - **Apex**: chord-perpendicular (chord midpoint → apex direction), creating the arc bulge.
-- **Entry/Exit**: trail direction (entryPt → a, exitPt → b), which was in open water before hitting land. This is geometry-independent and avoids the edge-normal bug where long polygon edges (tens of km) have midpoints in a different geographic context than the entry point.
-- When `a` or `b` is inside the polygon (recursive routing), falls back to chord-perpendicular direction.
+- **Entry/Exit**: same chord-perpendicular direction as apex. All three points use a single consistent direction, avoiding the centroid bug (all points pushed same global direction), the edge-normal bug (midpoint in wrong geographic context), and the trail-direction bug (trail along chord axis instead of perpendicular).
 
 Key design:
 - Three control points (`pushedEntry`, `pushedApex`, `pushedExit`) are fed into Catmull-Rom as a synthetic sub-segment — no coastline-following perimeter points, so no zigzag.

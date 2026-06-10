@@ -355,19 +355,11 @@ export function routeAroundLand(a, b, polygons, bboxes, simplifyToleranceKm, vis
       const aLen = Math.sqrt(adx * adx + ady * ady);
       const apexDir = aLen > 1e-10 ? [adx / aLen, ady / aLen] : null;
 
-      // Entry/exit direction: the trail segment a→b was in open water before
-      // hitting land. Pushing entryPt back toward a, and exitPt toward b,
-      // pushes seaward — no edge-normal computation needed, works regardless
-      // of polygon geometry. Falls back to apexDir when a or b is directly
-      // on the entry/exit point (inside-polygon recursive routing).
-      function dirFromTo(from, to) {
-        const dx = to[0] - from[0], dy = to[1] - from[1];
-        const len = Math.sqrt(dx * dx + dy * dy);
-        return len > 1e-10 ? [dx / len, dy / len] : null;
-      }
-
-      const entryDir = dirFromTo(entryPt, a) || apexDir;
-      const exitDir = dirFromTo(exitPt, b) || apexDir;
+      // Entry/exit get pushed in the same chord-perpendicular direction as the
+      // apex. This pushes all three points perpendicular to the chord, toward
+      // the coastline bulge side (open water). Using a single consistent direction
+      // avoids the centroid bug (all points pushed same global direction) and the
+      // trail-direction bug (trail along chord rather than perpendicular to it).
 
       function pushPt(pt, dir, km) {
         if (!dir) return pt;
@@ -380,9 +372,9 @@ export function routeAroundLand(a, b, polygons, bboxes, simplifyToleranceKm, vis
         return pt;
       }
 
-      const pushedEntry = pushPt(entryPt, entryDir, offsetKm);
+      const pushedEntry = pushPt(entryPt, apexDir, offsetKm);
       const pushedApex = pushPt(apex, apexDir, apexOffsetKm);
-      const pushedExit = pushPt(exitPt, exitDir, offsetKm);
+      const pushedExit = pushPt(exitPt, apexDir, offsetKm);
 
       const arc = [pushedEntry, pushedApex, pushedExit];
 
