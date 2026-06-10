@@ -2,6 +2,7 @@ import { EXTENTS, TIERS, DEFAULT_EXTENT_FILTERS, DEFAULT_TRAIL_FILTERS } from '.
 
 const EXTENT_KEY = 'vessel-tracker:extent-filters';
 const TRAIL_KEY  = 'vessel-tracker:trail-filters';
+const UNIT_KEY   = 'vessel-tracker:unit';
 
 function loadFilters(key, defaults, keys) {
   try {
@@ -21,6 +22,7 @@ function loadFilters(key, defaults, keys) {
 let state = {
   extent: loadFilters(EXTENT_KEY, DEFAULT_EXTENT_FILTERS, EXTENTS),
   trail:  loadFilters(TRAIL_KEY,  DEFAULT_TRAIL_FILTERS,  EXTENTS),
+  unitNm: localStorage.getItem(UNIT_KEY) !== 'km',
 };
 
 const subscribers = new Set();
@@ -59,4 +61,10 @@ export function vesselCategory(vessel) {
 
 export function passesExtentFilter(vessel, extentFilters) {
   return extentFilters[vesselCategory(vessel)] === true;
+}
+
+export function setUnitNm(val) {
+  state = { ...state, unitNm: val };
+  localStorage.setItem(UNIT_KEY, val ? 'nm' : 'km');
+  notify();
 }

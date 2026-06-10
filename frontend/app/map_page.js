@@ -4,7 +4,8 @@ import { subscribe as subscribeSettings, getSettings, passesExtentFilter, vessel
 import { haversineNm, bearingDeg, haversineKm, routeAroundLand } from './geo.js';
 import { vesselColor, vesselCategoryLabel, vesselFlag } from './vessels.js';
 import { getTrail, pruneTrails } from './trails.js';
-import { LAND_POLYGONS } from '../coastline.js';
+import { subscribe as subscribeHighlight, getHighlight, setHighlight, clearHighlight } from './highlight_store.js';
+import { LAND_POLYGONS } from './coastline.js';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -20,8 +21,11 @@ let markers = new Map();
 let trailLayers = new Map();   // mmsi → [L.polyline, ...]
 let unsubscribeVessels = null;
 let unsubscribeSettings = null;
+let unsubscribeHighlight = null;
 let container = null;
 let statusEl = null;
+let resetBtn = null;
+let highlightedMmsi = null;
 let lastVessels = [];
 let lastSettings = getSettings();
 let trailReqToken = 0;
@@ -200,6 +204,7 @@ function currentExtent(vessel) {
 }
 
 function markerOpacity(vessel) {
+  if (vessel.mmsi === highlightedMmsi) return 1.0;
   const age = Date.now() - vessel.last_seen;
   const ttl = FADE_TTL_MS[currentExtent(vessel)] ?? FADE_TTL_MS.local;
   const remaining = Math.max(0, 1 - age / ttl);
@@ -216,7 +221,7 @@ function makeArrowIcon(vessel, heading, opacity) {
   const color = vesselColor(vessel);
   const rotation = heading ?? 0;
   return L.divIcon({
-    html: `<div style="transform:rotate(${rotation}deg);width:20px;height:20px;opacity:${opacity}">
+    html: `<div class="vessel-arrow" style="transform:rotate(${rotation}deg);width:20px;height:20px;opacity:${opacity}">
       <svg viewBox="0 0 20 20" width="20" height="20" overflow="visible">
         <polygon points="10,1 17,17 10,13 3,17"
           fill="${color}" stroke="rgba(0,0,0,0.6)" stroke-width="1.5" stroke-linejoin="round"/>
@@ -242,6 +247,12 @@ function makeVesselIcon(vessel, heading, opacity) {
   return isMoving(vessel) ? makeArrowIcon(vessel, heading, opacity) : makeDotIcon(vessel, opacity);
 }
 
+function applyHighlight(marker, mmsi) {
+  if (marker._icon) {
+    marker._icon.classList.toggle('highlighted', mmsi === highlightedMmsi);
+  }
+}
+
 // ── Detail sheet ─────────────────────────────────────────────────────────────
 
 function formatAge(updatedMs) {
@@ -260,6 +271,7 @@ function openSheet(vessel) {
   const flag = vesselFlag(vessel);
   const lengthStr = vessel.length !== null ? ` · ${vessel.length}m` : '';
   const typeStr = vessel.vessel_type !== null ? ` · Type ${vessel.vessel_type}` : '';
+  const isHighlighted = highlightedMmsi === vessel.mmsi;
 
   sheet.innerHTML = `
     <div class="sheet-handle"></div>
@@ -286,12 +298,29 @@ function openSheet(vessel) {
         <div class="detail-stat-value na">${vessel.mmsi}</div>
       </div>
     </div>
+    <button class="detail-highlight-btn" data-mmsi="${vessel.mmsi}">
+      <span class="detail-highlight-icon">${isHighlighted ? '★' : '☆'}</span>
+      ${isHighlighted ? 'Remove Highlight' : 'Highlight on Map'}
+    </button>
     <div class="detail-destination">
       <div class="detail-destination-label">Destination</div>
       <div class="detail-destination-value">${vessel.destination ?? '—'}</div>
     </div>
     <div class="detail-footer">Updated ${formatAge(vessel.last_seen)}</div>
   `;
+
+  sheet.querySelector('.detail-highlight-btn').addEventListener('click', e => {
+    e.stopPropagation();
+    const btn = e.currentTarget;
+    const mmsi = Number(btn.dataset.mmsi);
+    if (highlightedMmsi === mmsi) {
+      clearHighlight();
+      btn.innerHTML = '<span class="detail-highlight-icon">☆</span> Highlight on Map';
+    } else {
+      setHighlight(mmsi);
+      btn.innerHTML = '<span class="detail-highlight-icon">★</span> Remove Highlight';
+    }
+  });
 
   backdrop.classList.add('open');
   sheet.classList.add('open');
@@ -466,8 +495,9 @@ function drawTrail(vessel, points, token) {
     }
   }
 
+  const isHighlighted = vessel.mmsi === highlightedMmsi;
   const color = vesselColor(vessel);
-  const trailFade = markerOpacity(vessel);
+  const trailFade = isHighlighted ? 1.0 : markerOpacity(vessel);
   const segments = segmentsByTier(allPoints, TRAIL_GAP_SEVER_MS);
 
   if (window._debugTrail) {
@@ -494,7 +524,7 @@ function drawTrail(vessel, points, token) {
     t1: allPoints[allPoints.length - 1].t,
   };
 
-  const style = TIER_STYLE.direct;
+  const style = isHighlighted ? { opacity: 0.8, weight: 2 } : TIER_STYLE.direct;
   const layers = [];
 
   for (const seg of segments) {
@@ -628,6 +658,7 @@ function render() {
       setMarkerOpacity(existing, opacity);
       existing._vessel = vessel;
       existing._effectiveHeading = effectiveHeading;
+      applyHighlight(existing, vessel.mmsi);
     } else {
       const opacity = markerOpacity(vessel);
       const marker = L.marker([vessel.lat, vessel.lon], { icon: makeVesselIcon(vessel, vessel.heading, opacity) });
@@ -637,6 +668,7 @@ function render() {
       marker.addTo(map);
       setMarkerOpacity(marker, opacity);
       markers.set(vessel.mmsi, marker);
+      applyHighlight(marker, vessel.mmsi);
     }
   }
 
@@ -645,6 +677,10 @@ function render() {
       marker.remove();
       markers.delete(mmsi);
     }
+  }
+
+  if (resetBtn !== null) {
+    resetBtn.style.display = highlightedMmsi !== null ? '' : 'none';
   }
 
   trailReqToken++;
@@ -680,12 +716,20 @@ export function mount(root) {
       <div class="map-status" id="map-status">
         <span class="dot"></span>Loading…
       </div>
+      <button class="map-reset-btn" id="map-reset-btn" style="display:none" title="Clear highlight">
+        <svg viewBox="0 0 16 16" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="3" y1="3" x2="13" y2="13"/>
+          <line x1="13" y1="3" x2="3" y2="13"/>
+        </svg>
+      </button>
       <div class="detail-backdrop"></div>
       <div class="detail-sheet"></div>
     </div>
   `;
 
   statusEl = container.querySelector('#map-status');
+  resetBtn = container.querySelector('#map-reset-btn');
+  resetBtn.addEventListener('click', clearHighlight);
 
   container.querySelector('.detail-backdrop').addEventListener('click', closeSheet);
 
@@ -716,11 +760,16 @@ export function mount(root) {
 
   unsubscribeVessels = subscribeVessels(onVesselsUpdate);
   unsubscribeSettings = subscribeSettings(onSettingsUpdate);
+  unsubscribeHighlight = subscribeHighlight(mmsi => {
+    highlightedMmsi = mmsi;
+    render();
+  });
 }
 
 export function unmount() {
   if (unsubscribeVessels !== null) { unsubscribeVessels(); unsubscribeVessels = null; }
   if (unsubscribeSettings !== null) { unsubscribeSettings(); unsubscribeSettings = null; }
+  if (unsubscribeHighlight !== null) { unsubscribeHighlight(); unsubscribeHighlight = null; }
   if (map !== null) { map.remove(); map = null; }
   markers.clear();
   for (const layers of trailLayers.values()) {
@@ -730,5 +779,7 @@ export function unmount() {
   trailReqToken++;
   container = null;
   statusEl = null;
+  resetBtn = null;
+  highlightedMmsi = null;
   lastVessels = [];
 }

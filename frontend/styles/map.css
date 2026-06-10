@@ -41,6 +41,16 @@
   border: none;
   cursor: pointer;
   overflow: visible;
+  transition: filter 0.3s ease;
+}
+
+.vessel-marker.highlighted {
+  filter: drop-shadow(0 0 6px var(--accent)) drop-shadow(0 0 12px var(--accent));
+  z-index: 10000 !important;
+}
+
+.vessel-marker.highlighted .vessel-dot {
+  box-shadow: 0 0 12px var(--dot-color), 0 0 24px var(--dot-color);
 }
 
 .vessel-dot {
@@ -121,4 +131,34 @@
 @keyframes blink {
   0%, 100% { opacity: 1;   }
   50%       { opacity: 0.2; }
+}
+
+/* ── Reset highlight button ─────────────────────────────────── */
+
+.map-reset-btn {
+  position: absolute;
+  top: 56px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 30;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 1px solid var(--border-mid);
+  background: rgba(10, 21, 38, 0.88);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  -webkit-tap-highlight-color: transparent;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.map-reset-btn:hover,
+.map-reset-btn:active {
+  color: var(--accent);
+  border-color: var(--border-bright);
 }

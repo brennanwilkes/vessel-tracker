@@ -1,20 +1,20 @@
 import { VIEWSHEDS } from '../config.js';
 import { subscribe as subscribeVessels } from './store.js';
-import { subscribe as subscribeSettings, passesExtentFilter } from './settings_store.js';
+import { subscribe as subscribeSettings, passesExtentFilter, getSettings } from './settings_store.js';
 import { haversineNm, haversineKm } from './geo.js';
 import { vesselColor, vesselCategoryLabel, vesselFlag } from './vessels.js';
+import { setHighlight } from './highlight_store.js';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const HOME = VIEWSHEDS[0].home;
-const UNIT_KEY = 'vessel-tracker:unit';
 
 // ── State ────────────────────────────────────────────────────────────────────
 
 let unsubscribeVessels = null;
 let unsubscribeSettings = null;
 let container = null;
-let unitNm = localStorage.getItem(UNIT_KEY) !== 'km';
+let clickHandler = null;
 let lastVessels = [];
 let lastSettings = null;
 
@@ -28,6 +28,7 @@ function vesselIconSvg(vessel) {
 }
 
 function distanceLabel(vessel) {
+  const unitNm = getSettings().unitNm;
   if (unitNm) {
     const d = haversineNm(HOME.lat, HOME.lon, vessel.lat, vessel.lon);
     return { value: d.toFixed(1), unit: 'nm' };
@@ -94,18 +95,19 @@ export function mount(root) {
           <div class="list-header-title">Vessels</div>
           <div class="list-header-count">—</div>
         </div>
-        <button class="unit-toggle" id="unit-toggle">${unitNm ? 'nm' : 'km'}</button>
       </div>
       <div class="vessel-list"></div>
     </div>
   `;
 
-  container.querySelector('#unit-toggle').addEventListener('click', () => {
-    unitNm = !unitNm;
-    localStorage.setItem(UNIT_KEY, unitNm ? 'nm' : 'km');
-    container.querySelector('#unit-toggle').textContent = unitNm ? 'nm' : 'km';
-    renderVessels();
-  });
+  clickHandler = e => {
+    const card = e.target.closest('.vessel-card');
+    if (card === null) return;
+    const mmsi = Number(card.dataset.mmsi);
+    setHighlight(mmsi);
+    location.hash = 'map';
+  };
+  container.addEventListener('click', clickHandler);
 
   unsubscribeVessels = subscribeVessels((vessels, error) => {
     if (error !== null) {
@@ -127,6 +129,7 @@ export function mount(root) {
 export function unmount() {
   if (unsubscribeVessels !== null) { unsubscribeVessels(); unsubscribeVessels = null; }
   if (unsubscribeSettings !== null) { unsubscribeSettings(); unsubscribeSettings = null; }
+  if (clickHandler !== null) { container?.removeEventListener('click', clickHandler); clickHandler = null; }
   container = null;
   lastVessels = [];
   lastSettings = null;

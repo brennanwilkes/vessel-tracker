@@ -1,5 +1,5 @@
 import { EXTENTS } from '../config.js';
-import { subscribe, getSettings, setExtentFilter, setTrailFilter } from './settings_store.js';
+import { subscribe, getSettings, setExtentFilter, setTrailFilter, setUnitNm } from './settings_store.js';
 
 const CATEGORY_LABELS = {
   local_boat:       'Local Boats',
@@ -22,6 +22,10 @@ function renderToggles() {
     btn.classList.toggle('on', on);
     btn.setAttribute('aria-checked', String(on));
   });
+
+  container.querySelectorAll('.unit-option').forEach(btn => {
+    btn.classList.toggle('active', (btn.dataset.unit === 'nm') === settings.unitNm);
+  });
 }
 
 function buildHTML() {
@@ -43,9 +47,19 @@ function buildHTML() {
     </button>`;
   }).join('');
 
+  const unitNm = settings.unitNm;
+
   return `
     <div class="settings-page">
       <div class="settings-header">Settings</div>
+
+      <div class="settings-card">
+        <div class="settings-card-title">Distance Unit</div>
+        <div class="unit-selector">
+          <button class="unit-option${unitNm ? ' active' : ''}" data-unit="nm">NM</button>
+          <button class="unit-option${unitNm ? '' : ' active'}" data-unit="km">KM</button>
+        </div>
+      </div>
 
       <div class="settings-card">
         <div class="settings-card-title">Vessel Type</div>
@@ -66,15 +80,22 @@ export function mount(root) {
   container.innerHTML = buildHTML();
 
   clickHandler = e => {
-    const btn = e.target.closest('.settings-toggle');
-    if (btn === null) return;
-    const section = btn.dataset.section;
-    const tier = btn.dataset.tier;
-    const currentlyOn = btn.classList.contains('on');
-    if (section === 'extent') {
-      setExtentFilter(tier, !currentlyOn);
-    } else {
-      setTrailFilter(tier, !currentlyOn);
+    const toggle = e.target.closest('.settings-toggle');
+    if (toggle !== null) {
+      const section = toggle.dataset.section;
+      const tier = toggle.dataset.tier;
+      const currentlyOn = toggle.classList.contains('on');
+      if (section === 'extent') {
+        setExtentFilter(tier, !currentlyOn);
+      } else {
+        setTrailFilter(tier, !currentlyOn);
+      }
+      return;
+    }
+
+    const unitBtn = e.target.closest('.unit-option');
+    if (unitBtn !== null) {
+      setUnitNm(unitBtn.dataset.unit === 'nm');
     }
   };
   container.addEventListener('click', clickHandler);
