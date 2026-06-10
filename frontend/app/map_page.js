@@ -279,29 +279,20 @@ function segmentsByTier(points, gapByTier) {
   if (points.length === 0) return segments;
 
   let pts = [[points[0].lat, points[0].lon]];
-  let tier = points[0].tier;
   let segT0 = points[0].t;
   let segT1 = points[0].t;
 
   function flush() {
-    segments.push({ tier, pts, t0: segT0, t1: segT1 });
+    segments.push({ pts, t0: segT0, t1: segT1 });
   }
 
   for (let i = 1; i < points.length; i++) {
     const p = points[i];
     const gapMs = p.t - points[i - 1].t;
-    const threshold = gapByTier[tier];
+    const threshold = gapByTier[points[i - 1].tier];
 
-    if (p.tier !== tier) {
-      pts.push([p.lat, p.lon]);     // overlap so segments connect visually
-      segT1 = p.t;
-      flush();
-      pts = [[p.lat, p.lon]];
-      tier = p.tier;
-      segT0 = p.t;
-      segT1 = p.t;
-    } else if (threshold !== null && gapMs > threshold) {
-      segT1 = points[i - 1].t;      // segment ends before the gap
+    if (threshold !== null && gapMs > threshold) {
+      segT1 = points[i - 1].t;
       flush();
       pts = [[p.lat, p.lon]];
       segT0 = p.t;
@@ -365,8 +356,6 @@ function drawTrail(vessel, points, token) {
   const color = vesselColor(vessel);
   const trailFade = markerOpacity(vessel);
   const segments = segmentsByTier(allPoints, TRAIL_GAP_SEVER_MS);
-  const layers = [];
-  let globalPts = [];
 
   // Trail-wide time range so each segment paints only its window of the gradient
   const trailBounds = {
@@ -374,23 +363,14 @@ function drawTrail(vessel, points, token) {
     t1: allPoints[allPoints.length - 1].t,
   };
 
-  for (const seg of segments) {
-    if (seg.tier === 'global') {
-      globalPts = globalPts.concat(catmullRomPoints(seg.pts));
-    } else {
-      const style = TIER_STYLE[seg.tier];
-      const smooth = catmullRomPoints(seg.pts);
-      const segTimes = { t0: seg.t0, t1: seg.t1 };
-      const layer = makeFadePolyline(smooth, color, style.weight, style.opacity * trailFade, trailBounds, segTimes);
-      layer.addTo(map);
-      layers.push(layer);
-    }
-  }
+  const style = TIER_STYLE.direct;
+  const layers = [];
 
-  if (globalPts.length > 1) {
-    const style = TIER_STYLE.global;
-    const segTimes = { t0: trailBounds.t0, t1: trailBounds.t1 };
-    const layer = makeFadePolyline(globalPts, color, style.weight, style.opacity * trailFade, trailBounds, segTimes);
+  for (const seg of segments) {
+    const smooth = catmullRomPoints(seg.pts);
+    if (smooth.length < 2) continue;
+    const segTimes = { t0: seg.t0, t1: seg.t1 };
+    const layer = makeFadePolyline(smooth, color, style.weight, style.opacity * trailFade, trailBounds, segTimes);
     layer.addTo(map);
     layers.push(layer);
   }
