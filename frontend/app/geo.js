@@ -355,11 +355,12 @@ export function routeAroundLand(a, b, polygons, bboxes, simplifyToleranceKm, vis
       const aLen = Math.sqrt(adx * adx + ady * ady);
       const apexDir = aLen > 1e-10 ? [adx / aLen, ady / aLen] : null;
 
-      // Entry/exit direction: outward normal of the polygon edge they're on.
+      // Direction for entry/exit: outward normal of the polygon edge they're on.
       // Tries both perpendiculars to the edge; picks the one pointing into
-      // water (not inside any polygon). This gives a locally correct seaward
-      // direction regardless of polygon winding or centroid position.
+      // water (not inside any polygon). Returns null for -1 (inside-polygon
+      // entry/exit from recursive routing), caller falls back to apexDir.
       function edgeOutwardNormal(edgeIdx) {
+        if (edgeIdx < 0) return null;
         const n = polygon.length - 1;
         const pa = polygon[edgeIdx], pb = polygon[(edgeIdx + 1) % n];
         const dx = pb[0] - pa[0], dy = pb[1] - pa[1];
@@ -378,16 +379,8 @@ export function routeAroundLand(a, b, polygons, bboxes, simplifyToleranceKm, vis
         return null;
       }
 
-      const entryDir = edgeOutwardNormal(crossing.entryEdgeIdx);
-      const exitDir = edgeOutwardNormal(crossing.exitEdgeIdx);
-
-      // For apex, also compute edge outward normal (fallback if chord-perp fails)
-      let apexEdgeDir = null;
-      const n = polygon.length - 1;
-      for (const ei of [(apexIdx - 1 + n) % n, apexIdx]) {
-        const d = edgeOutwardNormal(ei);
-        if (d) { apexEdgeDir = d; break; }
-      }
+      const entryDir = edgeOutwardNormal(crossing.entryEdgeIdx) || apexDir;
+      const exitDir = edgeOutwardNormal(crossing.exitEdgeIdx) || apexDir;
 
       function pushPt(pt, dir, km) {
         if (!dir) return pt;
@@ -401,7 +394,7 @@ export function routeAroundLand(a, b, polygons, bboxes, simplifyToleranceKm, vis
       }
 
       const pushedEntry = pushPt(entryPt, entryDir, offsetKm);
-      const pushedApex = pushPt(apex, apexDir || apexEdgeDir, apexOffsetKm);
+      const pushedApex = pushPt(apex, apexDir, apexOffsetKm);
       const pushedExit = pushPt(exitPt, exitDir, offsetKm);
 
       const arc = [pushedEntry, pushedApex, pushedExit];
