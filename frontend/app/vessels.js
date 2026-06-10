@@ -73,13 +73,15 @@ export function classifyVessel(vessel) {
   const t = vessel.vessel_type ?? vessel.vesselType ?? null;
   const len = vessel.length;
 
+  // Known local ferries by MMSI (type code may come back null for these)
+  const knownFerryMmsi = [366929710, 311001249]; // COHO, VICTORIA CLIPPER V
+  if (knownFerryMmsi.includes(vessel.mmsi)) return 'ferry';
+
   // Known local ferry operators by name pattern (type often comes back null)
   if (
-    name === 'COHO' ||
     name.startsWith('WSF ') ||
     name.startsWith('QUEEN OF') ||
     name.startsWith('SALISH ') ||
-    name.includes('CLIPPER') ||
     name.includes(' FERRY')
   ) return 'ferry';
 
