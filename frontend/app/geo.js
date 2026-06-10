@@ -272,80 +272,41 @@ function pointInPolygon(pt, polygon) {
   return inside;
 }
 
-// Push each perimeter point seaward by computing the coastline normal at that
-// vertex and offsetting in the direction that's outside the local land polygon.
-// Validates the offset point is actually outside the polygon; if not, tries
-// the opposite perpendicular. Keeps the original position if both push into
-// land (defensive — shouldn't happen for valid perimeters).
-function offsetPathSeaward(path, polygon, polygons, gapDist) {
+// Push each perimeter point seaward.
+// Uses the polygon centroid to determine the outward (seaward) direction for
+// every vertex. Unlike per-vertex normals — which fail at headlands where both
+// perpendiculars point into land — the centroid direction gives ALL vertices a
+// consistent outward push, preventing alternating offset/non-offset control
+// points that cause Catmull-Rom zigzags.
+function offsetPathSeaward(path, polygon, allPolygons, gapDist) {
   if (path.length < 2) return path;
   const offsetKm = Math.max(2, gapDist * 0.15);
   if (offsetKm < 0.1) return path;
   const latPerDeg = 111.32;
   const avgLat = polygon.reduce((s, p) => s + p[0], 0) / polygon.length;
   const lonPerDeg = 111.32 * Math.cos(avgLat * Math.PI / 180);
-  return path.map((p, idx) => {
-    const prev = idx > 0 ? path[idx - 1] : null;
-    const next = idx < path.length - 1 ? path[idx + 1] : null;
-    let tLat, tLon;
-    if (prev && next) {
-      tLat = next[0] - prev[0];
-      tLon = next[1] - prev[1];
-    } else if (next) {
-      tLat = next[0] - p[0];
-      tLon = next[1] - p[1];
-    } else if (prev) {
-      tLat = p[0] - prev[0];
-      tLon = p[1] - prev[1];
-    } else {
-      return p;
-    }
-    const tLen = Math.sqrt(tLat * tLat + tLon * tLon);
-    if (tLen < 1e-10) return p;
-    const step = 0.1 / latPerDeg;
-    const n1 = [-tLon / tLen, tLat / tLen];
-    const n2 = [tLon / tLen, -tLat / tLen];
-    const s1 = [p[0] + n1[0] * step, p[1] + n1[1] * step];
-    const s2 = [p[0] + n2[0] * step, p[1] + n2[1] * step];
-    const inside1 = pointInPolygon(s1, polygon);
-    const inside2 = pointInPolygon(s2, polygon);
-    let n;
-    if (inside1 === inside2) {
-      // Both inside or both outside — shouldn't happen for a valid perimeter.
-      // Fall back: try both normals with full offset and pick the one further
-      // from the centroid.
-      n = n1;
-    } else {
-      n = inside1 ? n2 : n1;
-    }
-    const candidate = [
-      p[0] + n[0] * (offsetKm / latPerDeg),
-      p[1] + n[1] * (offsetKm / lonPerDeg),
-    ];
-    // Validate the candidate isn't inside any land polygon
-    let valid = true;
-    for (let pi = 0; pi < polygons.length; pi++) {
-      if (pointInPolygon(candidate, polygons[pi])) {
-        valid = false;
-        break;
+
+  const cx = polygon.reduce((s, p) => s + p[0], 0) / polygon.length;
+  const cy = polygon.reduce((s, p) => s + p[1], 0) / polygon.length;
+
+  return path.map(p => {
+    const dx = p[0] - cx;
+    const dy = p[1] - cy;
+    const len = Math.sqrt(dx * dx + dy * dy);
+    if (len < 1e-10) return p;
+    const ux = dx / len, uy = dy / len;
+
+    for (const sign of [1, -1]) {
+      const candidate = [
+        p[0] + ux * (offsetKm / latPerDeg) * sign,
+        p[1] + uy * (offsetKm / lonPerDeg) * sign,
+      ];
+      let valid = true;
+      for (let pi = 0; pi < allPolygons.length; pi++) {
+        if (pointInPolygon(candidate, allPolygons[pi])) { valid = false; break; }
       }
+      if (valid) return candidate;
     }
-    if (valid) return candidate;
-    // Try the reverse direction
-    const revN = [-n[0], -n[1]];
-    const revCandidate = [
-      p[0] + revN[0] * (offsetKm / latPerDeg),
-      p[1] + revN[1] * (offsetKm / lonPerDeg),
-    ];
-    valid = true;
-    for (let pi = 0; pi < polygons.length; pi++) {
-      if (pointInPolygon(revCandidate, polygons[pi])) {
-        valid = false;
-        break;
-      }
-    }
-    if (valid) return revCandidate;
-    // Both directions push into land — keep original
     return p;
   });
 }
@@ -468,39 +429,29 @@ export function routeAroundLand(a, b, polygons, bboxes, simplifyToleranceKm, vis
   return null;
 }
 
-// After offset, some control points may still be inside a polygon. Find
-// the nearest polygon vertex, compute the coastline normal at that vertex
-// (same method as offsetPathSeaward), and push outward by the seaward
-// offset distance. Gives catmull-rom interpolation enough clearance.
+// After offset, some control points may still be inside a polygon (mainly
+// from recursive archipelago routing). Uses the polygon centroid to push
+// outward — same seaward direction as offsetPathSeaward — rather than per-
+// vertex normals that produce inconsistent directions at headlands.
 function snapPathToWater(path, allPolygons, routingPolygon, gapDist) {
   const offsetKm = Math.max(2, gapDist * 0.15);
   const latPerDeg = 111.32;
   const avgLat = routingPolygon.reduce((s, p) => s + p[0], 0) / routingPolygon.length;
-  const step = 0.1 / latPerDeg;
+  const lonPerDeg = 111.32 * Math.cos(avgLat * Math.PI / 180);
   return path.map(p => {
     for (let pi = 0; pi < allPolygons.length; pi++) {
       if (pointInPolygon(p, allPolygons[pi])) {
         const poly = allPolygons[pi];
-        // Find nearest polygon vertex
-        let minD = Infinity, bestIdx = 0;
-        for (let vi = 0; vi < poly.length; vi++) {
-          const d = (poly[vi][0] - p[0]) ** 2 + (poly[vi][1] - p[1]) ** 2;
-          if (d < minD) { minD = d; bestIdx = vi; }
-        }
-        // Coastline tangent at nearest vertex
-        const prev = poly[bestIdx > 0 ? bestIdx - 1 : poly.length - 1];
-        const next = poly[(bestIdx + 1) % poly.length];
-        const tLat = next[0] - prev[0], tLon = next[1] - prev[1];
-        const tLen = Math.sqrt(tLat * tLat + tLon * tLon);
-        if (tLen < 1e-10) return p;
-        const n1 = [-tLon / tLen, tLat / tLen];
-        // Pick the perpendicular that steps outside this polygon
+        const cx = poly.reduce((s, v) => s + v[0], 0) / poly.length;
+        const cy = poly.reduce((s, v) => s + v[1], 0) / poly.length;
+        const dx = p[0] - cx, dy = p[1] - cy;
+        const len = Math.sqrt(dx * dx + dy * dy);
+        if (len < 1e-10) return p;
         for (let s = 1; s <= 200; s++) {
-          const sc = Math.cos(poly[bestIdx][0] * Math.PI / 180);
-          for (const n of [n1, [-n1[0], -n1[1]]]) {
+          for (const sign of [1, -1]) {
             const candidate = [
-              p[0] + n[0] * (offsetKm / latPerDeg) * s,
-              p[1] + n[1] * (offsetKm / latPerDeg) * s / sc,
+              p[0] + (dx / len) * (offsetKm / latPerDeg) * s * sign,
+              p[1] + (dy / len) * (offsetKm / lonPerDeg) * s * sign,
             ];
             let ok = true;
             for (let cpi = 0; cpi < allPolygons.length; cpi++) {
