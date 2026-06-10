@@ -21,8 +21,8 @@ app/
   api.js            — fetchVessels (→ /current), fetchVessel, fetchTrack (→ /vessel/:mmsi/track)
   store.js          — 30s polling loop, pub/sub (subscribe returns an unsubscribe fn)
   settings_store.js — extent + trail filter state, localStorage persistence, passesExtentFilter()
-  geo.js            — haversineNm, haversineKm, bearingDeg, routeAroundLand, segmentsIntersect, intersectionPoint, walkPolygonPerimeter
-  map_page.js       — Leaflet map, dot/arrow markers, trail polylines with coastline avoidance (augmentSegment, buildSubSegments), extent filter, settings subscription
+  geo.js            — haversineNm, haversineKm, bearingDeg, pointInPolygon, pointOnLand, segmentCrossesLand, routeWater (A* water router)
+  map_page.js       — Leaflet map, dot/arrow markers, trail pipeline (dedup → splitJourneys → buildControlPoints → catmullRom → runsBySynthetic), extent filter, settings subscription
   list_page.js      — distance-sorted vessel list, extent filter, unit toggle (nm/km in localStorage)
   trails.js         — lazy trail fetch + in-memory cache (TTL + tier-union widening)
   settings_page.js  — settings page: extent bucket toggles + trail tier toggles
@@ -56,18 +56,59 @@ All logic and variable assignments at the top of each page module. The render se
 
 `48.429861°N, -123.362194°W` (48°25'47.5"N 123°21'43.9"W). Set in `config.js VIEWSHEDS[0].home`.
 
-## Coastline avoidance
+## Trail rendering & land avoidance
 
-`routeAroundLand` in `geo.js` walks the coastline perimeter around a land polygon, Douglas-Peucker simplifies it (min 5 km tolerance), then pushes ALL simplified vertices seaward in a single direction (chordMid→apex = perpendicular to chord on coastline-bulge side). The perimeter naturally wraps around the coastline, so the arc follows the coastline shape without cutting through land. Uniform push direction avoids headland wiggles.
+Trails are one continuous, smooth (C¹) curve per **journey**. A journey breaks only
+when the vessel was parked (speed ≈ 0) through a long gap and resurfaces later —
+a moving vessel that merely lost signal stays one journey, and the gap is bridged
+continuously. The pipeline (`map_page.js`, all functions exported for testing):
 
-Key design:
-- All simplified perimeter vertices are Catmull-Rom control points — the perimeter wraps around the coast, so the arc follows the coastline shape.
-- Push distance: `offsetKm = Math.max(2, entryExitKm * 0.15)` applied uniformly; `pushPt` doubles distance (×1, ×2, ×4, … up to ×64) until each point clears all polygons.
-- **Grazing crossing fix**: when `segmentCrossesPolygon` entry and exit points are < 5 km apart, the polygon is skipped entirely via `visited.add(i); continue;`. Prevents tiny arcs from island-tip intersections (Salt Spring, Gulf Islands).
-- **Archipelago recursion**: each segment of the pushed arc is recursively checked against unvisited polygons. Handles Gulf Islands where a single arc around one island would cross another.
-- `offsetPathSeaward` removed. `simplifyPath` used in `routeAroundLand`.
-- `snapPathToWater` kept as final safety (centroid-based push, used only for recursive-route output).
+1. `dedup` — drop consecutive fixes < 20 m apart. **Critical**: duplicate AIS
+   reports make centripetal Catmull-Rom divide by ~0 and spike. (`DEDUP_KM`)
+2. `splitJourneys` — break only at a parked stop: `speed ≤ MOVING_SPEED_KN` AND
+   gap > `TRAIL_GAP_SEVER_MS[tier]`. (Displacement across the gap is irrelevant —
+   the vessel may resurface far away.)
+3. `buildControlPoints` — cos-weighted Laplacian `denoise` of real fixes (a point
+   that would move onto land keeps its original position), then for each
+   consecutive pair that is a **data gap** (`LAND_AVOIDANCE.gapMinMs` /
+   `gapMinKm`) AND whose straight line crosses land, splice the `routeWater`
+   waypoints inline. Final dedup collapses near-duplicate spliced points.
+4. `catmullRom` — ONE centripetal Catmull-Rom (α=0.5) over the whole journey's
+   control points. One spline ⇒ continuous derivative everywhere, including
+   real→inferred transitions. No pre-smoothing here (control points are already
+   clean). Each output sample carries an interpolated time and an `inferred`
+   flag (either control endpoint synthetic) for styling.
+5. `runsBySynthetic` — split samples into solid (real) / dashed-faint (inferred)
+   runs; `makeFadePolylines` renders each, fading by sample age.
 
-### Synthetic sub-segment first control point
+### `routeWater` (the water router, `geo.js`)
 
-In `augmentSegment` (`map_page.js`), when a land crossing is detected between `pts[i]→pts[i+1]`, the synthetic sub-segment now starts with `usePerim[0]` (first coastline perimeter point) instead of `pts[i]`. The trail point `pts[i]` can be far from the coastline entry (e.g., 47.72N for BUENA VENTURA when the last context point is at 48.32N), causing a Catmull-Rom spike through land. Using the perimeter entry point keeps the spline hugging the coast.
+Replaced the old perimeter-walker entirely. Builds a **local land/water grid**
+over the gap's bbox (lazily — only cells the search touches are tested), runs
+**A\*** for the shortest WATER-ONLY path, then **string-pulls** it into sparse
+any-angle waypoints. Because the search only steps through water cells, the path
+**structurally cannot cross land** — there is no "push seaward" heuristic to get
+wrong, no apex/centroid/edge-normal bugs, no archipelago recursion, no
+snap-to-water net.
+
+- **Obstacle inflation** (`clearanceCells`, default 1) keeps waypoints off the
+  coast so the smoothing spline has slack to cut corners without clipping land.
+  If inflation closes the only passage (channel narrower than clearance, or an
+  endpoint in a cove), the search retries with zero clearance.
+- **Adaptive cell size** (`cellKm`, 0.4–2 km by gap length) and **margin**
+  (`marginKm`, 15–90 km) keep big offshore detours and tight island threading
+  both tractable (~40–150 ms/gap).
+- Out of coverage (the coastline data is clipped to `[47,-128.7]→[51.2,-122]`):
+  `routeWater` returns `null` and the gap is bridged with a straight spline
+  segment — still C¹ since it's just more control points.
+
+### Validation
+
+`tests/trail.test.mjs` runs the real production pipeline over captured trails in
+`tests/fixtures/*.json` (CHASING DAYLIGHT, BUENA VENTURA, MOUNT ASO, TWR-8) and
+asserts: no spline point on land (beyond a 60 m penetration tolerance, ignoring
+clips that hug a real on/near-land fix) and bounded overshoot from the control
+polyline (catches the old div-by-zero spike, which threw 50–200 km excursions;
+real sharp turns and wide sparse-gap curve-bulges are fine). Run: `node
+tests/trail.test.mjs`. Known edge: TWR-8 grazes ≤ 50 m into a narrow dead-end
+inlet where the tug really went in and reversed during a gap — sub-pixel, real.

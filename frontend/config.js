@@ -63,12 +63,15 @@ export const TIER_STYLE = {
   global: { opacity: 0.25, weight: 1 },
 };
 
-// Land-avoidance: when a trail segment crosses land, insert perimeter waypoints.
+// Land-avoidance: across a data GAP whose straight line crosses land, the
+// water router (geo.js) invents a water-only path that the trail spline follows.
 export const LAND_AVOIDANCE = {
-  minSegmentKm: 5,        // skip segments shorter than this (avoids near-coast false positives)
-  dashArray: '4 4',       // SVG dash pattern for synthetic (inferred) trail portions
-  fadeRatio: 0.7,         // opacity multiplier for synthetic segments (vs the tier's normal opacity)
-  simplifyToleranceKm: 1, // floor tolerance; scales with gap distance (×0.2) for long crossings
+  // A pair of consecutive fixes is a data GAP worth routing across (vs normal
+  // dense tracking, drawn as-is) when either threshold is exceeded.
+  gapMinMs: 20 * 60 * 1000, // 20 min
+  gapMinKm: 5,
+  dashArray: '4 4',         // SVG dash pattern for inferred (water-routed) trail portions
+  fadeRatio: 0.7,           // opacity multiplier for inferred segments vs the tier's normal opacity
 };
 
 export const DEFAULT_EXTENT_FILTERS = { local_boat: true, passing_through: true, distant_visitor: true };

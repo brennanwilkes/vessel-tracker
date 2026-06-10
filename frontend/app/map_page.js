@@ -1,7 +1,7 @@
 import { VIEWSHEDS, DIRECT_BOUNDING_BOX, LOCAL_BOUNDING_BOX, MOVING_SPEED_KN, TIER_STYLE, TRAIL_GAP_SEVER_MS, LIVE_TTL_MS, FADE_TTL_MS, LAND_AVOIDANCE } from '../config.js';
 import { subscribe as subscribeVessels } from './store.js';
 import { subscribe as subscribeSettings, getSettings, passesExtentFilter, vesselCategory } from './settings_store.js';
-import { haversineNm, bearingDeg, haversineKm, routeAroundLand } from './geo.js';
+import { haversineNm, bearingDeg, haversineKm, routeWater, segmentCrossesLand, pointOnLand } from './geo.js';
 import { vesselColor, vesselCategoryLabel, vesselFlag } from './vessels.js';
 import { getTrail, pruneTrails } from './trails.js';
 import { subscribe as subscribeHighlight, getHighlight, setHighlight, clearHighlight } from './highlight_store.js';
@@ -43,167 +43,101 @@ export const POLYGON_BBOXES = LAND_POLYGONS.map(poly => {
   return { minLat, maxLat, minLon, maxLon };
 });
 
-// Insert synthetic perimeter waypoints around land for any consecutive pair
-// that crosses a coastline. When multiple consecutive pairs all cross land
-// (a "crossing run"), ONE perimeter is generated for the full span so the
-// coastline path stays continuous — no zigzag between different coastline
-// sections. Returns a new array of { lat, lon, t, tier, synthetic }.
-export function augmentSegment(pts, segT0, segT1) {
-  if (pts.length < 2) return pts.map(([lat, lon], i) => {
-    const t = segT0 + (segT1 - segT0) * (i / Math.max(pts.length - 1, 1));
-    return { lat, lon, t, tier: 'direct', synthetic: false };
-  });
+// ── Trail geometry pipeline ──────────────────────────────────────────────────
+//
+// One spline over the whole journey gives a continuous derivative everywhere —
+// including across real→inferred transitions. We only break the spline at a
+// genuine stop (the vessel sat still through a long gap); a moving vessel that
+// merely lost signal keeps one continuous, smooth trail.
+//
+//   dedup → split journeys at stops → per journey: denoise real points, splice
+//   water-routed waypoints into land-crossing gaps → one centripetal
+//   Catmull-Rom → runs grouped by real/inferred for styling.
 
-  const result = [];
-  let i = 0;
-  while (i < pts.length) {
-    const [lat, lon] = pts[i];
-    const frac = pts.length > 1 ? i / (pts.length - 1) : 0;
-    const t = segT0 + (segT1 - segT0) * frac;
+// Drop consecutive fixes closer than this. Duplicate/near-duplicate AIS reports
+// otherwise make centripetal Catmull-Rom divide by ~0 and spike.
+const DEDUP_KM = 0.02;
 
-    if (i < pts.length - 1) {
-      const a = pts[i], b = pts[i + 1];
-      const perimeter = routeAroundLand(a, b, LAND_POLYGONS, POLYGON_BBOXES, LAND_AVOIDANCE.simplifyToleranceKm);
-      if (perimeter && perimeter.length > 0) {
-        // Start of a crossing run — scan forward to find the last consecutive
-        // pair that also crosses land, so we generate ONE perimeter for the
-        // entire span instead of fragmented per-pair perimeters that zigzag.
-        let j = i;
-        while (j < pts.length - 2) {
-          const nextPerim = routeAroundLand(pts[j + 1], pts[j + 2], LAND_POLYGONS, POLYGON_BBOXES, LAND_AVOIDANCE.simplifyToleranceKm);
-          if (!nextPerim || nextPerim.length === 0) break;
-          j++;
-        }
-        // pts[i]→pts[i+1] through pts[j]→pts[j+1] all cross land.
-        // Generate ONE perimeter for the full span pts[i]→pts[j+1].
-        const spanPerim = routeAroundLand(pts[i], pts[j + 1], LAND_POLYGONS, POLYGON_BBOXES, LAND_AVOIDANCE.simplifyToleranceKm);
-        const usePerim = (spanPerim && spanPerim.length > 0) ? spanPerim : perimeter;
-        const perimEndIdx = (spanPerim && spanPerim.length > 0) ? (j + 1) : (i + 1);
-
-        const DBG = window.__DEBUG_MMSI;
-        if (DBG) {
-          console.log('[augmentSegment] i=%d j=%d perimEndIdx=%d', i, j, perimEndIdx);
-          console.log('[augmentSegment] a=pts[%d]=%f,%f b=pts[%d]=%f,%f', i, a[0], a[1], i+1, b[0], b[1]);
-          console.log('[augmentSegment] pts[i]=%f,%f usePerim[0]=%f,%f pts[perimEndIdx]=%f,%f',
-            pts[i][0], pts[i][1], usePerim[0][0], usePerim[0][1],
-            pts[perimEndIdx][0], pts[perimEndIdx][1]);
-          console.log('[augmentSegment] perimeter=%d pts spanPerim=%s usePerim=%d pts',
-            perimeter.length, spanPerim ? spanPerim.length + 'pts' : 'null', usePerim.length);
-          for (let ki = 0; ki < usePerim.length; ki++) {
-            console.log('  usePerim[%d] %f,%f', ki, usePerim[ki][0], usePerim[ki][1]);
-          }
-        }
-
-        // Start the synthetic sub-segment with the first perimeter point
-        // instead of pts[i] (which may be far south of the coastline entry,
-        // causing a Catmull-Rom spike from the last real context point).
-        const t0 = t;
-        const t1 = segT0 + (segT1 - segT0) * (perimEndIdx / Math.max(pts.length - 1, 1));
-        const dt = (t1 - t0) / (usePerim.length + 1);
-        result.push({
-          lat: usePerim[0][0],
-          lon: usePerim[0][1],
-          t: t0,
-          synthetic: true,
-        });
-        for (let k = 1; k < usePerim.length; k++) {
-          result.push({
-            lat: usePerim[k][0],
-            lon: usePerim[k][1],
-            t: t0 + dt * k,
-            synthetic: true,
-          });
-        }
-        // Exit trail point is in the gap region — mark synthetic so it
-        // stays part of this one synthetic sub-segment.
-        const [exitLat, exitLon] = pts[perimEndIdx];
-        const exitFrac = perimEndIdx / (pts.length - 1);
-        const exitT = segT0 + (segT1 - segT0) * exitFrac;
-        result.push({ lat: exitLat, lon: exitLon, t: exitT, synthetic: true });
-        i = perimEndIdx + 1;
-        continue;
-      }
-    }
-
-    result.push({ lat, lon, t, synthetic: false });
-    i++;
+export function dedup(points) {
+  if (points.length === 0) return points;
+  const out = [points[0]];
+  for (let i = 1; i < points.length; i++) {
+    const p = out[out.length - 1];
+    if (haversineKm(p.lat, p.lon, points[i].lat, points[i].lon) > DEDUP_KM) out.push(points[i]);
   }
-  return result;
+  return out;
 }
 
-// Split augmented points into sub-segments at real↔synthetic boundaries,
-// then merge short (<2 pt) sub-segments into their neighbors so no orphan
-// isolated real point creates a gap after a land crossing.
-export function buildSubSegments(augmented) {
-  const DBG = window.__DEBUG_MMSI;
-  if (DBG) console.log('[buildSubSegments] input=%d augmented pts', augmented.length);
-
-  if (augmented.length === 0) return [];
-
-  const segs = [];
-  let cur = [{ lat: augmented[0].lat, lon: augmented[0].lon, t: augmented[0].t }];
-  let curSynth = augmented[0].synthetic;
-  let segT0 = augmented[0].t;
-
-  function flush(endT) {
-    if (cur.length >= 1) {
-      segs.push({
-        pts: cur.map(p => [p.lat, p.lon]),
-        synthetic: curSynth,
-        t0: segT0,
-        t1: endT,
-      });
-    }
+// Break the trail into journeys at stops only: the vessel was stationary at its
+// last fix (speed ~0) and then a long gap followed — it parked and we lost it.
+// Wherever it resurfaces starts a fresh journey/curve. A vessel still moving
+// when signal dropped stays in one journey so the spline bridges the gap
+// continuously (the derivative stays continuous across the bridge).
+export function splitJourneys(points) {
+  const journeys = [];
+  let cur = [points[0]];
+  for (let i = 1; i < points.length; i++) {
+    const gap = points[i].t - points[i - 1].t;
+    const sever = TRAIL_GAP_SEVER_MS[points[i - 1].tier] ?? TRAIL_GAP_SEVER_MS.local;
+    const parked = (points[i - 1].speed ?? 0) <= MOVING_SPEED_KN;
+    if (sever !== null && gap > sever && parked) { journeys.push(cur); cur = [points[i]]; }
+    else cur.push(points[i]);
   }
+  journeys.push(cur);
+  return journeys;
+}
 
-  for (let i = 1; i < augmented.length; i++) {
-    const p = augmented[i];
-    if (p.synthetic !== curSynth) {
-      flush(augmented[i - 1].t);
-      cur = [{ lat: augmented[i - 1].lat, lon: augmented[i - 1].lon, t: augmented[i - 1].t }];
-      curSynth = p.synthetic;
-      segT0 = augmented[i - 1].t;
+// cos-weighted Laplacian denoise of real AIS positions. A point that would move
+// onto land (smoothing toward a neighbor-midpoint near a concave shore) keeps
+// its original position. Returns [lat,lon] parallel to the input.
+function denoise(points, passes = 2, factor = 0.2) {
+  let cur = points.map(p => [p.lat, p.lon]);
+  for (let pass = 0; pass < passes; pass++) {
+    const next = [cur[0]];
+    for (let i = 1; i < cur.length - 1; i++) {
+      const [ax, ay] = cur[i - 1], [bx, by] = cur[i], [cx, cy] = cur[i + 1];
+      const dx1 = bx - ax, dy1 = by - ay, dx2 = cx - bx, dy2 = cy - by;
+      const l1 = Math.hypot(dx1, dy1), l2 = Math.hypot(dx2, dy2);
+      if (l1 < 1e-10 || l2 < 1e-10) { next.push(cur[i]); continue; }
+      const cos = (dx1 * dx2 + dy1 * dy2) / (l1 * l2);
+      const t = Math.max(cos, 0) * factor;
+      const moved = [bx + (((ax + cx) / 2) - bx) * t, by + (((ay + cy) / 2) - by) * t];
+      next.push(pointOnLand(moved[0], moved[1], LAND_POLYGONS, POLYGON_BBOXES) ? cur[i] : moved);
     }
-    cur.push({ lat: p.lat, lon: p.lon, t: p.t });
+    next.push(cur[cur.length - 1]);
+    cur = next;
   }
-  flush(augmented[augmented.length - 1].t);
+  return cur;
+}
 
-  // Give the synthetic sub-segment the last 3 real control points as catmull-rom
-  // context so the spline flows smoothly through the transition (no corner where
-  // two independent splines meet with different tangents). Only the last 3 real
-  // points are stolen — the rest stay in their own real sub-segment — so the
-  // vast majority of the trail remains solid.
-  for (let i = segs.length - 1; i > 0; i--) {
-    if (!segs[i - 1].synthetic && segs[i].synthetic) {
-      const realPts = segs[i - 1].pts;
-      const n = Math.min(3, realPts.length);
-      const context = realPts.slice(-n);
-      if (n < realPts.length) {
-        segs[i - 1].pts = realPts.slice(0, -n);
-      }
-      segs[i].pts = [...context, ...segs[i].pts.slice(1)];
-      segs[i].synthetic = true;
-      // Approximate t0 for the merged synthetic sub-segment: time of first context pt
-      const total = realPts.length;
-      const tRange = segs[i - 1].t1 - segs[i - 1].t0;
-      const idx = total - n;
-      segs[i].t0 = segs[i - 1].t0 + (idx / Math.max(total - 1, 1)) * tRange;
-      if (n >= realPts.length) segs.splice(i - 1, 1);
-    }
-  }
-
-  const filtered = segs.filter(s => s.pts.length >= 2);
-  if (window.__DEBUG_MMSI) {
-    console.log('[buildSubSegments] %d sub-segments produced:', filtered.length);
-    for (let si = 0; si < filtered.length; si++) {
-      const s = filtered[si];
-      console.log('  seg[%d] synthetic=%s pts=%d', si, s.synthetic, s.pts.length);
-      for (let pi = 0; pi < s.pts.length; pi++) {
-        console.log('    [%d] %f,%f', pi, s.pts[pi][0], s.pts[pi][1]);
+// Build the spline control points for one journey: denoised real fixes, with
+// water-routed waypoints spliced into every land-crossing gap. Each control
+// point carries its time and whether it's an inferred (synthetic) waypoint.
+export function buildControlPoints(journey) {
+  const real = denoise(journey);
+  const ctrl = [{ lat: real[0][0], lon: real[0][1], t: journey[0].t, synthetic: false }];
+  for (let i = 1; i < real.length; i++) {
+    const a = real[i - 1], b = real[i];
+    const isGap = (journey[i].t - journey[i - 1].t) > LAND_AVOIDANCE.gapMinMs || haversineKm(a[0], a[1], b[0], b[1]) > LAND_AVOIDANCE.gapMinKm;
+    if (isGap && segmentCrossesLand(a, b, LAND_POLYGONS, POLYGON_BBOXES)) {
+      const route = routeWater(a, b, LAND_POLYGONS, POLYGON_BBOXES);
+      if (route && route.length > 2) {
+        const t0 = journey[i - 1].t, t1 = journey[i].t;
+        for (let k = 1; k < route.length - 1; k++) {
+          ctrl.push({ lat: route[k][0], lon: route[k][1], t: t0 + (t1 - t0) * (k / (route.length - 1)), synthetic: true });
+        }
       }
     }
+    ctrl.push({ lat: b[0], lon: b[1], t: journey[i].t, synthetic: false });
   }
-  return filtered;
+  // Splicing in/out routes through a narrow feature can leave near-duplicate
+  // control points; collapse them so the spline doesn't spike.
+  const out = [ctrl[0]];
+  for (let i = 1; i < ctrl.length; i++) {
+    const p = out[out.length - 1];
+    if (haversineKm(p.lat, p.lon, ctrl[i].lat, ctrl[i].lon) > DEDUP_KM) out.push(ctrl[i]);
+  }
+  return out;
 }
 
 // ── Trail fade helpers ────────────────────────────────────────────────────────
@@ -213,39 +147,27 @@ function hexToRgb(hex) {
   return [(v >> 16) & 255, (v >> 8) & 255, v & 255];
 }
 
-// Gradient-faded polylines: split the trail into chunks, each with flat opacity
-// based on its path-position fraction. This avoids the screen-space banding
-// artifacts of a single CanvasGradient on curved trails.
-// trailBounds { t0, t1 } — overall trail time range; each segment only paints its
-// window of the gradient so there are no opacity seams at segment boundaries.
-function makeFadePolylines(pts, color, weight, trailFade, trailBounds, segTimes, dashArray) {
+// Gradient-faded polylines: split a run of spline samples into chunks, each
+// with flat opacity keyed off the chunk's timestamp. Older = fainter. Chunking
+// avoids the screen-space banding a single CanvasGradient shows on curved
+// trails. `samples` are {lat,lon,t}; `trailBounds` is the overall {t0,t1} time
+// range (or 'flat' for the highlighted vessel, which doesn't fade).
+function makeFadePolylines(samples, color, weight, trailFade, trailBounds, dashArray) {
   const [r, g, b] = hexToRgb(color);
-
   const range = trailFade * 0.9;
   const base = trailFade * 0.1;
+  const fadeAt = t => {
+    if (trailBounds === 'flat' || !(trailBounds.t1 > trailBounds.t0)) return trailFade;
+    return base + range * ((t - trailBounds.t0) / (trailBounds.t1 - trailBounds.t0));
+  };
 
-  let headOpacity = base;
-  let tailOpacity = trailFade;
-
-  if (trailBounds && segTimes && trailBounds.t1 > trailBounds.t0) {
-    const frac0 = (segTimes.t0 - trailBounds.t0) / (trailBounds.t1 - trailBounds.t0);
-    const frac1 = (segTimes.t1 - trailBounds.t0) / (trailBounds.t1 - trailBounds.t0);
-    headOpacity = base + range * frac0;
-    tailOpacity = base + range * frac1;
-  }
-
-  const delta = tailOpacity - headOpacity;
   const layers = [];
   const CHUNK_PTS = 8;
-
-  for (let i = 0; i < pts.length - 1; i += CHUNK_PTS) {
-    const end = Math.min(i + CHUNK_PTS + 1, pts.length);
-    const chunk = pts.slice(i, end);
+  for (let i = 0; i < samples.length - 1; i += CHUNK_PTS) {
+    const end = Math.min(i + CHUNK_PTS + 1, samples.length);
+    const chunk = samples.slice(i, end);
     if (chunk.length < 2) continue;
-
-    const frac = (i + (end - i - 1) / 2) / (pts.length - 1);
-    const opacity = trailBounds === 'flat' ? trailFade : headOpacity + delta * frac;
-
+    const opacity = fadeAt(chunk[(chunk.length - 1) >> 1].t);
     const opts = {
       color: `rgba(${r},${g},${b},${opacity})`,
       weight,
@@ -253,8 +175,7 @@ function makeFadePolylines(pts, color, weight, trailFade, trailBounds, segTimes,
       interactive: false,
     };
     if (dashArray) opts.dashArray = dashArray;
-    const layer = L.polyline(chunk, opts);
-    layers.push(layer);
+    layers.push(L.polyline(chunk.map(p => [p.lat, p.lon]), opts));
   }
   return layers;
 }
@@ -406,119 +327,63 @@ function closeSheet() {
 
 // ── Trail drawing ─────────────────────────────────────────────────────────────
 
-// Two-phase pre-processor:
-//   Pass 1×: gentle inward Laplacian to kill AIS jitter before expanding.
-//   Pass 2×: outward push so the final spline bulges beyond the data on curves.
-// Applying the outward pass directly to noisy data amplifies zigzags — the
-// inward denoise pass must come first.
-// cos-weighting (straight→full effect, turning→none) protects sharp corners.
-export function preSmooth(pts) {
-  if (pts.length < 3) return pts;
+// Centripetal Catmull-Rom spline (α=0.5): passes through every control point
+// and weights tangents by √distance, avoiding the overshoot/zigzag uniform
+// Catmull-Rom produces on unevenly spaced points. Run once over a whole
+// journey's control points so the derivative is continuous everywhere,
+// including across real→inferred transitions. Control points are pre-cleaned
+// (deduped + denoised + clean routed waypoints), so no smoothing happens here.
+// Each output sample carries an interpolated time and the inferred flag of the
+// segment it lies on (either endpoint synthetic → inferred), for styling.
+export function catmullRom(ctrl, samples = 12) {
+  if (ctrl.length < 2) return ctrl.map(c => ({ lat: c.lat, lon: c.lon, t: c.t, synthetic: c.synthetic }));
 
-  function laplacianPass(cur, sign, factor) {
-    const next = [cur[0]];
-    for (let i = 1; i < cur.length - 1; i++) {
-      const [ax, ay] = cur[i - 1];
-      const [bx, by] = cur[i];
-      const [cx, cy] = cur[i + 1];
-      const dx1 = bx - ax, dy1 = by - ay;
-      const dx2 = cx - bx, dy2 = cy - by;
-      const len1 = Math.sqrt(dx1 * dx1 + dy1 * dy1);
-      const len2 = Math.sqrt(dx2 * dx2 + dy2 * dy2);
-      if (len1 < 1e-10 || len2 < 1e-10) { next.push(cur[i]); continue; }
-      const cos = (dx1 * dx2 + dy1 * dy2) / (len1 * len2);
-      const t = Math.max(cos * 0.5 + 0.5, 0) * factor;
-      const mx = (ax + cx) / 2, my = (ay + cy) / 2;
-      next.push([bx + sign * (mx - bx) * t, by + sign * (my - by) * t]);
-    }
-    next.push(cur[cur.length - 1]);
-    return next;
-  }
+  const knot = (t, a, b) => Math.pow(Math.max(Math.hypot(b.lat - a.lat, b.lon - a.lon), 1e-10), 0.5) + t;
+  const mirror = (a, b) => ({ lat: 2 * a.lat - b.lat, lon: 2 * a.lon - b.lon });
+  const out = [];
 
-  let cur = pts.slice();
-  cur = laplacianPass(cur, +1, 0.2); // inward: denoise (pass 1)
-  cur = laplacianPass(cur, +1, 0.2); // inward: denoise (pass 2)
-  cur = laplacianPass(cur, -1, 0.3); // outward: gentle expand past data
-  return cur;
-}
-
-// Centripetal Catmull-Rom spline (α=0.5): passes through every data point and
-// weights tangents by √distance between points. This prevents the overshoot/zigzag
-// artifacts that uniform Catmull-Rom produces when AIS points are unevenly spaced.
-// Pre-smoothed so sparse/noisy AIS data produces gentle curves rather than kinks.
-// skipSmooth: bypass laplacian denoise for synthetic coastline perimeter data
-// (Natural Earth vertices are already clean; smoothing pulls them inland).
-export function catmullRomPoints(pts, samples = 12, skipSmooth = false) {
-  if (pts.length < 2) return pts;
-  if (!skipSmooth) pts = preSmooth(pts);
-
-  function knot(t, a, b) {
-    const dx = b[0] - a[0], dy = b[1] - a[1];
-    return Math.pow(Math.max(Math.sqrt(dx * dx + dy * dy), 1e-10), 0.5) + t;
-  }
-
-  const result = [];
-  for (let i = 0; i < pts.length - 1; i++) {
-    const p0 = i > 0 ? pts[i - 1] : [2 * pts[0][0] - pts[1][0], 2 * pts[0][1] - pts[1][1]];
-    const p1 = pts[i];
-    const p2 = pts[i + 1];
-    const p3 = i < pts.length - 2 ? pts[i + 2] : [2 * pts[pts.length - 1][0] - pts[pts.length - 2][0], 2 * pts[pts.length - 1][1] - pts[pts.length - 2][1]];
-
+  for (let i = 0; i < ctrl.length - 1; i++) {
+    const p0 = i > 0 ? ctrl[i - 1] : mirror(ctrl[0], ctrl[1]);
+    const p1 = ctrl[i], p2 = ctrl[i + 1];
+    const p3 = i < ctrl.length - 2 ? ctrl[i + 2] : mirror(ctrl[ctrl.length - 1], ctrl[ctrl.length - 2]);
     const t0 = 0, t1 = knot(t0, p0, p1), t2 = knot(t1, p1, p2), t3 = knot(t2, p2, p3);
+    const inferred = p1.synthetic || p2.synthetic;
 
     for (let j = 0; j < samples; j++) {
       const t = t1 + (t2 - t1) * (j / samples);
-      const A1 = [p0[0] + (p1[0] - p0[0]) * (t - t0) / (t1 - t0), p0[1] + (p1[1] - p0[1]) * (t - t0) / (t1 - t0)];
-      const A2 = [p1[0] + (p2[0] - p1[0]) * (t - t1) / (t2 - t1), p1[1] + (p2[1] - p1[1]) * (t - t1) / (t2 - t1)];
-      const A3 = [p2[0] + (p3[0] - p2[0]) * (t - t2) / (t3 - t2), p2[1] + (p3[1] - p2[1]) * (t - t2) / (t3 - t2)];
-      const B1 = [A1[0] + (A2[0] - A1[0]) * (t - t0) / (t2 - t0), A1[1] + (A2[1] - A1[1]) * (t - t0) / (t2 - t0)];
-      const B2 = [A2[0] + (A3[0] - A2[0]) * (t - t1) / (t3 - t1), A2[1] + (A3[1] - A2[1]) * (t - t1) / (t3 - t1)];
-      result.push([B1[0] + (B2[0] - B1[0]) * (t - t1) / (t2 - t1), B1[1] + (B2[1] - B1[1]) * (t - t1) / (t2 - t1)]);
+      const lat = catmull('lat', p0, p1, p2, p3, t, t0, t1, t2, t3);
+      const lon = catmull('lon', p0, p1, p2, p3, t, t0, t1, t2, t3);
+      out.push({ lat, lon, t: p1.t + (p2.t - p1.t) * (j / samples), synthetic: inferred });
     }
   }
-  result.push(pts[pts.length - 1]);
-
-  if (window.__DEBUG_MMSI) {
-    const synth = skipSmooth ? 'synth' : 'real';
-    console.log('[catmullRomPoints] %s pts=%d→%d', synth, pts.length, result.length);
-    for (let i = 0; i < result.length; i++) {
-      console.log('  [%d] %f,%f', i, result[i][0], result[i][1]);
-    }
-  }
-
-  return result;
+  const lastC = ctrl[ctrl.length - 1];
+  out.push({ lat: lastC.lat, lon: lastC.lon, t: lastC.t, synthetic: lastC.synthetic });
+  return out;
 }
 
-export function segmentsByTier(points, gapByTier) {
-  const segments = [];
-  if (points.length === 0) return segments;
+// Barry-Goldman pyramidal evaluation of one coordinate of the centripetal spline.
+function catmull(k, p0, p1, p2, p3, t, t0, t1, t2, t3) {
+  const A1 = p0[k] + (p1[k] - p0[k]) * (t - t0) / (t1 - t0);
+  const A2 = p1[k] + (p2[k] - p1[k]) * (t - t1) / (t2 - t1);
+  const A3 = p2[k] + (p3[k] - p2[k]) * (t - t2) / (t3 - t2);
+  const B1 = A1 + (A2 - A1) * (t - t0) / (t2 - t0);
+  const B2 = A2 + (A3 - A2) * (t - t1) / (t3 - t1);
+  return B1 + (B2 - B1) * (t - t1) / (t2 - t1);
+}
 
-  let pts = [[points[0].lat, points[0].lon]];
-  let segT0 = points[0].t;
-  let segT1 = points[0].t;
-
-  function flush() {
-    segments.push({ pts, t0: segT0, t1: segT1 });
-  }
-
-  for (let i = 1; i < points.length; i++) {
-    const p = points[i];
-    const gapMs = p.t - points[i - 1].t;
-    const threshold = gapByTier[points[i - 1].tier];
-
-    if (threshold !== null && gapMs > threshold) {
-      segT1 = points[i - 1].t;
-      flush();
-      pts = [[p.lat, p.lon]];
-      segT0 = p.t;
-      segT1 = p.t;
-    } else {
-      pts.push([p.lat, p.lon]);
-      segT1 = p.t;
+// Split spline samples into contiguous runs of equal `synthetic` flag so each
+// run can be styled (solid for real tracking, dashed/faint for inferred gaps).
+// Runs overlap by one sample at boundaries so there is no visual seam.
+export function runsBySynthetic(samples) {
+  const runs = [];
+  let start = 0;
+  for (let i = 1; i <= samples.length; i++) {
+    if (i === samples.length || samples[i].synthetic !== samples[start].synthetic) {
+      runs.push({ synthetic: samples[start].synthetic, samples: samples.slice(start, Math.min(i + 1, samples.length)) });
+      start = i;
     }
   }
-  flush();
-  return segments;
+  return runs;
 }
 
 function removeTrailLayers(mmsi) {
@@ -534,13 +399,8 @@ function drawTrail(vessel, points, token) {
   if (map === null) return;
 
   const mmsi = vessel.mmsi;
-  window.__DEBUG_MMSI = ([357777000, 563303100, 319201600, 369970257].includes(mmsi)) ? mmsi : null;
-  if (window.__DEBUG_MMSI) console.log('[drawTrail] --- DRAWING MMSI=%d points=%d ---', mmsi, points.length);
   removeTrailLayers(mmsi);
-  if (points.length === 0) {
-    window.__DEBUG_MMSI = null;
-    return;
-  }
+  if (points.length === 0) return;
 
   // API returns points newest-first; reverse to chronological order for drawing.
   const chronological = [...points].reverse();
@@ -576,48 +436,27 @@ function drawTrail(vessel, points, token) {
   const isHighlighted = vessel.mmsi === highlightedMmsi;
   const color = vesselColor(vessel);
   const trailFade = isHighlighted ? 1.0 : markerOpacity(vessel);
-  const segments = segmentsByTier(allPoints, TRAIL_GAP_SEVER_MS);
-
-  const DBG = window.__DEBUG_MMSI;
-  if (DBG) {
-    console.log('[drawTrail] %d allPoints, %d segments from segmentsByTier', allPoints.length, segments.length);
-    const boundary = allPoints.length > 20 ? allPoints.length - 20 : 0;
-    const trailSample = [];
-    for (let pi = boundary; pi < allPoints.length; pi++) {
-      trailSample.push(`[${pi}]${allPoints[pi].lat},${allPoints[pi].lon}`);
-    }
-    console.log('[drawTrail]  last 20 allPoints:%s', trailSample.join(' '));
-  }
-
   const trailBounds = isHighlighted ? 'flat' : { t0: allPoints[0].t, t1: allPoints[allPoints.length - 1].t };
-
   const style = isHighlighted ? { opacity: 1.0, weight: 3 } : TIER_STYLE.direct;
   const layers = [];
 
-  for (const [segIdx, seg] of segments.entries()) {
-    if (DBG) console.log('[drawTrail]  seg[%d] pts=%d t0=%f t1=%f', segIdx, seg.pts.length, seg.t0, seg.t1);
-    const augmented = augmentSegment(seg.pts, seg.t0, seg.t1);
-    const subSegs = buildSubSegments(augmented);
-
-    for (const sub of subSegs) {
-      const smooth = catmullRomPoints(sub.pts, 12, sub.synthetic);
-      if (smooth.length < 2) continue;
-      const segTimes = { t0: sub.t0, t1: sub.t1 };
-      const opacityMul = sub.synthetic ? LAND_AVOIDANCE.fadeRatio : 1;
-      const segLayers = makeFadePolylines(
-        smooth, color, style.weight, style.opacity * opacityMul * trailFade,
-        trailBounds, segTimes,
-        sub.synthetic ? LAND_AVOIDANCE.dashArray : null
+  // One spline per journey (journeys break only at stops); within a journey the
+  // trail is C1-continuous across real→inferred transitions.
+  for (const journey of splitJourneys(dedup(allPoints))) {
+    if (journey.length < 2) continue;
+    const smooth = catmullRom(buildControlPoints(journey));
+    for (const run of runsBySynthetic(smooth)) {
+      if (run.samples.length < 2) continue;
+      const opacityMul = run.synthetic ? LAND_AVOIDANCE.fadeRatio : 1;
+      const runLayers = makeFadePolylines(
+        run.samples, color, style.weight, style.opacity * opacityMul * trailFade,
+        trailBounds, run.synthetic ? LAND_AVOIDANCE.dashArray : null
       );
-      for (const layer of segLayers) {
-        layer.addTo(map);
-        layers.push(layer);
-      }
+      for (const layer of runLayers) { layer.addTo(map); layers.push(layer); }
     }
   }
 
   trailLayers.set(mmsi, layers);
-  window.__DEBUG_MMSI = null;
 }
 
 async function scheduleTrails(visibleVessels, token) {
