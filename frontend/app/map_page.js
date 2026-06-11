@@ -540,93 +540,88 @@ export function mount(root) {
   });
   L.marker([HOME.lat, HOME.lon], { icon: homeIcon, interactive: false }).addTo(map);
 
-  // ── Viewshed obstructions ──────────────────────────────────────────────────
-  // Radial sectors emitted from home showing where building/terrain blocks the
-  // view. Each band uses multiple concentric rings for a smooth distance fade
-  // (opaque near home, transparent far out). The left wedge also has an angular
-  // fade on its counterclockwise edge.
+  // ── Viewshed obstructions (canvas overlay) ──────────────────────────────────
+  // Smooth radial + angular gradients drawn on a canvas, re-rendered on every
+  // map move/zoom. Canvas `createRadialGradient` avoids banding entirely.
 
-  const R_KM = 6371;
-  const OBST_RINGS = (maxKm, baseOpacity) => {
-    const n = 20;
-    const rings = [];
-    for (let i = 0; i < n; i++) {
-      const inner = (maxKm / n) * i;
-      const outer = (maxKm / n) * (i + 1);
-      const center = (inner + outer) / 2;
-      const mul = Math.max(0.01, 1 - center / maxKm);
-      rings.push({ inner, outer, mul });
-    }
-    return rings;
-  };
+  const OBST_MAX_KM = 30;
+  const OBST_STRIPS = 80;
 
-  function obstPoint(lat, lon, bearingDeg, distKm) {
-    const brg = bearingDeg * Math.PI / 180;
-    const d = distKm / R_KM;
-    const lat1 = lat * Math.PI / 180;
-    const lon1 = lon * Math.PI / 180;
-    const lat2 = Math.asin(Math.sin(lat1) * Math.cos(d) + Math.cos(lat1) * Math.sin(d) * Math.cos(brg));
-    const lon2 = lon1 + Math.atan2(Math.sin(brg) * Math.sin(d) * Math.cos(lat1), Math.cos(d) - Math.sin(lat1) * Math.sin(lat2));
-    return [lat2 * 180 / Math.PI, lon2 * 180 / Math.PI];
+  const obstCanvas = L.DomUtil.create('canvas', '');
+  obstCanvas.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none';
+  map.getPanes().overlayPane.appendChild(obstCanvas);
+
+  function obstDest(lat, lon, brgDeg, distKm) {
+    const brg = brgDeg * Math.PI / 180;
+    const d = distKm / 6371;
+    const l1 = lat * Math.PI / 180;
+    const l2 = Math.asin(Math.sin(l1) * Math.cos(d) + Math.cos(l1) * Math.sin(d) * Math.cos(brg));
+    const lo = lon * Math.PI / 180 + Math.atan2(Math.sin(brg) * Math.sin(d) * Math.cos(l1), Math.cos(d) - Math.sin(l1) * Math.sin(l2));
+    return [l2 * 180 / Math.PI, lo * 180 / Math.PI];
   }
 
-  function obstRing(lat, lon, startBrg, endBrg, innerKm, outerKm, arcSteps) {
-    const pts = [];
-    for (let i = 0; i <= arcSteps; i++) {
-      const f = i / arcSteps;
-      pts.push(obstPoint(lat, lon, startBrg + (endBrg - startBrg) * f, outerKm));
-    }
-    for (let i = arcSteps; i >= 0; i--) {
-      const f = i / arcSteps;
-      pts.push(obstPoint(lat, lon, startBrg + (endBrg - startBrg) * f, innerKm));
-    }
-    return pts;
-  }
+  function drawObstructions() {
+    const size = map.getSize();
+    obstCanvas.width = size.x;
+    obstCanvas.height = size.y;
+    const ctx = obstCanvas.getContext('2d');
+    if (!ctx) return;
 
-  function addObstruction(startBrg, endBrg, baseOpacity, fadeAngle, maxKm) {
-    const rings = OBST_RINGS(maxKm ?? 200, baseOpacity);
-    const stroke = { color: 'transparent', weight: 0, interactive: false };
-    const arcSteps = 8;
+    const homePx = map.latLngToContainerPoint([HOME.lat, HOME.lon]);
+    const mPerPx = 156543.03392 * Math.cos(HOME.lat * Math.PI / 180) / Math.pow(2, map.getZoom());
+    const outerPx = (OBST_MAX_KM * 1000) / mPerPx;
 
-    if (fadeAngle > 0 && endBrg > startBrg) {
-      const fadeZone = Math.min(fadeAngle, endBrg - startBrg);
-      const solidStart = startBrg + fadeZone;
-      const stripes = 6;
-
-      for (const ring of rings) {
-        const o = baseOpacity * ring.mul;
-        L.polygon(obstRing(HOME.lat, HOME.lon, solidStart, endBrg, ring.inner, ring.outer, arcSteps),
-          { ...stroke, fillColor: `rgba(0,0,0,${o.toFixed(3)})`, fillOpacity: o }).addTo(map);
-      }
-
-      for (let i = 0; i < stripes; i++) {
-        const a = startBrg + (fadeZone / stripes) * i;
-        const b = startBrg + (fadeZone / stripes) * (i + 1);
-        const fadeMul = (i + 0.5) / stripes;
-        for (const ring of rings) {
-          const o = baseOpacity * ring.mul * fadeMul;
-          L.polygon(obstRing(HOME.lat, HOME.lon, a, b, ring.inner, ring.outer, 4),
-            { ...stroke, fillColor: `rgba(0,0,0,${o.toFixed(3)})`, fillOpacity: o }).addTo(map);
+    function drawSector(startBrg, endBrg, maxOpacity, fadeAngle) {
+      if (fadeAngle > 0) {
+        const fadeDeg = Math.min(fadeAngle, endBrg - startBrg);
+        const solidStart = endBrg - fadeDeg;
+        const degPerStrip = fadeDeg / OBST_STRIPS;
+        for (let i = 0; i < OBST_STRIPS; i++) {
+          const a = solidStart + degPerStrip * i;
+          const b = solidStart + degPerStrip * (i + 1);
+          const fadeMul = (i + 0.5) / OBST_STRIPS;
+          const grad = ctx.createRadialGradient(homePx.x, homePx.y, 0, homePx.x, homePx.y, outerPx);
+          grad.addColorStop(0, `rgba(0,0,0,${(maxOpacity * fadeMul).toFixed(3)})`);
+          grad.addColorStop(1, 'rgba(0,0,0,0)');
+          const p1 = map.latLngToContainerPoint(obstDest(HOME.lat, HOME.lon, a, OBST_MAX_KM));
+          const p2 = map.latLngToContainerPoint(obstDest(HOME.lat, HOME.lon, b, OBST_MAX_KM));
+          ctx.beginPath();
+          ctx.moveTo(homePx.x, homePx.y);
+          ctx.lineTo(p1.x, p1.y);
+          ctx.lineTo(p2.x, p2.y);
+          ctx.closePath();
+          ctx.fillStyle = grad;
+          ctx.fill();
         }
-      }
-    } else {
-      for (const ring of rings) {
-        const o = baseOpacity * ring.mul;
-        L.polygon(obstRing(HOME.lat, HOME.lon, startBrg, endBrg, ring.inner, ring.outer, arcSteps),
-          { ...stroke, fillColor: `rgba(0,0,0,${o.toFixed(3)})`, fillOpacity: o }).addTo(map);
+      } else {
+        const grad = ctx.createRadialGradient(homePx.x, homePx.y, 0, homePx.x, homePx.y, outerPx);
+        grad.addColorStop(0, `rgba(0,0,0,${maxOpacity.toFixed(3)})`);
+        grad.addColorStop(1, 'rgba(0,0,0,0)');
+        const p1 = map.latLngToContainerPoint(obstDest(HOME.lat, HOME.lon, startBrg, OBST_MAX_KM));
+        const p2 = map.latLngToContainerPoint(obstDest(HOME.lat, HOME.lon, endBrg, OBST_MAX_KM));
+        ctx.beginPath();
+        ctx.moveTo(homePx.x, homePx.y);
+        ctx.lineTo(p1.x, p1.y);
+        ctx.lineTo(p2.x, p2.y);
+        ctx.closePath();
+        ctx.fillStyle = grad;
+        ctx.fill();
       }
     }
+
+    // Left wedge: 25° fade from firm edge (141.07°) going counterclockwise.
+    // Zero at ~116°, full at 141°, radial fade to 0 at 30 km.
+    drawSector(0, 141.07, 0.5, 25);
+
+    // B1 / B2: firm edges, radial fade only.
+    drawSector(153.66, 162.38, 0.5, 0);
+    drawSector(183.26, 204.86, 0.5, 0);
   }
 
-  // Left blocked wedge: firm right edge at 141.07° bearing, 22° angular fade on
-  // the left (counterclockwise) side.
-  addObstruction(0, 141.07, 0.5, 22);
-
-  // Blocked region 1: window frame / pillar between 153.66° and 162.38°
-  addObstruction(153.66, 162.38, 0.5, 0);
-
-  // Blocked region 2: window frame / pillar between 183.26° and 204.86°
-  addObstruction(183.26, 204.86, 0.5, 0);
+  map.on('moveend', drawObstructions);
+  map.on('zoomend', drawObstructions);
+  map.on('resize', drawObstructions);
+  drawObstructions();
 
   unsubscribeVessels = subscribeVessels(onVesselsUpdate);
   unsubscribeSettings = subscribeSettings(onSettingsUpdate);
