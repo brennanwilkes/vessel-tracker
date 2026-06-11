@@ -540,93 +540,21 @@ export function mount(root) {
   });
   L.marker([HOME.lat, HOME.lon], { icon: homeIcon, interactive: false }).addTo(map);
 
-  // ── Viewshed obstructions (canvas overlay) ──────────────────────────────────
-  // Smooth radial + angular gradients drawn on a canvas, re-rendered on every
-  // map move/zoom. Canvas `createRadialGradient` avoids banding entirely.
-
-  const OBST_MAX_KM = 30;
-  const OBST_STRIPS = 80;
-
-  const obstCanvas = L.DomUtil.create('canvas', '');
-  obstCanvas.style.cssText = 'position:absolute;pointer-events:none;z-index:350';
-  map.getContainer().appendChild(obstCanvas);
-
-  function obstDest(lat, lon, brgDeg, distKm) {
-    const brg = brgDeg * Math.PI / 180;
-    const d = distKm / 6371;
-    const l1 = lat * Math.PI / 180;
-    const l2 = Math.asin(Math.sin(l1) * Math.cos(d) + Math.cos(l1) * Math.sin(d) * Math.cos(brg));
-    const lo = lon * Math.PI / 180 + Math.atan2(Math.sin(brg) * Math.sin(d) * Math.cos(l1), Math.cos(d) - Math.sin(l1) * Math.sin(l2));
-    return [l2 * 180 / Math.PI, lo * 180 / Math.PI];
-  }
-
-  function drawObstructions() {
-    const size = map.getSize();
-    const homePx = map.latLngToContainerPoint([HOME.lat, HOME.lon]);
-    const margin = Math.max(size.x, size.y);
-    const w = margin * 2, h = margin * 2;
-    obstCanvas.width = w;
-    obstCanvas.height = h;
-    obstCanvas.style.left = (homePx.x - margin) + 'px';
-    obstCanvas.style.top = (homePx.y - margin) + 'px';
-    obstCanvas.style.width = w + 'px';
-    obstCanvas.style.height = h + 'px';
-    const ctx = obstCanvas.getContext('2d');
-    if (!ctx) return;
-
-    const refPx = map.latLngToContainerPoint(obstDest(HOME.lat, HOME.lon, 0, OBST_MAX_KM));
-    const outerPx = Math.min(Math.hypot(refPx.x - homePx.x, refPx.y - homePx.y), margin);
-    const dx = homePx.x - margin, dy = homePx.y - margin;
-    const toC = (p) => ({ x: p.x - dx, y: p.y - dy });
-    const hc = toC(homePx);
-
-    function drawSector(startBrg, endBrg, maxOpacity, fadeAngle) {
-      if (fadeAngle > 0) {
-        const fadeDeg = Math.min(fadeAngle, endBrg - startBrg);
-        const solidStart = endBrg - fadeDeg;
-        const degPerStrip = fadeDeg / OBST_STRIPS;
-        for (let i = 0; i < OBST_STRIPS; i++) {
-          const a = solidStart + degPerStrip * i;
-          const b = solidStart + degPerStrip * (i + 1);
-          const fadeMul = (i + 0.5) / OBST_STRIPS;
-          const grad = ctx.createRadialGradient(hc.x, hc.y, 0, hc.x, hc.y, outerPx);
-          grad.addColorStop(0, `rgba(0,0,0,${(maxOpacity * fadeMul).toFixed(3)})`);
-          grad.addColorStop(1, 'rgba(0,0,0,0)');
-          const p1 = toC(map.latLngToContainerPoint(obstDest(HOME.lat, HOME.lon, a, OBST_MAX_KM)));
-          const p2 = toC(map.latLngToContainerPoint(obstDest(HOME.lat, HOME.lon, b, OBST_MAX_KM)));
-          ctx.beginPath();
-          ctx.moveTo(hc.x, hc.y);
-          ctx.lineTo(p1.x, p1.y);
-          ctx.lineTo(p2.x, p2.y);
-          ctx.closePath();
-          ctx.fillStyle = grad;
-          ctx.fill();
-        }
-      } else {
-        const grad = ctx.createRadialGradient(hc.x, hc.y, 0, hc.x, hc.y, outerPx);
-        grad.addColorStop(0, `rgba(0,0,0,${maxOpacity.toFixed(3)})`);
-        grad.addColorStop(1, 'rgba(0,0,0,0)');
-        const p1 = toC(map.latLngToContainerPoint(obstDest(HOME.lat, HOME.lon, startBrg, OBST_MAX_KM)));
-        const p2 = toC(map.latLngToContainerPoint(obstDest(HOME.lat, HOME.lon, endBrg, OBST_MAX_KM)));
-        ctx.beginPath();
-        ctx.moveTo(hc.x, hc.y);
-        ctx.lineTo(p1.x, p1.y);
-        ctx.lineTo(p2.x, p2.y);
-        ctx.closePath();
-        ctx.fillStyle = grad;
-        ctx.fill();
-      }
-    }
-
-    drawSector(0, 141.07, 0.5, 25);
-    drawSector(153.66, 162.38, 0.5, 0);
-    drawSector(183.26, 204.86, 0.5, 0);
-  }
-
-  map.on('moveend', drawObstructions);
-  map.on('zoomend', drawObstructions);
-  map.on('resize', drawObstructions);
-  drawObstructions();
+  // ── TODO: Viewshed obstructions ────────────────────────────────────────────
+  // Show radial shadows emanating from the home point where the building or
+  // terrain blocks the view. The shaded regions should track pan/zoom perfectly
+  // with smooth gradients — dark/opaque near the home point, fading to
+  // transparent further out. Some edges firm, some soft/faded.
+  //
+  // View obstructions from the window (bearings from HOME = 48.429861, -123.362194):
+  //   1. Left/east block: everything counterclockwise of bearing 141.07° is
+  //      blocked. This edge (141.07°) is a firm edge. The left (counterclockwise)
+  //      side of this wedge should fade to zero over ~25° of arc.
+  //   2. Between bearing 153.66° and 162.38° — firm edges.
+  //   3. Between bearing 183.26° and 204.86° — firm edges.
+  // Right/west side (clockwise of everything above) is unblocked.
+  // Radial extent should reach ~0 before the Washington coast (~30 km).
+  //
 
   unsubscribeVessels = subscribeVessels(onVesselsUpdate);
   unsubscribeSettings = subscribeSettings(onSettingsUpdate);
