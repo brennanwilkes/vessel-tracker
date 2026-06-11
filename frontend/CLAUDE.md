@@ -130,6 +130,13 @@ snap-to-water net.
   option still route. It only changes cost, never passability, so water-tightness
   is unaffected. The ring search is depth-capped (`maxProxCells` ≤ 8) so it
   doesn't dominate runtime at fine cell sizes.
+- **Narrow-channel penalty** (`narrowWeight` 3): a *quadratic* term on `nearness`
+  (`+ narrowWeight·nearness²`) so cost/km is disproportionately higher in a narrow
+  waterway (land close on both sides → high nearness throughout) than mid-channel
+  in a wide one. Nudges the route onto the main channel (the Fraser) instead of a
+  shortcut up a small tributary. Vanishes in open water (nearness→0), so it's
+  mild — a big-enough real shortcut still wins. Tune up if a vessel still takes a
+  tributary (watch the regression for over-detours).
 - **Adaptive cell size** (`cellKm`, 0.2–1 km by gap length) and **margin**
   (`marginKm`, 12–90 km). The 0.2 km floor lets it thread Gulf Island channels
   and harbour mouths now that the coastline is high-resolution.

@@ -95,3 +95,17 @@ first-paint smoothness, not steady state.
 ### 7. Visualize on a map
 Emit GeoJSON (land polygons + real trail + routed waypoints + spline + land-clip points) and open it
 at <https://geojson.io>. Seeing the failure beats reading coordinates.
+
+## Known limitations / follow-ups
+
+- **Narrow-channel penalty** (`narrowWeight`, default 3, in `routeWater`): a
+  quadratic `nearness²` cost term so routes prefer the main channel over a narrow
+  tributary shortcut (the Fraser case — ACE/`316009841`). Tune up if a vessel
+  still takes a tributary; watch the regression for over-detours.
+- **Deep single clips on long inferred archipelago routes.** `repairOffLand` is
+  *monotonic* (keeps the pass with the fewest land samples, never returns worse),
+  so it can leave one deep clip if removing it would add several shallow ones —
+  e.g. ACE's 67 km Haro→Fraser gap leaves a ~540 m bulge in the Gulf Islands
+  (Active Pass, on the dashed/inferred portion). Proposed fix: let repair also
+  accept a locally-worse pass when it strictly reduces **max penetration** (not
+  just count), to target deep single clips. Re-run the full regression after.

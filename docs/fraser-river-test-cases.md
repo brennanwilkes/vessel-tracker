@@ -1,5 +1,11 @@
 # Fraser River / Vancouver harbour — coverage test cases
 
+> **STATUS: RESOLVED (water layer shipped).** `frontend/app/water.js` + the two-layer
+> `pointOnLand = inLand && !inWater` landed. All 15 river coords below return -1 from
+> `pointInAnyLand`; `glovis-star` graduated to PASS and `luther` + `mv-harken-no-7`
+> were added as PASS fixtures. Regenerate steps: `worker/CLAUDE.md` → "Water layer".
+> Kept as the regression spec for future fine-zone water coverage.
+
 **Problem:** our coastline (`frontend/app/coastline.js`) is OSM `natural=coastline`
 only, which stops at a river's tidal limit. The **upper Fraser** (New Westminster
 area) is OSM `natural=water`/`waterway=riverbank` — absent from our data — so

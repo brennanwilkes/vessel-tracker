@@ -183,6 +183,14 @@ export function routeWater(a, b, polygons, bboxes, opts = {}) {
   // cost — narrow channels with no open-water option still route, just dearer.
   const proximityKm = opts.proximityKm ?? 4;
   const proximityWeight = opts.proximityWeight ?? 2;
+  // Narrow-channel penalty: a quadratic term on `nearness` so the COST/km in a
+  // narrow waterway (land close on both sides → high nearness throughout) is
+  // disproportionately higher than mid-channel in a wide one. This nudges the
+  // route onto the main channel (e.g. the Fraser) instead of a shortcut up a
+  // small tributary, without affecting open-water routing (nearness → 0 a few
+  // cells offshore, so the term vanishes). Mild by design — a big-enough real
+  // shortcut still wins; it won't detour absurdly.
+  const narrowWeight = opts.narrowWeight ?? 3;
   // Cap the ring-search depth: at a fine cell size proximityKm/cellKm would be
   // huge and the per-cell ring search O(d^2) would dominate runtime.
   const maxProxCells = Math.min(8, Math.max(1, Math.round(proximityKm / cellKm)));
@@ -260,7 +268,8 @@ export function routeWater(a, b, polygons, bboxes, opts = {}) {
         const n = idx(nr, nc);
         if (closed[n] || (n !== goalN && !passable(nr, nc))) continue;
         const step = haversineKm(cellLat(r), cellLon(c), cellLat(nr), cellLon(nc));
-        const tentative = gScore[node] + step * (1 + proximityWeight * nearness(nr, nc));
+        const nn = nearness(nr, nc);
+        const tentative = gScore[node] + step * (1 + proximityWeight * nn + narrowWeight * nn * nn);
         if (tentative < gScore[n]) { gScore[n] = tentative; parent[n] = node; heap.push(n, tentative + hCost(nr, nc)); }
       }
     }
