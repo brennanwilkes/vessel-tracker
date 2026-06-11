@@ -548,7 +548,7 @@ export function mount(root) {
   const OBST_STRIPS = 80;
 
   const obstCanvas = L.DomUtil.create('canvas', '');
-  obstCanvas.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none';
+  obstCanvas.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none;z-index:-1';
   map.getPanes().overlayPane.appendChild(obstCanvas);
 
   function obstDest(lat, lon, brgDeg, distKm) {
@@ -564,6 +564,8 @@ export function mount(root) {
     const size = map.getSize();
     obstCanvas.width = size.x;
     obstCanvas.height = size.y;
+    obstCanvas.style.width = size.x + 'px';
+    obstCanvas.style.height = size.y + 'px';
     const ctx = obstCanvas.getContext('2d');
     if (!ctx) return;
 
