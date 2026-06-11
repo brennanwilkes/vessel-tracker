@@ -542,10 +542,23 @@ export function mount(root) {
 
   // ── Viewshed obstructions ──────────────────────────────────────────────────
   // Radial sectors emitted from home showing where building/terrain blocks the
-  // view. Concentric rings create a radial fade (darker near home, lighter far);
-  // the left wedge also has a 45° angular fade on its counterclockwise edge.
+  // view. Each band uses multiple concentric rings for a smooth distance fade
+  // (opaque near home, transparent far out). The left wedge also has an angular
+  // fade on its counterclockwise edge.
 
   const R_KM = 6371;
+  const OBST_RINGS = (maxKm, baseOpacity) => {
+    const n = 20;
+    const rings = [];
+    for (let i = 0; i < n; i++) {
+      const inner = (maxKm / n) * i;
+      const outer = (maxKm / n) * (i + 1);
+      const center = (inner + outer) / 2;
+      const mul = Math.max(0.01, 1 - center / maxKm);
+      rings.push({ inner, outer, mul });
+    }
+    return rings;
+  };
 
   function obstPoint(lat, lon, bearingDeg, distKm) {
     const brg = bearingDeg * Math.PI / 180;
@@ -570,13 +583,10 @@ export function mount(root) {
     return pts;
   }
 
-  function addObstruction(startBrg, endBrg, baseOpacity, fadeAngle) {
-    const rings = [
-      { inner: 1, outer: 20, mul: 1.0 },
-      { inner: 20, outer: 50, mul: 0.5 },
-      { inner: 50, outer: 120, mul: 0.2 },
-    ];
+  function addObstruction(startBrg, endBrg, baseOpacity, fadeAngle, maxKm) {
+    const rings = OBST_RINGS(maxKm ?? 200, baseOpacity);
     const stroke = { color: 'transparent', weight: 0, interactive: false };
+    const arcSteps = 8;
 
     if (fadeAngle > 0 && endBrg > startBrg) {
       const fadeZone = Math.min(fadeAngle, endBrg - startBrg);
@@ -585,7 +595,7 @@ export function mount(root) {
 
       for (const ring of rings) {
         const o = baseOpacity * ring.mul;
-        L.polygon(obstRing(HOME.lat, HOME.lon, solidStart, endBrg, ring.inner, ring.outer, 8),
+        L.polygon(obstRing(HOME.lat, HOME.lon, solidStart, endBrg, ring.inner, ring.outer, arcSteps),
           { ...stroke, fillColor: `rgba(0,0,0,${o.toFixed(3)})`, fillOpacity: o }).addTo(map);
       }
 
@@ -602,21 +612,21 @@ export function mount(root) {
     } else {
       for (const ring of rings) {
         const o = baseOpacity * ring.mul;
-        L.polygon(obstRing(HOME.lat, HOME.lon, startBrg, endBrg, ring.inner, ring.outer, 8),
+        L.polygon(obstRing(HOME.lat, HOME.lon, startBrg, endBrg, ring.inner, ring.outer, arcSteps),
           { ...stroke, fillColor: `rgba(0,0,0,${o.toFixed(3)})`, fillOpacity: o }).addTo(map);
       }
     }
   }
 
-  // Left blocked wedge: firm right edge at 141.07° bearing, 45° angular fade on
-  // the left (counterclockwise) side from 0° → 45°.
-  addObstruction(0, 141.07, 0.35, 45);
+  // Left blocked wedge: firm right edge at 141.07° bearing, 22° angular fade on
+  // the left (counterclockwise) side.
+  addObstruction(0, 141.07, 0.5, 22);
 
   // Blocked region 1: window frame / pillar between 153.66° and 162.38°
-  addObstruction(153.66, 162.38, 0.35, 0);
+  addObstruction(153.66, 162.38, 0.5, 0);
 
   // Blocked region 2: window frame / pillar between 183.26° and 204.86°
-  addObstruction(183.26, 204.86, 0.35, 0);
+  addObstruction(183.26, 204.86, 0.5, 0);
 
   unsubscribeVessels = subscribeVessels(onVesselsUpdate);
   unsubscribeSettings = subscribeSettings(onSettingsUpdate);
