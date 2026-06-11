@@ -40,7 +40,7 @@ const MID_TO_ISO2 = {
   750:'GY',755:'PY',760:'PE',765:'SR',770:'UY',775:'VE',
 };
 
-const CATEGORY_COLORS = {
+export const CATEGORY_COLORS = {
   cargo:      '#ea580c',  // orange-600  — deeper rust, distinct from cruise gold
   tanker:     '#dc2626',  // red-600     — deeper red, same warm shipping family
   cruise:     '#facc15',  // yellow-400  — bright gold, luxury/passenger
@@ -53,7 +53,7 @@ const CATEGORY_COLORS = {
   unknown:    '#525252',  // neutral-600 — de-emphasised
 };
 
-const CATEGORY_LABELS = {
+export const CATEGORY_LABELS = {
   ferry:      'Ferry',
   cruise:     'Cruise Ship',
   cargo:      'Cargo',
@@ -151,11 +151,14 @@ export function vesselCategoryLabel(vessel) {
   return CATEGORY_LABELS[classifyVessel(vessel)];
 }
 
+export function vesselCountryCode(vessel) {
+  if (vessel.mmsi === null || vessel.mmsi === undefined) return null;
+  const mid = Math.floor(vessel.mmsi / 1_000_000);
+  return MID_TO_ISO2[mid] ?? null;
+}
+
 export function vesselFlag(vessel) {
-  const mmsi = vessel.mmsi;
-  if (mmsi === null || mmsi === undefined) return null;
-  const mid = Math.floor(mmsi / 1_000_000);
-  const iso2 = MID_TO_ISO2[mid];
+  const iso2 = vesselCountryCode(vessel);
   if (!iso2) return null;
   return String.fromCodePoint(
     0x1F1E6 + iso2.charCodeAt(0) - 65,

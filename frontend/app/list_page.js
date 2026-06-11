@@ -1,8 +1,8 @@
-import { VIEWSHEDS } from '../config.js';
+import { VIEWSHEDS, MOVING_SPEED_KN } from '../config.js';
 import { subscribe as subscribeVessels } from './store.js';
-import { subscribe as subscribeSettings, passesExtentFilter, getSettings } from './settings_store.js';
+import { subscribe as subscribeSettings, passesExtentFilter, passesVesselTypeFilter, getSettings, setSort } from './settings_store.js';
 import { haversineNm, haversineKm } from './geo.js';
-import { vesselColor, vesselCategoryLabel, vesselFlag } from './vessels.js';
+import { vesselColor, vesselCategoryLabel, vesselFlag, vesselCountryCode } from './vessels.js';
 import { setHighlight } from './highlight_store.js';
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -22,6 +22,12 @@ let lastSettings = null;
 
 function vesselIconSvg(vessel) {
   const color = vesselColor(vessel);
+  const moving = vessel.speed !== null && vessel.speed > MOVING_SPEED_KN;
+  if (!moving) {
+    return `<svg viewBox="0 0 20 20" width="18" height="18">
+      <circle cx="10" cy="10" r="5" fill="${color}" stroke="rgba(0,0,0,0.4)" stroke-width="1.5"/>
+    </svg>`;
+  }
   return `<svg viewBox="0 0 20 20" width="18" height="18">
     <polygon points="10,1 17,17 10,13 3,17" fill="${color}" stroke="rgba(0,0,0,0.4)" stroke-width="1.5" stroke-linejoin="round"/>
   </svg>`;
@@ -37,12 +43,53 @@ function distanceLabel(vessel) {
   return { value: d.toFixed(1), unit: 'km' };
 }
 
+// ── Sort helpers ─────────────────────────────────────────────────────────────
+
+const SORT_FUNCS = {
+  name:        v => (v.name ?? 'Unknown Vessel').toLowerCase(),
+  country:     v => vesselCountryCode(v) ?? '',
+  distance:    v => haversineNm(HOME.lat, HOME.lon, v.lat, v.lon),
+  speed:       v => v.speed ?? -1,
+  vessel_type: v => vesselCategoryLabel(v),
+};
+
+function makeSortComparator(field, dir) {
+  const fn = SORT_FUNCS[field];
+  if (dir === 'asc') {
+    return (a, b) => {
+      const va = fn(a);
+      const vb = fn(b);
+      if (va === null || va === undefined) return 1;
+      if (vb === null || vb === undefined) return -1;
+      if (va < vb) return -1;
+      if (va > vb) return 1;
+      return 0;
+    };
+  }
+  return (a, b) => {
+    const va = fn(a);
+    const vb = fn(b);
+    if (va === null || va === undefined) return 1;
+    if (vb === null || vb === undefined) return -1;
+    if (va > vb) return -1;
+    if (va < vb) return 1;
+    return 0;
+  };
+}
+
+function sortDirIcon(dir) {
+  return dir === 'asc' ? '↑' : '↓';
+}
+
 // ── Render ───────────────────────────────────────────────────────────────────
 
 function renderVessels() {
   if (container === null || lastSettings === null) return;
 
-  const filtered = lastVessels.filter(v => passesExtentFilter(v, lastSettings.extent));
+  const filtered = lastVessels.filter(v =>
+    passesExtentFilter(v, lastSettings.extent) &&
+    passesVesselTypeFilter(v, lastSettings.vesselType)
+  );
 
   const countEl = container.querySelector('.list-header-count');
   if (countEl !== null) countEl.textContent = `${filtered.length} vessel${filtered.length !== 1 ? 's' : ''} in view`;
@@ -55,11 +102,8 @@ function renderVessels() {
     return;
   }
 
-  const sorted = [...filtered].sort((a, b) => {
-    const da = haversineNm(HOME.lat, HOME.lon, a.lat, a.lon);
-    const db = haversineNm(HOME.lat, HOME.lon, b.lat, b.lon);
-    return da - db;
-  });
+  const comparator = makeSortComparator(lastSettings.sortField, lastSettings.sortDir);
+  const sorted = [...filtered].sort(comparator);
 
   listEl.innerHTML = sorted.map((v, i) => {
     const dist = distanceLabel(v);
@@ -88,12 +132,25 @@ function renderVessels() {
 export function mount(root) {
   container = root;
 
+  const sortField = getSettings().sortField;
+  const sortDir = getSettings().sortDir;
+
   container.innerHTML = `
     <div class="list-page">
       <div class="list-header">
         <div class="list-header-left">
           <div class="list-header-title">Vessels</div>
           <div class="list-header-count">—</div>
+        </div>
+        <div class="list-header-right">
+          <select class="sort-select" aria-label="Sort by">
+            <option value="name" ${sortField === 'name' ? 'selected' : ''}>Name</option>
+            <option value="country" ${sortField === 'country' ? 'selected' : ''}>Country</option>
+            <option value="distance" ${sortField === 'distance' ? 'selected' : ''}>Distance</option>
+            <option value="speed" ${sortField === 'speed' ? 'selected' : ''}>Speed</option>
+            <option value="vessel_type" ${sortField === 'vessel_type' ? 'selected' : ''}>Type</option>
+          </select>
+          <button class="sort-dir-btn" aria-label="Toggle sort direction">${sortDirIcon(sortDir)}</button>
         </div>
       </div>
       <div class="vessel-list"></div>
@@ -109,6 +166,19 @@ export function mount(root) {
   };
   container.addEventListener('click', clickHandler);
 
+  const selectEl = container.querySelector('.sort-select');
+  const dirBtn = container.querySelector('.sort-dir-btn');
+
+  selectEl.addEventListener('change', () => {
+    setSort(selectEl.value, getSettings().sortDir);
+  });
+
+  dirBtn.addEventListener('click', () => {
+    const current = getSettings().sortDir;
+    const next = current === 'asc' ? 'desc' : 'asc';
+    setSort(getSettings().sortField, next);
+  });
+
   unsubscribeVessels = subscribeVessels((vessels, error) => {
     if (error !== null) {
       console.error('[list] poll error:', error);
@@ -122,6 +192,14 @@ export function mount(root) {
 
   unsubscribeSettings = subscribeSettings(settings => {
     lastSettings = settings;
+    const selectEl = container?.querySelector('.sort-select');
+    const dirBtn = container?.querySelector('.sort-dir-btn');
+    if (selectEl !== null && selectEl.value !== settings.sortField) {
+      selectEl.value = settings.sortField;
+    }
+    if (dirBtn !== null) {
+      dirBtn.textContent = sortDirIcon(settings.sortDir);
+    }
     renderVessels();
   });
 }

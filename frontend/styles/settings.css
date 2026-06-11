@@ -110,16 +110,15 @@
 /* ── Unit selector ──────────────────────────────────────────── */
 
 .unit-selector {
-  display: flex;
-  gap: 8px;
-  margin-top: 2px;
+  display: inline-flex;
+  border: 1px solid var(--border-mid);
+  border-radius: 8px;
+  overflow: hidden;
 }
 
 .unit-option {
-  flex: 1;
-  padding: 9px 16px;
-  border-radius: 8px;
-  border: 1px solid var(--border-mid);
+  padding: 6px 16px;
+  border: none;
   background: var(--bg-elevated);
   color: var(--text-secondary);
   font-family: var(--font-ui);
@@ -129,15 +128,30 @@
   text-transform: uppercase;
   letter-spacing: 0.08em;
   -webkit-tap-highlight-color: transparent;
-  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  transition: background 0.15s, color 0.15s;
 }
 
 .unit-option.active {
   background: var(--accent);
   color: #fff;
-  border-color: var(--accent);
 }
 
-.unit-option:active {
-  border-color: var(--border-bright);
+.unit-option + .unit-option {
+  border-left: 1px solid var(--border-mid);
+}
+
+/* ── Toggle left (dot + label group) ──────────────────────── */
+
+.toggle-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.category-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
 }

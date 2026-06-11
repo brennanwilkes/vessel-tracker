@@ -76,3 +76,6 @@ export const LAND_AVOIDANCE = {
 
 export const DEFAULT_EXTENT_FILTERS = { local_boat: true, passing_through: true, distant_visitor: true };
 export const DEFAULT_TRAIL_FILTERS  = { local_boat: true, passing_through: true, distant_visitor: false };
+
+export const VESSEL_TYPE_KEYS = ['cargo', 'tanker', 'cruise', 'ferry', 'military', 'fishing', 'government', 'pleasure', 'tug', 'unknown'];
+export const DEFAULT_VESSEL_TYPE_FILTERS = { cargo: true, tanker: true, cruise: true, ferry: true, military: true, fishing: true, government: true, pleasure: true, tug: true, unknown: true };

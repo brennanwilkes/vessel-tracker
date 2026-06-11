@@ -1,6 +1,6 @@
 import { VIEWSHEDS, DIRECT_BOUNDING_BOX, LOCAL_BOUNDING_BOX, MOVING_SPEED_KN, TIER_STYLE, LIVE_TTL_MS, FADE_TTL_MS, LAND_AVOIDANCE } from '../config.js';
 import { subscribe as subscribeVessels } from './store.js';
-import { subscribe as subscribeSettings, getSettings, passesExtentFilter, vesselCategory } from './settings_store.js';
+import { subscribe as subscribeSettings, getSettings, passesExtentFilter, passesVesselTypeFilter, vesselCategory } from './settings_store.js';
 import { haversineNm, bearingDeg } from './geo.js';
 import { vesselColor, vesselCategoryLabel, vesselFlag } from './vessels.js';
 import { getTrail, pruneTrails } from './trails.js';
@@ -384,6 +384,7 @@ async function scheduleTrails(visibleVessels, token) {
   for (const vessel of visibleVessels) {
     if (token !== trailReqToken) break;
     if (!lastSettings.trail[vesselCategory(vessel)]) continue;
+    if (!passesVesselTypeFilter(vessel, lastSettings.vesselType)) continue;
     getTrail(vessel.mmsi, TRAIL_TIERS).then(points => drawTrail(vessel, points, token));
   }
 }
@@ -397,7 +398,10 @@ function render() {
   const settings = lastSettings;
   const error = null; // error is handled by status chip only
 
-  const filtered = vessels.filter(v => passesExtentFilter(v, settings.extent));
+  const filtered = vessels.filter(v =>
+    passesExtentFilter(v, settings.extent) &&
+    passesVesselTypeFilter(v, settings.vesselType)
+  );
 
   if (statusEl !== null) {
     statusEl.innerHTML = `<span class="dot"></span>${filtered.length} vessel${filtered.length !== 1 ? 's' : ''}`;
