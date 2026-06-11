@@ -22,12 +22,29 @@ import { stitchCoastline, closeOpenChains } from './lib-osm-coastline.mjs';
 const BB = { minLat: 46.9, maxLat: 51.3, minLon: -128.8, maxLon: -121.9 };
 const HOME = { lat: 48.4299, lon: -123.3622 };
 
-// Distance-weighted simplification & island-drop tiers (km from HOME).
+// FINE tier (harbour-grade, ~25 m) is applied inside these high-traffic, tight
+// waterways regardless of distance from home — anywhere vessels of interest
+// regularly transit narrow water that coarse simplification would close
+// (harbours, rivers). Add bboxes here to expand coverage (e.g. Portland, Alaska
+// ports). The viewshed (Victoria/Haro/southern Gulf) is covered by the 60 km
+// distance tier below, so it doesn't need a box.
+const FINE_ZONES = [
+  { minLat: 49.00, maxLat: 49.40, minLon: -123.30, maxLon: -122.70 }, // Vancouver harbour, Burrard Inlet, lower Fraser River
+  { minLat: 48.40, maxLat: 48.80, minLon: -123.20, maxLon: -122.50 }, // Bellingham / north Puget approaches
+  { minLat: 47.40, maxLat: 48.10, minLon: -122.65, maxLon: -122.20 }, // Puget Sound: Seattle/Elliott Bay, Bremerton, Tacoma
+];
+const FINE = { simplifyKm: 0.025, dropIslandKm: 0.05 };
+
+// Distance-weighted simplification & island-drop tiers (km from HOME), used
+// outside the fine zones.
 const TIERS = [
   { maxKm: 60,       simplifyKm: 0.025, dropIslandKm: 0.05 }, // viewshed: harbours, passes
   { maxKm: 160,      simplifyKm: 0.12,  dropIslandKm: 0.3  }, // Salish Sea
   { maxKm: Infinity, simplifyKm: 0.6,   dropIslandKm: 2.0  }, // outer coast
 ];
+
+const inFineZone = (lon, lat) =>
+  FINE_ZONES.some(z => lat >= z.minLat && lat <= z.maxLat && lon >= z.minLon && lon <= z.maxLon);
 
 const INPUT = process.argv[2] || '/tmp/osm_coast.json';
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -40,6 +57,7 @@ function haversineKm(la1, lo1, la2, lo2) {
   return 2 * R_KM * Math.asin(Math.sqrt(a));
 }
 function tierFor(lon, lat) {
+  if (inFineZone(lon, lat)) return FINE;
   const d = haversineKm(HOME.lat, HOME.lon, lat, lon);
   for (const t of TIERS) if (d <= t.maxKm) return t;
   return TIERS[TIERS.length - 1];

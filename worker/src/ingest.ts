@@ -1,12 +1,13 @@
 import type { Env, Tier, MaxExtent, Vessel } from './types';
 import {
   DIRECT_BOUNDING_BOX, LOCAL_BOUNDING_BOX, GLOBAL_BOUNDING_BOX,
-  MOVE_THRESHOLD_NM, HEARTBEAT_MS,
+  HEARTBEAT_MS, HEARTBEAT_BACKOFF,
   DIRECT_DRAIN_MS, LOCAL_DRAIN_MS, GLOBAL_DRAIN_MS,
   PHANTOM_SPEED_MIN_KN, PHANTOM_STALL_MS,
   GLOBAL_MMSI_CHUNK_SIZE, GLOBAL_SCAN_ATTEMPTS, GLOBAL_SCAN_BUDGET_MS,
   LIVE_TTL_LOCAL_MS,
 } from './constants';
+import { isSignificantMove } from './compress';
 import { drainAisStream } from './aisstream';
 import { pointInBox, isLargeVessel, isConfirmedSmall } from './ais';
 import {
@@ -14,42 +15,37 @@ import {
   type VesselUpsert, type PositionInsert, type VesselState,
 } from './storage';
 
-const R_NM = 3440.065;
-
-function haversineNm(lat1: number, lon1: number, lat2: number, lon2: number): number {
-  const dLat = (lat2 - lat1) * Math.PI / 180;
-  const dLon = (lon2 - lon1) * Math.PI / 180;
-  const a = Math.sin(dLat / 2) ** 2
-    + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
-  return 2 * R_NM * Math.asin(Math.sqrt(a));
+// Stationary vessels heartbeat less often the longer they've been parked.
+function heartbeatIntervalMs(prev: VesselState | undefined, nowMs: number): number {
+  if (prev === undefined || prev.last_pos_ts === null) return HEARTBEAT_MS;
+  const parkedMs = nowMs - prev.last_pos_ts;
+  for (const step of HEARTBEAT_BACKOFF) {
+    if (parkedMs > step.parkedMs) return step.intervalMs;
+  }
+  return HEARTBEAT_MS;
 }
 
 function assessMovement(v: Vessel, prev: VesselState | undefined, tier: Tier, nowMs: number): { moved: boolean; effectiveSpeed: number | null; forceUpsert: boolean } {
   if (prev === undefined || prev.last_lat === null || prev.last_lon === null) {
     return { moved: true, effectiveSpeed: v.speed, forceUpsert: false };
   }
-  const dist = haversineNm(prev.last_lat, prev.last_lon, v.lat, v.lon);
   if (tier === 'direct' && v.speed !== null && v.speed >= PHANTOM_SPEED_MIN_KN) {
-    // Escape hatch: real displacement past the move threshold always wins, even for a
-    // vessel previously flagged phantom. Without this, a phantom flag is permanent —
-    // last_pos_ts only advances on a position row (moved=true), but moved stays false
-    // while flagged, so posAge grows forever and the vessel can never recover.
-    if (dist >= MOVE_THRESHOLD_NM.direct) {
+    // Escape hatch: a significant real move always wins, even for a vessel previously
+    // flagged phantom — otherwise the flag is permanent (last_pos_ts only advances on a
+    // position row). MOVE_PROFILE.direct.maxGapMs (3 min) < PHANTOM_STALL_MS (20 min),
+    // so a straight-moving vessel emits — and refreshes last_pos_ts — well before it
+    // could be mistaken for phantom.
+    if (isSignificantMove(v, prev, tier, nowMs)) {
       return { moved: true, effectiveSpeed: v.speed, forceUpsert: false };
     }
-    // A genuinely moving vessel at PHANTOM_SPEED_MIN_KN crosses MOVE_THRESHOLD_NM every
-    // ~2 min, so no position row in PHANTOM_STALL_MS (20 min = 10× that) means phantom.
     const posAge = prev.last_pos_ts !== null ? nowMs - prev.last_pos_ts : null;
     if (posAge !== null && posAge > PHANTOM_STALL_MS) {
       const alreadyCorrected = prev.last_speed === 0;
       return { moved: false, effectiveSpeed: 0, forceUpsert: !alreadyCorrected };
     }
-    return { moved: true, effectiveSpeed: v.speed, forceUpsert: false };
+    return { moved: false, effectiveSpeed: v.speed, forceUpsert: false };
   }
-  if (tier === 'direct' && v.speed !== null && v.speed > 0) {
-    return { moved: true, effectiveSpeed: v.speed, forceUpsert: false };
-  }
-  return { moved: dist >= MOVE_THRESHOLD_NM[tier], effectiveSpeed: v.speed, forceUpsert: false };
+  return { moved: isSignificantMove(v, prev, tier, nowMs), effectiveSpeed: v.speed, forceUpsert: false };
 }
 
 function tierOf(lat: number, lon: number): Tier {
@@ -148,7 +144,7 @@ export async function runDirectScan(env: Env): Promise<void> {
   for (const v of vessels) {
     const prev = existing.get(v.mmsi);
     const { moved, effectiveSpeed, forceUpsert } = assessMovement(v, prev, 'direct', nowMs);
-    const heartbeat = !moved && !forceUpsert && (prev === undefined || nowMs - prev.last_seen >= HEARTBEAT_MS);
+    const heartbeat = !moved && !forceUpsert && (prev === undefined || nowMs - prev.last_seen >= heartbeatIntervalMs(prev, nowMs));
 
     if (!moved && !heartbeat && !forceUpsert) { nSkipped++; continue; }
 
@@ -232,7 +228,7 @@ export async function runLocalScan(env: Env): Promise<void> {
 
     const tier: Tier = inDirect ? 'direct' : 'local';
     const { moved, effectiveSpeed, forceUpsert } = assessMovement(v, prev, tier, nowMs);
-    const heartbeat = !moved && !forceUpsert && (prev === undefined || nowMs - prev.last_seen >= HEARTBEAT_MS);
+    const heartbeat = !moved && !forceUpsert && (prev === undefined || nowMs - prev.last_seen >= heartbeatIntervalMs(prev, nowMs));
 
     if (!moved && !heartbeat && !forceUpsert) { nSkipped++; continue; }
 
@@ -323,7 +319,7 @@ export async function runGlobalScan(env: Env): Promise<void> {
     const firstDirect = inDirect && (prev === undefined || prev.of_interest === 0) ? nowMs : null;
 
     const { moved, effectiveSpeed, forceUpsert } = assessMovement(v, prev, tier, nowMs);
-    const heartbeat = !moved && !forceUpsert && (prev === undefined || nowMs - prev.last_seen >= HEARTBEAT_MS);
+    const heartbeat = !moved && !forceUpsert && (prev === undefined || nowMs - prev.last_seen >= heartbeatIntervalMs(prev, nowMs));
 
     if (!moved && !heartbeat && !forceUpsert) { nSkipped++; continue; }
 

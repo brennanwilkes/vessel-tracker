@@ -20,13 +20,11 @@ export const GLOBAL_BOUNDING_BOX: [[number, number], [number, number]] = [
   [90, 180],
 ];
 
-// Movement thresholds per tier (nautical miles). A new positions row is only written
-// when the vessel has moved at least this far since its last stored point.
-export const MOVE_THRESHOLD_NM: Record<string, number> = {
-  direct: 0.05,
-  local:  0.5,
-  global: 5.0,
-};
+// Trajectory-compression thresholds (MOVE_THRESHOLD_NM, MOVE_PROFILE, MOVING_SPEED_KN,
+// COARSE_TYPE_GAP_FACTOR) and the isSignificantMove decision live in `compress.ts` — a
+// self-contained, unit-testable module. Re-exported here for back-compat imports.
+export { MOVE_THRESHOLD_NM, MOVE_PROFILE, MOVING_SPEED_KN, COARSE_TYPE_GAP_FACTOR } from './compress';
+export type { MoveProfile } from './compress';
 
 // Phantom speed detection for direct-tier vessels. Some AIS transponders keep broadcasting
 // their last-known speed after anchoring/docking. We call BS when:
@@ -37,12 +35,19 @@ export const MOVE_THRESHOLD_NM: Record<string, number> = {
 export const PHANTOM_SPEED_MIN_KN = 1.5;
 export const PHANTOM_STALL_MS     = 20 * 60 * 1000;
 
-// How long a stationary vessel can go without a heartbeat last_seen update (ms)
+// How long a stationary vessel can go without a heartbeat last_seen update (ms).
+// Backoff: the longer a vessel has been parked (no position row), the less often it
+// needs a heartbeat — it isn't going anywhere. All intervals stay < the 6h live TTL so
+// the vessel never silently drops off /current.
 export const HEARTBEAT_MS = 10 * 60 * 1000;
+export const HEARTBEAT_BACKOFF: { parkedMs: number; intervalMs: number }[] = [
+  { parkedMs: 6 * 60 * 60 * 1000, intervalMs: 60 * 60 * 1000 }, // parked >6h → hourly
+  { parkedMs: 1 * 60 * 60 * 1000, intervalMs: 30 * 60 * 1000 }, // parked >1h → every 30 min
+];
 
 // Max age before a vessel is dropped from the /current response.
 // Direct/local vessels can miss multiple drain windows; keep them visible for a workday.
-// Global vessels update once daily at 6am; keep them through missed daily scans.
+// Global vessels update hourly; keep them through missed scans.
 export const LIVE_TTL_DIRECT_MS = 6 * 60 * 60 * 1000;
 export const LIVE_TTL_LOCAL_MS  = 6 * 60 * 60 * 1000;
 export const LIVE_TTL_GLOBAL_MS = 72 * 60 * 60 * 1000;

@@ -22,7 +22,9 @@ app/
   store.js          — 30s polling loop, pub/sub (subscribe returns an unsubscribe fn)
   settings_store.js — extent + trail filter state, localStorage persistence, passesExtentFilter()
   geo.js            — haversineNm, haversineKm, bearingDeg, pointInPolygon, pointOnLand, segmentCrossesLand, routeWater (A* water router)
-  map_page.js       — Leaflet map, dot/arrow markers, trail pipeline (dedup → splitJourneys → buildControlPoints → catmullRom → runsBySynthetic), extent filter, settings subscription
+  trail_geometry.js — PURE, DOM-free trail pipeline (dedup → splitJourneys → buildControlPoints → repairOffLand → catmullRom → runsBySynthetic → computeRuns). Shared by map_page + the Web Worker + (future) the precompute cron. Imports only geo/coastline/config.
+  trail_worker.js   — module Web Worker: runs computeRuns(…, true) (A* + repair) off the main thread
+  map_page.js       — Leaflet map, dot/arrow markers, trail drawing (quick straight-bridge first paint → Worker fills in routed curves), caching, extent filter, settings subscription
   list_page.js      — distance-sorted vessel list, extent filter, unit toggle (nm/km in localStorage)
   trails.js         — lazy trail fetch + in-memory cache (TTL + tier-union widening)
   settings_page.js  — settings page: extent bucket toggles + trail tier toggles
@@ -58,6 +60,18 @@ All logic and variable assignments at the top of each page module. The render se
 
 ## Trail rendering & land avoidance
 
+**Core principle — trust the boat.** Two sources of truth can disagree: real AIS
+fixes (the boat floated there → it *is* navigable water) and our coastline
+polygons (a *model*, accurate in the 25 m fine zone near home, coarse/wrong far
+away — e.g. the Fraser River simplified shut). Land-avoidance (routing + repair)
+applies **only to inference** — the gaps where we're guessing the path. Real
+tracking is drawn as-is, even across what our coastline calls land; we never
+route/repair the real track to match a possibly-wrong coastline (that fighting
+caused the Fraser-delta zigzags). This is also the graceful-degradation rule:
+where our data is poor the algorithm stops fighting and just draws the real line.
+To make far areas *accurate* (not just degrade gracefully), expand the fine
+simplification zone for them in `build-coastline.mjs` (see `worker/CLAUDE.md`).
+
 Trails are one continuous, smooth (C¹) curve per **journey**. A journey breaks only
 when the vessel was parked (speed ≈ 0) through a long gap and resurfaces later —
 a moving vessel that merely lost signal stays one journey, and the gap is bridged
@@ -78,11 +92,15 @@ continuously. The pipeline (`map_page.js`, all functions exported for testing):
    around an island is confident movement, drawn solid. Final dedup collapses
    near-duplicate spliced points. (Pass `route=false` for the instant first paint
    — see Performance.)
-4. `repairOffLand` — re-splines and, for any output run that lands on land,
-   inserts a nearest-water control point to pull the curve off, then re-splines
-   (bounded passes). Catches **spline bulges** across small islands where the
-   straight chord between two control points is clear, so `routeWater` never
-   fired — the dominant residual once the coastline is high-resolution.
+4. `repairOffLand` — re-splines and, for each output run on land, looks at the
+   bracketing control points: **skip if either is itself on our "land"** (a real
+   fix our coastline wrongly calls land — trust the boat, don't fight); else if
+   their chord crosses land **route** the bracket via `routeWater` (genuine
+   archipelago crossing); else **nudge** a nearest-water control in (a pure
+   spline bulge across a clear chord). Bounded passes, **monotonic** — keeps the
+   pass with the fewest land samples and never returns worse (repair can diverge
+   in very tight harbours like Victoria's). This one mechanism handles Gulf
+   Island crossings and dense-tracking bulges without routing every segment.
 5. `catmullRom` — ONE centripetal Catmull-Rom (α=0.5) over the whole journey's
    control points. One spline ⇒ continuous derivative everywhere, including
    real→inferred transitions. No pre-smoothing here (control points are already
@@ -119,7 +137,7 @@ snap-to-water net.
   `routeWater` returns `null` and the gap is bridged with a straight spline
   segment — still C¹ since it's just more control points.
 
-### Performance: cached geometry + staggered routing
+### Performance: cached geometry + off-thread routing
 
 The spline + A* work depends only on the trail points, not on highlight/fade
 state, so it's cached per vessel in `trailGeom` keyed on a trail signature
@@ -127,12 +145,19 @@ state, so it's cached per vessel in `trailGeom` keyed on a trail signature
 re-styling on every redraw (poll / highlight / settings) is cheap (`drawRuns`).
 Without this, every highlight toggle re-ran A* for all vessels — jank.
 
-First paint stays slick via **quick-first + staggered routing**: on a cache miss
-`drawTrail` paints instant straight bridges (`computeRuns(allPoints, false)` — no
-A*) immediately, then enqueues the full routed compute on `routeQueue`, pumped
-**one vessel per macrotask** (`setTimeout`). The routed curves fill in
-boat-by-boat without blocking; each is cached and the vessel redrawn if still on
-screen. Queue is filtered to visible vessels and cleared on unmount.
+First paint stays slick: on a cache miss `drawTrail` paints instant straight
+bridges (`computeRuns(allPoints, false)` — no A*) immediately, then dispatches the
+full routed compute to a **Web Worker** (`trail_worker.js`, off the main thread —
+A* is 0.1–2 s/vessel and would freeze the map inline). The Worker posts back
+styled runs; `applyRoutedRuns` caches them and redraws the vessel if still on
+screen. If the Worker can't start (old browser / `file://`), it falls back to a
+main-thread `routeQueue` pumped one vessel per `setTimeout` macrotask. Both are
+keyed/cached identically. **Note:** the Worker path can't run under Node — verify
+it in a real browser. Per-vessel A* is still ~0.1–2 s, so cold loads with many
+gapped vessels stream in over a few seconds (see Future work for the durable fix).
+
+In-memory cache only — **a reload recomputes everything.** The durable fix is the
+server-side precompute (Future work).
 
 ### Coastline data
 
@@ -147,11 +172,33 @@ not a router bug — see `tests/README.md` §1.)
 
 ### Validation
 
-`tests/trail.test.mjs` runs the real production pipeline over captured trails in
-`tests/fixtures/*.json` (CHASING DAYLIGHT, BUENA VENTURA, MOUNT ASO, TWR-8) and
-asserts: no spline point on land (beyond a 60 m penetration tolerance, ignoring
-clips that hug a real on/near-land fix) and bounded overshoot from the control
-polyline (catches the old div-by-zero spike, which threw 50–200 km excursions;
-real sharp turns and wide sparse-gap curve-bulges are fine). Run: `node
-tests/trail.test.mjs`. Known edge: TWR-8 grazes ≤ 50 m into a narrow dead-end
-inlet where the tug really went in and reversed during a gap — sub-pixel, real.
+`tests/trail.test.mjs` runs the real `trail_geometry.js` pipeline over captured
+trails in `tests/fixtures/*.json` (CHASING DAYLIGHT, BUENA VENTURA, MOUNT ASO,
+TWR-8, GLOVIS STAR, S/Y VENTUROSA) and asserts: no spline point on land (beyond a
+150 m graze tolerance, ignoring clips that hug a real on/near-land fix) and
+bounded overshoot from the control polyline (catches the old div-by-zero spike,
+which threw 50–200 km excursions; real sharp turns and wide sparse-gap curve-
+bulges are fine). Fixtures in `KNOWN_DATA_LIMITED` (glovis-star — upper Fraser)
+are reported but don't fail the suite. Run: `node tests/trail.test.mjs`. See
+`tests/README.md` for the A* troubleshooting techniques.
+
+## Future work (perf + data coverage)
+
+Both are designed and documented in `worker/CLAUDE.md`; current code degrades
+gracefully until they land.
+
+1. **Water-polygon layer (rivers/harbours).** Our coastline is `natural=coastline`
+   only, which stops at a river's tidal limit — the **upper** Fraser (and Portland,
+   etc.) is OSM `natural=water`/`riverbank`, absent from our data, so vessels there
+   read as on-land and degrade to trust-the-boat (smooth real track over our
+   missing-river "land"). Fix: fetch the water layer **per fine-zone** (the
+   combined query truncates), ship `WATER_POLYGONS`, make `pointOnLand = inLand &&
+   !inWater`. See `worker/CLAUDE.md` → "Rivers & harbours OSM tags".
+2. **Server-side precompute cron.** Move A* off the client entirely: a GitHub
+   Actions cron (NOT a CF Worker — CPU-capped) reuses `trail_geometry.js`,
+   precomputes inferred waypoints **only for land-crossing gaps**, stores the
+   **sparse** waypoints in `inferred_positions` (hash-deduped, write-once,
+   `generator_version`), served unioned with real points (flagged → dashed). Fixes
+   the cold-load cost and the reload-recompute. See `worker/CLAUDE.md` → "Planned:
+   server-side inferred-positions precompute" for the full design incl. the D1
+   write-budget rules.

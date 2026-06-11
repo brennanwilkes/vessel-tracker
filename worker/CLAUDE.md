@@ -117,6 +117,38 @@ node ../tests/trail.test.mjs
 ```
 The build prints polygon/vertex counts and final KB. Current region ≈ 500 KB (gzips small).
 
+### Rivers & harbours OSM tags (important)
+`natural=coastline` follows the sea coast up to a river's tidal limit, then OSM
+switches to `natural=water` / `waterway=riverbank` polygons. So the **lower**
+Fraser is in our coastline source (just simplified — fixed via `FINE_ZONES`),
+but the **upper** Fraser (New Westminster) has **zero** coastline nodes — it's
+water polygons. To route rivers/harbours fully (Fraser, Portland), add a
+**second layer**: fetch `natural=water`+`waterway=riverbank` for the fine zones,
+assemble (these are already closed polygons/multipolygons — no boundary-closing
+needed), ship as `WATER_POLYGONS`, and make `pointOnLand = inLand && !inWater`
+in `geo.js`. Until then such upper-river transits degrade gracefully (the real
+track is drawn through the missing-river "land" — see frontend trust-the-boat).
+
+### Planned: server-side inferred-positions precompute
+To get the client A* off the main thread entirely (it's the load lag), precompute
+the inferred waypoints **off the client** and serve them as data. Design notes:
+- **Run in a GitHub Actions cron, NOT a CF Worker** — free Workers are CPU-capped
+  (~10 ms); our A* is 0.1–2 s. The Action runs Node and **reuses the geometry
+  pipeline module** (extract it from `map_page.js` first), reads recent trails,
+  writes results to D1.
+- **D1 write frugality (hard requirement — free tier write cap):** only store
+  points where geometry matters — i.e. only the **land-crossing gaps** that
+  `routeWater` actually routes (open-water/straight gaps get nothing; the client
+  draws them straight). Store only the **sparse string-pulled waypoints** (~3–12
+  per gap), not the dense spline. **Write-once + dedup:** key each gap's points
+  by a content hash of its real endpoints + a `generator_version`; the hourly
+  cron writes only new/changed gaps and skips unchanged ones, so it does not
+  re-write hundreds of rows every run as coverage grows. Bump `generator_version`
+  to force regeneration after a routing bug; provide a clear/regenerate script.
+- Schema: `inferred_positions(mmsi, lat, lon, t, gap_hash, generator_version)`,
+  returned unioned with real points (flagged `fake=1` → client dashes them).
+- Keep the client straight-bridge fallback for gaps the cron hasn't reached yet.
+
 ### Expanding coverage (Portland river, Alaska, foreign ports, …)
 1. Edit `BB` in **both** `build-coastline.mjs` and the Overpass bbox in step 1 (and `HOME`/`TIERS`
    if the fine zone should move). Overpass bbox order is `south,west,north,east`.

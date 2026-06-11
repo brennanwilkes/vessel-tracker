@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+show_help() { cat <<'HELP'
+Usage: db-write-breakdown [--pretty]
+Per-tier position-write rate from the positions table, over the stored data window.
+Each movement also pairs a vessels upsert (not visible here) — see docs/architecture.md.
+For the true daily rows-written total, read the Cloudflare D1 analytics dashboard.
+HELP
+}
+
+source "$SCRIPT_DIR/db-common"
+parse_common_flags "$@"
+
+d1_query "
+SELECT tier,
+       COUNT(*)                                   AS position_rows,
+       COUNT(DISTINCT mmsi)                       AS vessels,
+       ROUND((MAX(ts)-MIN(ts))/86400000.0, 2)     AS span_days,
+       ROUND(COUNT(*) / ((MAX(ts)-MIN(ts))/86400000.0), 0) AS pos_writes_per_day
+FROM positions
+GROUP BY tier
+UNION ALL
+SELECT 'ALL'                                       AS tier,
+       COUNT(*)                                    AS position_rows,
+       COUNT(DISTINCT mmsi)                        AS vessels,
+       ROUND((MAX(ts)-MIN(ts))/86400000.0, 2)      AS span_days,
+       ROUND(COUNT(*) / ((MAX(ts)-MIN(ts))/86400000.0), 0) AS pos_writes_per_day
+FROM positions
+"

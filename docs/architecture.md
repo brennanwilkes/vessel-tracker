@@ -21,7 +21,7 @@ CF Scheduled Worker runLocalScan
 
 aisstream.io WebSocket
         │
-        ▼ (daily 06:00 UTC — GLOBAL zone, of-interest MMSIs only)
+        ▼ (hourly — GLOBAL zone, of-interest MMSIs only)
 CF Scheduled Worker runGlobalScan
         │
         └─► D1: vessels (upsert, max_extent widened)
@@ -49,7 +49,7 @@ CF Worker fetch handler
 |------|------|-------|-----|--------|--------------------|
 | Direct | `* * * * *` | 45s | Apartment window view | None — everything | 0.05 nm (~90m) |
 | Local | `*/5 * * * *` | 90s | All of Vancouver Island + Pacific | Large vessels (≥50m or cargo/tanker) OR already-of-interest | 0.5 nm |
-| Global | `0 6 * * *` | 30s | Global | Of-interest MMSIs via FiltersShipMMSI | 5.0 nm |
+| Global | `0 * * * *` | 30s | Global | Of-interest MMSIs via FiltersShipMMSI | 5.0 nm |
 
 ## Event-based position storage
 
@@ -71,7 +71,9 @@ KV was used in M1 as a fast snapshot cache. D1 free tier limits are far higher (
 
 - No Durable Objects (requires paid plan) → cron ingestion instead of persistent socket.
 - CF Workers free tier: 100k requests/day, 10ms CPU/invocation, 15min wall-clock for scheduled triggers.
-- D1 free tier: 100k row writes/day, 5M reads/day, 5GB storage. Estimated usage: ~10k–15k writes/day.
+- D1 free tier: 100k row writes/day, 5M reads/day, 5GB storage.
+- **Measured usage** (`scripts/db-write-breakdown`, ~2.5-day window): ~20.4k *position* writes/day (direct ~7.1k, local ~13.3k, global ~25). Each movement event also pairs a `vessels` upsert, so movement-driven row-writes are ~2× that; with heartbeats and static enrichment the true total is ~45–55k row-writes/day — roughly **half** the free write budget. Confirm the daily total on the Cloudflare D1 analytics dashboard. (The old "~10k–15k" estimate was wrong.)
+- Storage growth ~2.2 MB/day → ~6 years to the 5 GB cap with no pruning today.
 
 ## Deployment
 

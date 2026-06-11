@@ -11,6 +11,7 @@ export interface VesselState {
   last_lat: number | null;
   last_lon: number | null;
   last_speed: number | null;
+  last_heading: number | null;
   last_pos_ts: number | null;
   last_seen: number;
   of_interest: number;
@@ -61,7 +62,7 @@ export async function loadVesselStates(env: Env, mmsis: number[]): Promise<Map<n
   const stmts = chunks.map(chunk => {
     const placeholders = chunk.map((_, i) => `?${i + 1}`).join(',');
     return env.VESSELS_DB
-      .prepare(`SELECT mmsi,last_lat,last_lon,last_speed,last_pos_ts,last_seen,of_interest,max_extent,direct_entry_count FROM vessels WHERE mmsi IN (${placeholders})`)
+      .prepare(`SELECT mmsi,last_lat,last_lon,last_speed,last_heading,last_pos_ts,last_seen,of_interest,max_extent,direct_entry_count FROM vessels WHERE mmsi IN (${placeholders})`)
       .bind(...chunk);
   });
 
