@@ -540,6 +540,84 @@ export function mount(root) {
   });
   L.marker([HOME.lat, HOME.lon], { icon: homeIcon, interactive: false }).addTo(map);
 
+  // ── Viewshed obstructions ──────────────────────────────────────────────────
+  // Radial sectors emitted from home showing where building/terrain blocks the
+  // view. Concentric rings create a radial fade (darker near home, lighter far);
+  // the left wedge also has a 45° angular fade on its counterclockwise edge.
+
+  const R_KM = 6371;
+
+  function obstPoint(lat, lon, bearingDeg, distKm) {
+    const brg = bearingDeg * Math.PI / 180;
+    const d = distKm / R_KM;
+    const lat1 = lat * Math.PI / 180;
+    const lon1 = lon * Math.PI / 180;
+    const lat2 = Math.asin(Math.sin(lat1) * Math.cos(d) + Math.cos(lat1) * Math.sin(d) * Math.cos(brg));
+    const lon2 = lon1 + Math.atan2(Math.sin(brg) * Math.sin(d) * Math.cos(lat1), Math.cos(d) - Math.sin(lat1) * Math.sin(lat2));
+    return [lat2 * 180 / Math.PI, lon2 * 180 / Math.PI];
+  }
+
+  function obstRing(lat, lon, startBrg, endBrg, innerKm, outerKm, arcSteps) {
+    const pts = [];
+    for (let i = 0; i <= arcSteps; i++) {
+      const f = i / arcSteps;
+      pts.push(obstPoint(lat, lon, startBrg + (endBrg - startBrg) * f, outerKm));
+    }
+    for (let i = arcSteps; i >= 0; i--) {
+      const f = i / arcSteps;
+      pts.push(obstPoint(lat, lon, startBrg + (endBrg - startBrg) * f, innerKm));
+    }
+    return pts;
+  }
+
+  function addObstruction(startBrg, endBrg, baseOpacity, fadeAngle) {
+    const rings = [
+      { inner: 1, outer: 20, mul: 1.0 },
+      { inner: 20, outer: 50, mul: 0.5 },
+      { inner: 50, outer: 120, mul: 0.2 },
+    ];
+    const stroke = { color: 'transparent', weight: 0, interactive: false };
+
+    if (fadeAngle > 0 && endBrg > startBrg) {
+      const fadeZone = Math.min(fadeAngle, endBrg - startBrg);
+      const solidStart = startBrg + fadeZone;
+      const stripes = 6;
+
+      for (const ring of rings) {
+        const o = baseOpacity * ring.mul;
+        L.polygon(obstRing(HOME.lat, HOME.lon, solidStart, endBrg, ring.inner, ring.outer, 8),
+          { ...stroke, fillColor: `rgba(0,0,0,${o.toFixed(3)})`, fillOpacity: o }).addTo(map);
+      }
+
+      for (let i = 0; i < stripes; i++) {
+        const a = startBrg + (fadeZone / stripes) * i;
+        const b = startBrg + (fadeZone / stripes) * (i + 1);
+        const fadeMul = (i + 0.5) / stripes;
+        for (const ring of rings) {
+          const o = baseOpacity * ring.mul * fadeMul;
+          L.polygon(obstRing(HOME.lat, HOME.lon, a, b, ring.inner, ring.outer, 4),
+            { ...stroke, fillColor: `rgba(0,0,0,${o.toFixed(3)})`, fillOpacity: o }).addTo(map);
+        }
+      }
+    } else {
+      for (const ring of rings) {
+        const o = baseOpacity * ring.mul;
+        L.polygon(obstRing(HOME.lat, HOME.lon, startBrg, endBrg, ring.inner, ring.outer, 8),
+          { ...stroke, fillColor: `rgba(0,0,0,${o.toFixed(3)})`, fillOpacity: o }).addTo(map);
+      }
+    }
+  }
+
+  // Left blocked wedge: firm right edge at 141.07° bearing, 45° angular fade on
+  // the left (counterclockwise) side from 0° → 45°.
+  addObstruction(0, 141.07, 0.35, 45);
+
+  // Blocked region 1: window frame / pillar between 153.66° and 162.38°
+  addObstruction(153.66, 162.38, 0.35, 0);
+
+  // Blocked region 2: window frame / pillar between 183.26° and 204.86°
+  addObstruction(183.26, 204.86, 0.35, 0);
+
   unsubscribeVessels = subscribeVessels(onVesselsUpdate);
   unsubscribeSettings = subscribeSettings(onSettingsUpdate);
   unsubscribeHighlight = subscribeHighlight((mmsi, pan) => {
