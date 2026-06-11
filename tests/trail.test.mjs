@@ -17,13 +17,9 @@ const MAX_LAND_PENETRATION_M = 150;  // shallower clips are sub-pixel "grazes" i
                                      // the tightest inlets/harbours; deeper = a real defect
 // Fixtures whose residual defects are a known DATA-coverage limit, not a routing
 // bug — they don't fail the suite but are still reported. See tests/README.md §1.
-const KNOWN_DATA_LIMITED = {
-  'glovis-star': 'transits the UPPER Fraser River (New Westminster), which OSM ' +
-    'tags natural=water/riverbank — not natural=coastline — so our single-layer ' +
-    'coastline source has no land there. Needs a water-polygon layer ' +
-    '(pointOnLand = inLand && !inWater). The track is drawn correctly (trust-the-boat); ' +
-    'it just overlays our missing-river land. See worker/CLAUDE.md.',
-};
+// (glovis-star — upper Fraser — graduated to PASS once the water-polygon layer
+// landed: pointOnLand = inLand && !inWater. See worker/CLAUDE.md "Rivers & harbours".)
+const KNOWN_DATA_LIMITED = {};
 // Max distance the spline may stray from its control polyline. Catches the
 // div-by-near-zero "spike" failure mode (old code threw 50–200 km excursions)
 // without flagging genuine sharp turns or the wide curve-bulge of sparse

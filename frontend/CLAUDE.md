@@ -161,12 +161,14 @@ gapped vessels stream in over a few seconds (see Future work for the durable fix
 In-memory cache only — **a reload recomputes everything.** The durable fix is the
 server-side precompute (Future work).
 
-### Coastline data
+### Coastline data (two layers)
 
-`coastline.js` is generated from **OpenStreetMap `natural=coastline`** (sub-100 m;
-resolves harbours, breakwaters, Deception Pass, every Gulf Island). See
-`worker/CLAUDE.md` → "Coastline data generation" for the regenerate / expand-
-coverage steps. (Earlier it was Natural Earth 1:10,000,000 — "10m" = ten
+Land avoidance uses **two** generated layers: `coastline.js` (`LAND_POLYGONS`, OSM
+`natural=coastline`, sub-100 m — harbours, breakwaters, Deception Pass, every Gulf
+Island) and `water.js` (`WATER_POLYGONS`, OSM `natural=water`/`riverbank` per fine
+zone — rivers/harbour basins the coastline closes). `pointOnLand = inLand && !inWater`,
+so the water layer re-opens narrow navigable features. See `worker/CLAUDE.md` →
+"Coastline data generation" + "Water layer" for regenerate / expand-coverage steps. (Earlier it was Natural Earth 1:10,000,000 — "10m" = ten
 *million*, the coarsest tier, NOT 10-metre — which dropped sub-km features and
 caused routes to cut unmapped islands and mis-route Deception Pass. If a curve
 crosses land that `pointInAnyLand` reports as water, it's a data-coverage gap,
@@ -175,27 +177,28 @@ not a router bug — see `tests/README.md` §1.)
 ### Validation
 
 `tests/trail.test.mjs` runs the real `trail_geometry.js` pipeline over captured
-trails in `tests/fixtures/*.json` (CHASING DAYLIGHT, BUENA VENTURA, MOUNT ASO,
-TWR-8, GLOVIS STAR, S/Y VENTUROSA) and asserts: no spline point on land (beyond a
-150 m graze tolerance, ignoring clips that hug a real on/near-land fix) and
-bounded overshoot from the control polyline (catches the old div-by-zero spike,
-which threw 50–200 km excursions; real sharp turns and wide sparse-gap curve-
-bulges are fine). Fixtures in `KNOWN_DATA_LIMITED` (glovis-star — upper Fraser)
-are reported but don't fail the suite. Run: `node tests/trail.test.mjs`. See
-`tests/README.md` for the A* troubleshooting techniques.
+trails in `tests/fixtures/*.json` (chasing-daylight, buena-ventura, mount-aso,
+twr-8, glovis-star, venturosa, plus the Fraser cases luther + mv-harken-no-7) and
+asserts: no spline point on land (beyond a 150 m graze tolerance, ignoring clips
+that hug a real on/near-land fix) and bounded overshoot from the control polyline
+(catches the old div-by-zero spike, which threw 50–200 km excursions; real sharp
+turns and wide sparse-gap curve-bulges are fine). `KNOWN_DATA_LIMITED` is now empty
+— glovis-star (upper Fraser) graduated to PASS once the water layer landed. Run:
+`node tests/trail.test.mjs`. See `tests/README.md` for the A* troubleshooting
+techniques and `docs/fraser-river-test-cases.md` for the river coverage criteria.
 
 ## Future work (perf + data coverage)
 
 Both are designed and documented in `worker/CLAUDE.md`; current code degrades
 gracefully until they land.
 
-1. **Water-polygon layer (rivers/harbours).** Our coastline is `natural=coastline`
-   only, which stops at a river's tidal limit — the **upper** Fraser (and Portland,
-   etc.) is OSM `natural=water`/`riverbank`, absent from our data, so vessels there
-   read as on-land and degrade to trust-the-boat (smooth real track over our
-   missing-river "land"). Fix: fetch the water layer **per fine-zone** (the
-   combined query truncates), ship `WATER_POLYGONS`, make `pointOnLand = inLand &&
-   !inWater`. See `worker/CLAUDE.md` → "Rivers & harbours OSM tags".
+1. **Water-polygon layer (rivers/harbours) — DONE.** Shipped as `water.js`
+   (`WATER_POLYGONS`), subtracted at runtime: `pointOnLand = inLand && !inWater`
+   (`geo.js`). Fixed the upper-Fraser case (glovis-star/luther/mv-harken now PASS).
+   Fetch the water layer **per fine-zone** (a combined query truncates) and rebuild
+   with `worker/scripts/build-water.mjs`. See `worker/CLAUDE.md` → "Water layer —
+   rivers & harbours" for the regenerate steps + the resolution policy. (Open follow-up:
+   a regional spatial index before global coverage so `pointOnLand` stays local.)
 2. **Server-side precompute cron — DEFERRED until the dataset is stable.** Moving
    A* to a GH-Actions cron (NOT a CF Worker — CPU-capped) storing sparse inferred
    waypoints in `inferred_positions` would fix cold-load + reload-recompute. But

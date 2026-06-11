@@ -1,18 +1,22 @@
-// Shared test helpers: load coastline + geo, normalize D1 trail dumps, land tests.
+// Shared test helpers: load coastline + water + geo, normalize D1 trail dumps, land tests.
 import { readFileSync } from 'fs';
 import { LAND_POLYGONS } from '../frontend/app/coastline.js';
-export { LAND_POLYGONS };
+import { WATER_POLYGONS } from '../frontend/app/water.js';
+export { LAND_POLYGONS, WATER_POLYGONS };
 
-export const POLYGON_BBOXES = LAND_POLYGONS.map(poly => {
+const ringBbox = ring => {
   let minLat = 90, maxLat = -90, minLon = 180, maxLon = -180;
-  for (const [lat, lon] of poly) {
+  for (const [lat, lon] of ring) {
     if (lat < minLat) minLat = lat;
     if (lat > maxLat) maxLat = lat;
     if (lon < minLon) minLon = lon;
     if (lon > maxLon) maxLon = lon;
   }
   return { minLat, maxLat, minLon, maxLon };
-});
+};
+
+export const POLYGON_BBOXES = LAND_POLYGONS.map(ringBbox);
+export const WATER_BBOXES = WATER_POLYGONS.map(w => ringBbox(w.o));
 
 export function pointInPolygon(pt, polygon) {
   let inside = false;
@@ -25,14 +29,30 @@ export function pointInPolygon(pt, polygon) {
   return inside;
 }
 
-// Which polygon (index) contains pt, or -1. Uses bbox prefilter.
+// Is pt inside a water polygon (river/harbour), holes excluded? Mirrors geo.pointInWater.
+export function pointInAnyWater(pt) {
+  for (let i = 0; i < WATER_POLYGONS.length; i++) {
+    const bb = WATER_BBOXES[i];
+    if (pt[0] < bb.minLat || pt[0] > bb.maxLat || pt[1] < bb.minLon || pt[1] > bb.maxLon) continue;
+    const w = WATER_POLYGONS[i];
+    if (!pointInPolygon(pt, w.o)) continue;
+    if (w.h && w.h.some(h => pointInPolygon(pt, h))) continue;
+    return true;
+  }
+  return false;
+}
+
+// Which land polygon (index) contains pt, or -1. Two-layer: a point inside a water
+// polygon (river/harbour the coastline closed) is NOT land. Mirrors geo.pointOnLand.
 export function pointInAnyLand(pt) {
+  let hit = -1;
   for (let i = 0; i < LAND_POLYGONS.length; i++) {
     const bb = POLYGON_BBOXES[i];
     if (pt[0] < bb.minLat || pt[0] > bb.maxLat || pt[1] < bb.minLon || pt[1] > bb.maxLon) continue;
-    if (pointInPolygon(pt, LAND_POLYGONS[i])) return i;
+    if (pointInPolygon(pt, LAND_POLYGONS[i])) { hit = i; break; }
   }
-  return -1;
+  if (hit === -1) return -1;
+  return pointInAnyWater(pt) ? -1 : hit;
 }
 
 // Load a D1 db-positions dump ({results:[...]}) → chronological

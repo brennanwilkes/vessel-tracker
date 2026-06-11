@@ -11,18 +11,28 @@
 // the core "trust the boat" principle.
 import { haversineKm, routeWater, segmentCrossesLand, pointOnLand } from './geo.js';
 import { LAND_POLYGONS } from './coastline.js';
+import { WATER_POLYGONS } from './water.js';
 import { MOVING_SPEED_KN, TRAIL_GAP_SEVER_MS, LAND_AVOIDANCE } from '../config.js';
 
-export const POLYGON_BBOXES = LAND_POLYGONS.map(poly => {
+const ringBbox = ring => {
   let minLat = 90, maxLat = -90, minLon = 180, maxLon = -180;
-  for (const [lat, lon] of poly) {
+  for (const [lat, lon] of ring) {
     if (lat < minLat) minLat = lat;
     if (lat > maxLat) maxLat = lat;
     if (lon < minLon) minLon = lon;
     if (lon > maxLon) maxLon = lon;
   }
   return { minLat, maxLat, minLon, maxLon };
-});
+};
+
+export const POLYGON_BBOXES = LAND_POLYGONS.map(ringBbox);
+export const WATER_BBOXES = WATER_POLYGONS.map(w => ringBbox(w.o));
+
+// Bound land/water helpers — the two-layer land test (coastline minus water rivers/
+// harbours) lives behind these so every call site stays consistent. See geo.js.
+const isLand = (lat, lon) => pointOnLand(lat, lon, LAND_POLYGONS, POLYGON_BBOXES, WATER_POLYGONS, WATER_BBOXES);
+const crossesLand = (a, b, stepKm) => segmentCrossesLand(a, b, LAND_POLYGONS, POLYGON_BBOXES, stepKm, WATER_POLYGONS, WATER_BBOXES);
+const routeAroundLand = (a, b) => routeWater(a, b, LAND_POLYGONS, POLYGON_BBOXES, { waterPolygons: WATER_POLYGONS, waterBboxes: WATER_BBOXES });
 
 const SPLINE_SAMPLES = 12;
 
@@ -74,7 +84,7 @@ function denoise(points, passes = 2, factor = 0.2) {
       const cos = (dx1 * dx2 + dy1 * dy2) / (l1 * l2);
       const t = Math.max(cos, 0) * factor;
       const moved = [bx + (((ax + cx) / 2) - bx) * t, by + (((ay + cy) / 2) - by) * t];
-      next.push(pointOnLand(moved[0], moved[1], LAND_POLYGONS, POLYGON_BBOXES) ? cur[i] : moved);
+      next.push(isLand(moved[0], moved[1]) ? cur[i] : moved);
     }
     next.push(cur[cur.length - 1]);
     cur = next;
@@ -97,8 +107,8 @@ export function buildControlPoints(journey, route = true) {
     // stretches are handled by repairOffLand instead. `route` is false for the
     // instant first-paint pass (no A*).
     const isGap = (journey[i].t - journey[i - 1].t) > LAND_AVOIDANCE.gapMinMs || haversineKm(a[0], a[1], b[0], b[1]) > LAND_AVOIDANCE.gapMinKm;
-    if (route && isGap && segmentCrossesLand(a, b, LAND_POLYGONS, POLYGON_BBOXES)) {
-      const wp = routeWater(a, b, LAND_POLYGONS, POLYGON_BBOXES);
+    if (route && isGap && crossesLand(a, b)) {
+      const wp = routeAroundLand(a, b);
       if (wp && wp.length > 2) {
         const t0 = journey[i - 1].t, t1 = journey[i].t;
         for (let k = 1; k < wp.length - 1; k++) {
@@ -182,7 +192,7 @@ function nearestWaterBeyond(lat, lon) {
     for (let a = 0; a < 24; a++) {
       const th = a / 24 * 2 * Math.PI;
       const wlat = lat + dLat * Math.sin(th), wlon = lon + dLon * Math.cos(th);
-      if (!pointOnLand(wlat, wlon, LAND_POLYGONS, POLYGON_BBOXES)) {
+      if (!isLand(wlat, wlon)) {
         const ext = (radKm + marginKm) / radKm;
         return [lat + dLat * Math.sin(th) * ext, lon + dLon * Math.cos(th) * ext];
       }
@@ -204,7 +214,7 @@ export function repairOffLand(ctrl, maxPasses = 6) {
   const landCount = (c) => {
     const sm = catmullRom(c, SPLINE_SAMPLES);
     let n = 0;
-    for (const s of sm) if (pointOnLand(s.lat, s.lon, LAND_POLYGONS, POLYGON_BBOXES)) n++;
+    for (const s of sm) if (isLand(s.lat, s.lon)) n++;
     return n;
   };
   let best = ctrl.slice(), bestLand = landCount(ctrl);
@@ -214,7 +224,7 @@ export function repairOffLand(ctrl, maxPasses = 6) {
     const runs = [];
     let runStart = -1;
     for (let i = 0; i <= sm.length; i++) {
-      const onLand = i < sm.length && pointOnLand(sm[i].lat, sm[i].lon, LAND_POLYGONS, POLYGON_BBOXES);
+      const onLand = i < sm.length && isLand(sm[i].lat, sm[i].lon);
       if (onLand && runStart < 0) runStart = i;
       else if (!onLand && runStart >= 0) { runs.push([runStart, i - 1]); runStart = -1; }
     }
@@ -227,10 +237,9 @@ export function repairOffLand(ctrl, maxPasses = 6) {
       const segA = Math.min(ctrl.length - 2, Math.floor(a / SPLINE_SAMPLES));
       const segB = Math.min(ctrl.length - 2, Math.floor(b / SPLINE_SAMPLES));
       const c0 = ctrl[segA], c1 = ctrl[segB + 1];
-      if (pointOnLand(c0.lat, c0.lon, LAND_POLYGONS, POLYGON_BBOXES) ||
-          pointOnLand(c1.lat, c1.lon, LAND_POLYGONS, POLYGON_BBOXES)) continue;
-      if (segmentCrossesLand([c0.lat, c0.lon], [c1.lat, c1.lon], LAND_POLYGONS, POLYGON_BBOXES)) {
-        const wp = routeWater([c0.lat, c0.lon], [c1.lat, c1.lon], LAND_POLYGONS, POLYGON_BBOXES);
+      if (isLand(c0.lat, c0.lon) || isLand(c1.lat, c1.lon)) continue;
+      if (crossesLand([c0.lat, c0.lon], [c1.lat, c1.lon])) {
+        const wp = routeAroundLand([c0.lat, c0.lon], [c1.lat, c1.lon]);
         if (wp && wp.length > 2) {
           const inferred = c0.synthetic || c1.synthetic;
           const mids = [];
@@ -272,7 +281,7 @@ export function gapEnrichmentScore(allPoints) {
       const a = journey[i - 1], b = journey[i];
       const gapKm = haversineKm(a.lat, a.lon, b.lat, b.lon);
       if ((b.t - a.t) <= LAND_AVOIDANCE.gapMinMs && gapKm <= LAND_AVOIDANCE.gapMinKm) continue;
-      if (segmentCrossesLand([a.lat, a.lon], [b.lat, b.lon], LAND_POLYGONS, POLYGON_BBOXES, 5)) score += gapKm;
+      if (crossesLand([a.lat, a.lon], [b.lat, b.lon], 5)) score += gapKm;
     }
   }
   return score;

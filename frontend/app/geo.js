@@ -40,23 +40,43 @@ export function pointInPolygon(pt, polygon) {
   return inside;
 }
 
-// Is [lat,lon] on any land polygon? Uses precomputed bounding boxes to skip
-// polygons that can't contain the point.
-export function pointOnLand(lat, lon, polygons, bboxes) {
-  for (let i = 0; i < polygons.length; i++) {
-    const bb = bboxes[i];
+// Is [lat,lon] inside a water polygon (river/harbour basin)? Water entries are
+// { o: outer ring [[lat,lon],…], h?: hole rings (mid-water islands → land) }. Holes
+// flip back to not-water. Bbox-prefiltered like land.
+export function pointInWater(lat, lon, waterPolygons, waterBboxes) {
+  for (let i = 0; i < waterPolygons.length; i++) {
+    const bb = waterBboxes[i];
     if (lat < bb.minLat || lat > bb.maxLat || lon < bb.minLon || lon > bb.maxLon) continue;
-    if (pointInPolygon([lat, lon], polygons[i])) return true;
+    const w = waterPolygons[i];
+    if (!pointInPolygon([lat, lon], w.o)) continue;
+    if (w.h) { let inHole = false; for (const h of w.h) if (pointInPolygon([lat, lon], h)) { inHole = true; break; } if (inHole) continue; }
+    return true;
   }
   return false;
 }
 
+// Is [lat,lon] on land? Land = inside a coastline polygon AND NOT inside a water
+// polygon (the second layer re-opens rivers/harbours the coastline closed). The
+// water test runs only for the minority of points already on land, and bbox-
+// prefilters, so it's cheap. `waterPolygons` is optional (omit → coastline only).
+export function pointOnLand(lat, lon, polygons, bboxes, waterPolygons, waterBboxes) {
+  let onLand = false;
+  for (let i = 0; i < polygons.length; i++) {
+    const bb = bboxes[i];
+    if (lat < bb.minLat || lat > bb.maxLat || lon < bb.minLon || lon > bb.maxLon) continue;
+    if (pointInPolygon([lat, lon], polygons[i])) { onLand = true; break; }
+  }
+  if (!onLand) return false;
+  if (waterPolygons && pointInWater(lat, lon, waterPolygons, waterBboxes)) return false;
+  return true;
+}
+
 // Does the straight line a→b pass over land? Sampled at ~stepKm.
-export function segmentCrossesLand(a, b, polygons, bboxes, stepKm = 1) {
+export function segmentCrossesLand(a, b, polygons, bboxes, stepKm = 1, waterPolygons, waterBboxes) {
   const n = Math.max(2, Math.ceil(haversineKm(a[0], a[1], b[0], b[1]) / stepKm));
   for (let s = 0; s <= n; s++) {
     const f = s / n;
-    if (pointOnLand(a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, polygons, bboxes)) return true;
+    if (pointOnLand(a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, polygons, bboxes, waterPolygons, waterBboxes)) return true;
   }
   return false;
 }
@@ -107,6 +127,8 @@ class MinHeap {
 const NEIGHBORS = [[-1,0],[1,0],[0,-1],[0,1],[-1,-1],[-1,1],[1,-1],[1,1]];
 
 export function routeWater(a, b, polygons, bboxes, opts = {}) {
+  const waterPolygons = opts.waterPolygons;
+  const waterBboxes = opts.waterBboxes;
   const directKm = haversineKm(a[0], a[1], b[0], b[1]);
   // Fine enough to thread Gulf Island channels and harbour mouths (~150 m floor)
   // while staying coarse on long offshore detours.
@@ -132,7 +154,7 @@ export function routeWater(a, b, polygons, bboxes, opts = {}) {
   const cellIsLand = (r, c) => {
     const k = r * cols + c;
     let v = landMemo[k];
-    if (v === -1) { v = pointOnLand(cellLat(r), cellLon(c), polygons, bboxes) ? 1 : 0; landMemo[k] = v; }
+    if (v === -1) { v = pointOnLand(cellLat(r), cellLon(c), polygons, bboxes, waterPolygons, waterBboxes) ? 1 : 0; landMemo[k] = v; }
     return v === 1;
   };
 
@@ -254,7 +276,7 @@ export function routeWater(a, b, polygons, bboxes, opts = {}) {
   // sight (same inflation as the successful search).
   const losStep = Math.min(0.3, cellKm * 0.5);
   const sampleBlocked = (lat, lon) => {
-    if (pointOnLand(lat, lon, polygons, bboxes)) return true;
+    if (pointOnLand(lat, lon, polygons, bboxes, waterPolygons, waterBboxes)) return true;
     if (!inflated) return false;
     const r = Math.round((lat - minLat) / latCell), c = Math.round((lon - minLon) / lonCell);
     return r >= 0 && r < rows && c >= 0 && c < cols && blocked(r, c);

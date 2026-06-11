@@ -117,17 +117,65 @@ node ../tests/trail.test.mjs
 ```
 The build prints polygon/vertex counts and final KB. Current region ≈ 500 KB (gzips small).
 
-### Rivers & harbours OSM tags (important)
+### Water layer — rivers & harbours (`frontend/app/water.js`) — IMPLEMENTED
 `natural=coastline` follows the sea coast up to a river's tidal limit, then OSM
-switches to `natural=water` / `waterway=riverbank` polygons. So the **lower**
-Fraser is in our coastline source (just simplified — fixed via `FINE_ZONES`),
-but the **upper** Fraser (New Westminster) has **zero** coastline nodes — it's
-water polygons. To route rivers/harbours fully (Fraser, Portland), add a
-**second layer**: fetch `natural=water`+`waterway=riverbank` for the fine zones,
-assemble (these are already closed polygons/multipolygons — no boundary-closing
-needed), ship as `WATER_POLYGONS`, and make `pointOnLand = inLand && !inWater`
-in `geo.js`. Until then such upper-river transits degrade gracefully (the real
-track is drawn through the missing-river "land" — see frontend trust-the-boat).
+switches to `natural=water` / `waterway=riverbank` polygons. So the **lower** Fraser
+is in the coastline source (just simplified — `FINE_ZONES`), but the **upper** Fraser
+(New Westminster) has **zero** coastline nodes. The fix is a **second layer**,
+subtracted at runtime: `pointOnLand = inLand && !inWater` (`geo.js`).
+
+- `scripts/lib-osm-water.mjs` — `assembleWater`: closed `natural=water` ways → rings;
+  `multipolygon` relations → stitch outer member arcs into rings + inner arcs into
+  **holes** (mid-water islands like Annacis Is. → must read as LAND).
+- `scripts/build-water.mjs` — reads one or more Overpass water dumps (one **per fine
+  zone** — a combined/global query truncates), simplifies at the **fine ≈25 m** tol
+  only (water exists solely to re-open features the coarse coastline closed — never
+  coarsen it), drops sub-100 m ponds, emits `frontend/app/water.js` →
+  `WATER_POLYGONS = [{ o:[[lat,lon]…], h?:[holeRing…] }]`.
+- `geo.js` `pointInWater` is bbox-prefiltered and only runs for points already on land
+  (cheap). `trail_geometry.js` builds `WATER_BBOXES` and threads the layer through
+  `pointOnLand`/`segmentCrossesLand`/`routeWater` (via bound `isLand`/`crossesLand`/
+  `routeAroundLand` wrappers). `tests/lib.mjs` `pointInAnyLand` subtracts water too.
+
+**Regenerate / add a fine zone's water (run from `worker/`):**
+```bash
+# bbox = south,west,north,east. Fetch PER fine zone (combined truncates).
+curl -sS -H "User-Agent: vessel-tracker/1.0" "https://overpass-api.de/api/interpreter" \
+  --data-urlencode 'data=[out:json][timeout:180];(
+    way["natural"="water"](49.00,-123.30,49.40,-122.70);
+    relation["natural"="water"](49.00,-123.30,49.40,-122.70);
+    way["waterway"="riverbank"](49.00,-123.30,49.40,-122.70);
+    relation["waterway"="riverbank"](49.00,-123.30,49.40,-122.70);
+  );out body geom;' -o /tmp/osm_water_fraser.json
+node scripts/build-water.mjs /tmp/osm_water_fraser.json   # pass multiple dumps to merge zones
+node ../tests/trail.test.mjs                              # glovis-star/luther/mv-harken PASS
+```
+Validated by `docs/fraser-river-test-cases.md` (all 15 river coords → `pointInAnyLand`
+= -1; home stays land; Strait stays water). Current Vancouver/Fraser water ≈124 KB
+(includes inland lakes — harmless, bbox-skipped at runtime; could filter to navigable
+water later if size matters as more zones are added).
+
+### Coastline resolution policy (be intentional per destination)
+Resolution is chosen by a zone's **tightest navigable feature, not distance from home**.
+Hard rule (prevents "closed chokepoints"): **simplify tol ≤ ⅓ × the narrowest channel
+to keep open**, and **`routeWater` cellKm ≤ ½ × that width**.
+
+| Zone class | simplify tol | A* cellKm |
+|---|---|---|
+| river / narrow channel / chokepoint | ~25 m | ≤0.1–0.2 km |
+| harbour / port approach | 25–50 m | ~0.2 km |
+| broad bay / anchorage | 75–150 m | default |
+| open coast / offshore | 300–600 m | default |
+
+The water layer is always ~25 m (it only ever covers fine features). `FINE_ZONES` /
+future per-zone build config should carry an **explicit** simplify tol per destination.
+
+### Regional spatial index (runtime locality) — design, build when global coverage lands
+Today `pointOnLand` bbox-prefilters a **flat** array — fine for the Salish-Sea dataset
+but O(all polygons)/point, and A* calls it heavily. Before shipping disjoint foreign
+regions, bucket polygon indices into a coarse grid (~0.5–1° cells) so `pointOnLand`
+tests only the cell covering the point and `routeWater` selects candidates once from
+the gap bbox — a Singapore boat then never tests Vancouver polygons.
 
 ### Planned (DEFERRED until the coastline dataset is stable): server-side inferred-positions precompute
 **Do NOT build this yet.** Precomputed inferred points are derived from the
