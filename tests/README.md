@@ -13,9 +13,12 @@ node tests/trail.test.mjs          # regression over tests/fixtures/*.json
 ```
 
 Asserts, per fixture: **no spline sample on land** (beyond a 60 m penetration tolerance, ignoring
-clips that hug a real on/near-land fix) and **bounded overshoot** from the control polyline
+clips that hug a real on/near-land fix); **bounded overshoot** from the control polyline
 (catches the div-by-near-zero "spike", which historically threw 50–200 km excursions; genuine sharp
-turns and the wide curve-bulge of sparse long-gap detours are fine).
+turns and the wide curve-bulge of sparse long-gap detours are fine); and **no inferred kink** — a
+spline turn >60° more than 2 km from any real fix (the old sparse-string-pull mid-channel dogleg,
+68–168°; a real boat can't turn on a dime, and `smoothRoute` rounds open-water doglegs out — genuine
+sharp turns happen AT a real fix or where the channel forces them, and are exempt).
 
 `tests/lib.mjs` provides `pointInAnyLand`, `POLYGON_BBOXES`, `loadTrail` (reads a wrangler
 `db-positions` dump). The test imports the **real production functions** from `map_page.js` (with
@@ -23,7 +26,7 @@ DOM/Leaflet stubs) so it can never drift from what ships.
 
 ## Fixtures
 
-`tests/fixtures/*.json` are real captured trails (API-shaped, newest-first) for the four vessels
+`tests/fixtures/*.json` are real captured trails (API-shaped, newest-first) for the vessels
 that used to break, each exercising a different regime:
 
 | Fixture | Regime it stresses |
@@ -31,6 +34,7 @@ that used to break, each exercising a different regime:
 | `mount-aso` / `buena-ventura` | long (~190 km) gaps routed **around the Olympic Peninsula** |
 | `twr-8` | **archipelago + harbour** threading (Gulf Islands, Bremerton dead-end inlet) |
 | `chasing-daylight` | gap running **out of the coastline-coverage zone** (graceful straight bridge) |
+| `pacific-grace` | **inferred-path smoothness** — Haro Strait gaps whose raw A\* doglegged mid-channel (68–98°) and kinked at the real→A\* boundary; `smoothRoute` + tangent anchors round them out (a lone fix between two ~21 h gaps stays a sharp but honest corner) |
 
 Refresh / add fixtures from the live DB:
 
@@ -92,7 +96,21 @@ proximity ring search doesn't dominate runtime at fine cell sizes. Time a route 
 boat-by-boat off the main thread (`routeQueue` in `map_page.js`), so per-route cost matters for
 first-paint smoothness, not steady state.
 
-### 7. Visualize on a map
+### 7. Jagged inferred path / sharp corners at the real→A\* boundary
+A\*+string-pull is a shortest water path with no turning radius, so spliced raw its sparse, angular
+waypoints kink — both mid-channel (open-water doglegs from the coast-proximity bow) and right where
+the dashed inferred run meets the solid real track. Diagnose by simulating one vessel: capture its
+trail (`db-positions <mmsi>` → fixture), run the real pipeline, and at every spline sample measure
+the **turn angle** (`bearingDeg` of the two adjacent segments) plus its **distance to the nearest
+real control point**. A turn >60° more than ~2 km from any real fix is a physically-impossible
+artifact; a turn AT a real fix (dock wiggle, a lone fix between long gaps) or in a tight channel is
+genuine. `smoothRoute` (densify + land-rejecting Laplacian relax, pinned endpoints) rounds the
+artifacts out; tangent anchors fix the boundary. If corners return, check `ROUTE_SMOOTHING`
+(`passes`/`factor`/`targetPoints`) and whether `moveClear` is rejecting too aggressively (land too
+close on both sides → it can't relax there, which is correct). The regression's `inferredKinks`
+column tracks this.
+
+### 8. Visualize on a map
 Emit GeoJSON (land polygons + real trail + routed waypoints + spline + land-clip points) and open it
 at <https://geojson.io>. Seeing the failure beats reading coordinates.
 

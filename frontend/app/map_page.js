@@ -6,6 +6,7 @@ import { vesselColor, vesselCategoryLabel, vesselFlag } from './vessels.js';
 import { getTrail, pruneTrails } from './trails.js';
 import { subscribe as subscribeHighlight, getHighlight, setHighlight, clearHighlight } from './highlight_store.js';
 import { computeRuns, gapEnrichmentScore } from './trail_geometry.js';
+import { ensureRegionsForExtent, extentOf } from './region_coast.js';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -287,8 +288,8 @@ function startTrailWorker() {
   }
 }
 
-function requestRoutedRuns(mmsi, allPoints, sig, bounds) {
-  pendingRoute.set(mmsi, { allPoints, sig, bounds, score: gapEnrichmentScore(allPoints) });
+function requestRoutedRuns(mmsi, allPoints, sig, bounds, vesselLength) {
+  pendingRoute.set(mmsi, { allPoints, sig, bounds, vesselLength, score: gapEnrichmentScore(allPoints) });
   pumpRoute();
 }
 
@@ -302,10 +303,11 @@ function pumpRoute() {
   if (cached !== undefined && cached.sig === pickJob.sig) { pumpRoute(); return; } // already routed
   routeInFlight = true;
   if (trailWorker !== null) {
-    trailWorker.postMessage({ mmsi: pickMmsi, allPoints: pickJob.allPoints, sig: pickJob.sig, bounds: pickJob.bounds });
+    trailWorker.postMessage({ mmsi: pickMmsi, allPoints: pickJob.allPoints, sig: pickJob.sig, bounds: pickJob.bounds, vesselLength: pickJob.vesselLength });
   } else {
-    setTimeout(() => {
-      applyRoutedRuns(pickMmsi, pickJob.sig, pickJob.bounds, computeRuns(pickJob.allPoints, true));
+    setTimeout(async () => {
+      await ensureRegionsForExtent(extentOf(pickJob.allPoints)); // load any foreign region this trail reaches
+      applyRoutedRuns(pickMmsi, pickJob.sig, pickJob.bounds, computeRuns(pickJob.allPoints, true, { vesselLength: pickJob.vesselLength }));
       routeInFlight = false;
       pumpRoute();
     }, 0);
@@ -364,7 +366,7 @@ function drawTrail(vessel, points, token) {
     return;
   }
   drawRuns(vessel, computeRuns(allPoints, false), bounds);
-  requestRoutedRuns(mmsi, allPoints, sig, bounds);
+  requestRoutedRuns(mmsi, allPoints, sig, bounds, vessel.length);
 }
 
 async function scheduleTrails(visibleVessels, token) {

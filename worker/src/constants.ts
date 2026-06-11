@@ -35,6 +35,11 @@ export type { MoveProfile } from './compress';
 export const PHANTOM_SPEED_MIN_KN = 1.5;
 export const PHANTOM_STALL_MS     = 20 * 60 * 1000;
 
+// Zone-visit write throttle: while a vessel sits in a named zone, only bump its
+// zone_visits row this often (else a parked ship would re-write every scan). First
+// sighting in a zone always inserts.
+export const ZONE_VISIT_THROTTLE_MS = 30 * 60 * 1000;
+
 // How long a stationary vessel can go without a heartbeat last_seen update (ms).
 // Backoff: the longer a vessel has been parked (no position row), the less often it
 // needs a heartbeat — it isn't going anywhere. All intervals stay < the 6h live TTL so

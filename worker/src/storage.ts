@@ -190,6 +190,54 @@ export async function enrichStaticData(env: Env, updates: StaticUpdate[]): Promi
   await env.VESSELS_DB.batch(stmts);
 }
 
+export interface ZoneObservation {
+  mmsi: number;
+  zone_id: string;
+  lat: number;
+  lon: number;
+  ts: number;
+}
+
+// Record "vessel was in named zone" events (saturating: one row per (mmsi, zone_id)).
+// New (mmsi, zone) → INSERT (first_ts=last_ts). Already present → bump last_ts/lat/lon
+// only if the throttle window elapsed since the last write (a parked ship doesn't
+// re-write every scan). Never deletes; growth is bounded by the vessel×zone matrix.
+export async function commitZoneVisits(env: Env, obs: ZoneObservation[], throttleMs: number): Promise<void> {
+  if (obs.length === 0) return;
+
+  const mmsis = [...new Set(obs.map(o => o.mmsi))];
+  const lastSeenInZone = new Map<string, number>(); // `${mmsi}|${zone_id}` -> last_ts
+  for (let i = 0; i < mmsis.length; i += MMSI_CHUNK) {
+    const chunk = mmsis.slice(i, i + MMSI_CHUNK);
+    const placeholders = chunk.map((_, k) => `?${k + 1}`).join(',');
+    const res = await env.VESSELS_DB
+      .prepare(`SELECT mmsi,zone_id,last_ts FROM zone_visits WHERE mmsi IN (${placeholders})`)
+      .bind(...chunk)
+      .all<{ mmsi: number; zone_id: string; last_ts: number }>();
+    for (const r of res.results) lastSeenInZone.set(`${r.mmsi}|${r.zone_id}`, r.last_ts);
+  }
+
+  const stmts: D1PreparedStatement[] = [];
+  for (const o of obs) {
+    const prev = lastSeenInZone.get(`${o.mmsi}|${o.zone_id}`);
+    if (prev === undefined) {
+      stmts.push(
+        env.VESSELS_DB
+          .prepare(`INSERT INTO zone_visits (mmsi,zone_id,first_ts,last_ts,lat,lon) VALUES (?1,?2,?3,?3,?4,?5)
+                    ON CONFLICT(mmsi,zone_id) DO UPDATE SET last_ts=?3, lat=?4, lon=?5`)
+          .bind(o.mmsi, o.zone_id, o.ts, o.lat, o.lon)
+      );
+    } else if (o.ts - prev >= throttleMs) {
+      stmts.push(
+        env.VESSELS_DB
+          .prepare(`UPDATE zone_visits SET last_ts=?3, lat=?4, lon=?5 WHERE mmsi=?1 AND zone_id=?2`)
+          .bind(o.mmsi, o.zone_id, o.ts, o.lat, o.lon)
+      );
+    }
+  }
+  if (stmts.length > 0) await env.VESSELS_DB.batch(stmts);
+}
+
 export async function getCurrentVessels(env: Env, directTtlMs: number, localTtlMs: number, globalTtlMs: number): Promise<VesselRow[]> {
   const now = Date.now();
   const directCutoff = now - directTtlMs;
@@ -228,6 +276,22 @@ export async function getTrack(env: Env, mmsi: number, tiers: Tier[], limit: num
     .bind(mmsi, ...tiers, limit)
     .all<PositionRow>();
   return result.results;
+}
+
+export interface ZoneVisitRow {
+  zone_id: string;
+  first_ts: number;
+  last_ts: number;
+  lat: number;
+  lon: number;
+}
+
+export async function getZoneVisits(env: Env, mmsi: number): Promise<ZoneVisitRow[]> {
+  const res = await env.VESSELS_DB
+    .prepare(`SELECT zone_id,first_ts,last_ts,lat,lon FROM zone_visits WHERE mmsi=?1 ORDER BY last_ts DESC`)
+    .bind(mmsi)
+    .all<ZoneVisitRow>();
+  return res.results;
 }
 
 export async function getOfInterestMmsis(env: Env, staleCutoffMs?: number): Promise<number[]> {

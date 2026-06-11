@@ -74,6 +74,23 @@ export const LAND_AVOIDANCE = {
   fadeRatio: 0.7,           // opacity multiplier for inferred segments vs the tier's normal opacity
 };
 
+// Inferred (A*-routed) waypoints are sparse and angular — A* + string-pull is a
+// shortest water path with no notion of a vessel's turning radius, so spliced
+// raw it produces sharp corners where it meets the real track. A real boat can't
+// turn on a dime, so the inferred path is densified to ~uniform spacing then
+// relaxed (Laplacian) with the endpoints pinned and every moved point land-
+// checked: corners round out as much as the surrounding water allows, and stay
+// sharp ONLY where the channel genuinely forces the turn. See trail_geometry
+// `smoothRoute`. targetPoints caps densification so long continental gaps don't
+// explode the control-point count.
+export const ROUTE_SMOOTHING = { minStepKm: 1, targetPoints: 16, passes: 12, factor: 0.5 };
+
+// Per-vessel narrow-channel routing penalty (routeWater `narrowWeight`). Large
+// ships hold the main channel (e.g. the Fraser) even when slower; small craft are
+// free to cut through tight Gulf Island passages. Linearly interpolated by length
+// between [minLenM → small] and [maxLenM → large]; null/unknown length → default.
+export const NARROW_WEIGHT = { minLenM: 20, maxLenM: 120, small: 0.5, large: 7, default: 3 };
+
 export const DEFAULT_EXTENT_FILTERS = { local_boat: true, passing_through: true, distant_visitor: true };
 export const DEFAULT_TRAIL_FILTERS  = { local_boat: true, passing_through: true, distant_visitor: false };
 

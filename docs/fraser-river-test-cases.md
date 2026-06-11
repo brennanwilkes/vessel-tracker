@@ -43,6 +43,22 @@ Reshape to `tests/fixtures/<name>.json` = `{mmsi,name,points:[{lat,lon,speed,t,t
 4. Routing through the river is smooth and stays in the (now-open) channel — no
    zigzags, no clips. Spot-check at https://geojson.io (see `tests/README.md` §7).
 
+## Future: multi-port acceptance route (run AFTER per-port geometry exists)
+Once fine coastline + water are downloaded/processed for the destination ports (not
+just the Fraser), this end-to-end route is the acceptance test:
+
+> **New Westminster harbour → Tacoma → Portland → Oakland → LA/Long Beach**
+
+Each leg must stay in-channel / in-bay, bow around the continent on the open-ocean
+legs (no cut-through Oregon/N. California), and be water-tight. Today this is NOT
+runnable: Portland (up the Columbia/Willamette), Oakland (SF Bay) and LA only exist in
+the **coarse** continental layer (`coast_coarse.js`), so a route *into* those harbours
+snaps to the coarse coast. It needs each port built as a FINE zone — OSM
+`natural=coastline` for the harbour/approach + OSM `natural=water`/`riverbank` for any
+river (Columbia/Willamette mirror the Fraser case) — added as additive concatenated
+layers (same pattern as the Fraser water + coarse layers). Tracked: "Per-port fine
+coastline + water geometry".
+
 ## Don't break
 - The 4 existing PASS fixtures (`buena-ventura`, `chasing-daylight`, `mount-aso`,
   `twr-8`) and `venturosa` (Victoria harbour) must stay water-tight + smooth.

@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+show_help() { cat <<'HELP'
+Usage: db-zones [--pretty]
+Per-zone "visited destinations" rollup: distinct vessels and most recent visit.
+HELP
+}
+
+source "$SCRIPT_DIR/db-common"
+parse_common_flags "$@"
+
+d1_query "
+SELECT zone_id,
+       COUNT(*)          AS vessels,
+       MAX(last_ts)      AS most_recent,
+       MIN(first_ts)     AS earliest
+FROM zone_visits
+GROUP BY zone_id
+ORDER BY vessels DESC
+"

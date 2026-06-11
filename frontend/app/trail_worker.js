@@ -5,11 +5,14 @@
 // {mmsi, allPoints, sig, bounds}; we post back the styled runs (or an error,
 // in which case the main thread keeps the instant straight-bridge fallback).
 import { computeRuns } from './trail_geometry.js';
+import { ensureRegionsForExtent, extentOf } from './region_coast.js';
 
-self.onmessage = (e) => {
-  const { mmsi, allPoints, sig, bounds } = e.data;
+self.onmessage = async (e) => {
+  const { mmsi, allPoints, sig, bounds, vesselLength } = e.data;
   try {
-    const runs = computeRuns(allPoints, true);
+    // Lazily pull in any foreign harbour/river region this trail reaches before routing.
+    await ensureRegionsForExtent(extentOf(allPoints));
+    const runs = computeRuns(allPoints, true, { vesselLength });
     self.postMessage({ mmsi, sig, bounds, runs });
   } catch (err) {
     self.postMessage({ mmsi, sig, bounds, error: String(err && err.message || err) });

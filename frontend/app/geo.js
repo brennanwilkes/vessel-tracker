@@ -130,9 +130,11 @@ export function routeWater(a, b, polygons, bboxes, opts = {}) {
   const waterPolygons = opts.waterPolygons;
   const waterBboxes = opts.waterBboxes;
   const directKm = haversineKm(a[0], a[1], b[0], b[1]);
-  // Fine enough to thread Gulf Island channels and harbour mouths (~150 m floor)
-  // while staying coarse on long offshore detours.
-  const cellKm = opts.cellKm ?? Math.min(1.0, Math.max(0.2, directKm / 250));
+  // Fine enough to thread Gulf Island channels and harbour mouths (~150 m floor) while
+  // staying coarse on long offshore detours. Very long continental gaps (Vancouver↔
+  // California) route against the coarse coast layer, where ~5 km cells are plenty and
+  // keep the grid (and A*) tractable — a 1 km cell there would be a multi-million-cell grid.
+  const cellKm = opts.cellKm ?? Math.max(0.2, Math.min(directKm > 300 ? 5.0 : 1.0, directKm / 250));
   const marginKm = opts.marginKm ?? Math.min(90, Math.max(12, directKm * 0.6));
   const clearanceCells = opts.clearanceCells ?? 1;
 

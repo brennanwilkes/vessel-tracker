@@ -1,7 +1,8 @@
 import type { Env, Tier } from './types';
 import { handleOptions } from './cors';
 import { json, errorJson } from './http';
-import { getCurrentVessels, getTrack } from './storage';
+import { getCurrentVessels, getTrack, getZoneVisits } from './storage';
+import { zoneMeta } from './zones';
 import { runDirectScan, runLocalScan, runGlobalScan } from './ingest';
 import { LIVE_TTL_DIRECT_MS, LIVE_TTL_LOCAL_MS, LIVE_TTL_GLOBAL_MS } from './constants';
 
@@ -35,6 +36,17 @@ export default {
         { points: points.map(p => ({ lat: p.lat, lon: p.lon, speed: p.speed, heading: p.heading, t: p.ts, tier: p.tier })) },
         { 'Cache-Control': 'public, max-age=60' }
       );
+    }
+
+    const zonesMatch = url.pathname.match(/^\/vessel\/(\d+)\/zones$/);
+    if (zonesMatch !== null) {
+      const mmsi = parseInt(zonesMatch[1], 10);
+      const visits = await getZoneVisits(env, mmsi);
+      const zones = visits.map(v => {
+        const z = zoneMeta(v.zone_id);
+        return { zone_id: v.zone_id, name: z?.name ?? v.zone_id, kind: z?.kind ?? 'port', lat: v.lat, lon: v.lon, first_t: v.first_ts, last_t: v.last_ts };
+      });
+      return json(req, env, 200, { zones }, { 'Cache-Control': 'public, max-age=300' });
     }
 
     return errorJson(req, env, 404, 'Not found');

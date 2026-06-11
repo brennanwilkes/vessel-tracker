@@ -5,14 +5,16 @@ import {
   DIRECT_DRAIN_MS, LOCAL_DRAIN_MS, GLOBAL_DRAIN_MS,
   PHANTOM_SPEED_MIN_KN, PHANTOM_STALL_MS,
   GLOBAL_MMSI_CHUNK_SIZE, GLOBAL_SCAN_ATTEMPTS, GLOBAL_SCAN_BUDGET_MS,
-  LIVE_TTL_LOCAL_MS,
+  LIVE_TTL_LOCAL_MS, ZONE_VISIT_THROTTLE_MS,
 } from './constants';
 import { isSignificantMove } from './compress';
 import { drainAisStream } from './aisstream';
 import { pointInBox, isLargeVessel, isConfirmedSmall } from './ais';
+import { zoneOf } from './zones';
 import {
   loadVesselStates, commitScan, enrichStaticData, getOfInterestMmsis, widenExtent,
-  type VesselUpsert, type PositionInsert, type VesselState,
+  commitZoneVisits,
+  type VesselUpsert, type PositionInsert, type VesselState, type ZoneObservation,
 } from './storage';
 
 // Stationary vessels heartbeat less often the longer they've been parked.
@@ -137,6 +139,15 @@ export async function runDirectScan(env: Env): Promise<void> {
 
   const existing = await loadVesselStates(env, vessels.map(v => v.mmsi));
   const nowMs = Date.now();
+
+  // Named-destination attribution — record every heard vessel that's inside a zone,
+  // regardless of movement/tier. Local zones are covered for free here; of-interest
+  // vessels heard worldwide by the global scan also get foreign attribution for free.
+  const zoneObs: ZoneObservation[] = [];
+  for (const zv of vessels) {
+    const zid = zoneOf(zv.lat, zv.lon);
+    if (zid !== null) zoneObs.push({ mmsi: zv.mmsi, zone_id: zid, lat: zv.lat, lon: zv.lon, ts: nowMs });
+  }
   const upserts: VesselUpsert[] = [];
   const positions: PositionInsert[] = [];
   let nMoved = 0, nHeartbeat = 0, nPhantom = 0, nSkipped = 0;
@@ -185,6 +196,7 @@ export async function runDirectScan(env: Env): Promise<void> {
 
   console.log(`[ingest] direct scan — ${vessels.length} heard | ${nMoved} moved, ${nHeartbeat} heartbeat, ${nPhantom} phantom, ${nSkipped} no-change`);
   await commitScan(env, upserts, positions);
+  await commitZoneVisits(env, zoneObs, ZONE_VISIT_THROTTLE_MS);
   await enrichStaticData(env, staticOnly);
   console.log(`[ingest] direct scan done — ${upserts.length} writes (${positions.length} pos), ${staticOnly.length} static-only enrichments in ${Date.now() - start}ms`);
 }
@@ -207,6 +219,15 @@ export async function runLocalScan(env: Env): Promise<void> {
 
   const existing = await loadVesselStates(env, vessels.map(v => v.mmsi));
   const nowMs = Date.now();
+
+  // Named-destination attribution — record every heard vessel that's inside a zone,
+  // regardless of movement/tier. Local zones are covered for free here; of-interest
+  // vessels heard worldwide by the global scan also get foreign attribution for free.
+  const zoneObs: ZoneObservation[] = [];
+  for (const zv of vessels) {
+    const zid = zoneOf(zv.lat, zv.lon);
+    if (zid !== null) zoneObs.push({ mmsi: zv.mmsi, zone_id: zid, lat: zv.lat, lon: zv.lon, ts: nowMs });
+  }
   const upserts: VesselUpsert[] = [];
   const positions: PositionInsert[] = [];
   let nFiltered = 0, nMoved = 0, nHeartbeat = 0, nPhantom = 0, nSkipped = 0;
@@ -270,6 +291,7 @@ export async function runLocalScan(env: Env): Promise<void> {
     ` | ${nMoved} moved, ${nHeartbeat} heartbeat, ${nPhantom} phantom, ${nSkipped} no-change`
   );
   await commitScan(env, upserts, positions);
+  await commitZoneVisits(env, zoneObs, ZONE_VISIT_THROTTLE_MS);
   await enrichStaticData(env, staticOnly);
   console.log(`[ingest] local scan done — ${upserts.length} writes (${positions.length} pos), ${staticOnly.length} static-only enrichments in ${Date.now() - start}ms`);
 }
@@ -301,6 +323,15 @@ export async function runGlobalScan(env: Env): Promise<void> {
 
   const existing = await loadVesselStates(env, vessels.map(v => v.mmsi));
   const nowMs = Date.now();
+
+  // Named-destination attribution — record every heard vessel that's inside a zone,
+  // regardless of movement/tier. Local zones are covered for free here; of-interest
+  // vessels heard worldwide by the global scan also get foreign attribution for free.
+  const zoneObs: ZoneObservation[] = [];
+  for (const zv of vessels) {
+    const zid = zoneOf(zv.lat, zv.lon);
+    if (zid !== null) zoneObs.push({ mmsi: zv.mmsi, zone_id: zid, lat: zv.lat, lon: zv.lon, ts: nowMs });
+  }
   const upserts: VesselUpsert[] = [];
   const positions: PositionInsert[] = [];
   let nMoved = 0, nHeartbeat = 0, nPhantom = 0, nSkipped = 0;
@@ -363,6 +394,7 @@ export async function runGlobalScan(env: Env): Promise<void> {
     ` moved=${nMoved} heartbeat=${nHeartbeat} phantom=${nPhantom} skipped=${nSkipped}`
   );
   await commitScan(env, upserts, positions);
+  await commitZoneVisits(env, zoneObs, ZONE_VISIT_THROTTLE_MS);
   await enrichStaticData(env, staticOnly);
   console.log(`[ingest] GLOBAL_SCAN_DONE vessel_writes=${upserts.length} position_writes=${positions.length} static_only=${staticOnly.length} duration_ms=${Date.now() - start}`);
 }

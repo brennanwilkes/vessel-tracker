@@ -43,6 +43,8 @@ scripts/
   db-by-type          — vessel count by AIS type code (--min N)
   db-tiers            — position stats per scan tier (count, vessels, avg speed)
   db-search <term>    — search vessels by MMSI or name fragment
+  db-zone-visits <mmsi> — visited destinations for one vessel
+  db-zones            — per-zone rollup: distinct vessels + most recent visit
   db-raw <sql>        — run arbitrary SQL (read-only guard; --write to bypass)
   README.md           — quick-reference for AI agents
 ```
@@ -57,6 +59,8 @@ See scripts/README.md for full reference.
 - `schema_migrations(id, applied_at)` — migration tracking
 - `vessels(mmsi PK, name, vessel_type, length, destination, last_lat, last_lon, last_speed, last_heading, last_pos_ts, last_seen, first_seen, of_interest, max_extent, first_direct_at, times_seen)` — one row per vessel with denormalized current position
 - `positions(id, mmsi, lat, lon, speed, heading, ts, tier)` — movement events only; `tier ∈ {direct, local, global}`
+- `zone_visits(id, mmsi, zone_id, first_ts, last_ts, lat, lon)` — "visited destinations", UNIQUE(mmsi,zone_id); see "Visited destinations" below (migration 005)
+- `scan_meta(key, value)` — cron scratch (e.g. rotating foreign-scan cursor)
 
 ## Event-based position storage
 
@@ -66,6 +70,28 @@ A `positions` row is only inserted when the vessel has moved past the tier-speci
 - global: 5.0 nm
 
 Stationary vessels update `last_seen` heartbeat every ≥10 min but emit no position row.
+
+Movement uses **trajectory compression** (`src/compress.ts` `isSignificantMove`): past a
+jitter floor, a position row is written only on a turn / speed change / start-stop / a
+bounded max gap (per-tier `MOVE_PROFILE`; direct stays gentle to keep the live dot
+fresh, local/global compress hard). Low-value resident types (tug/pleasure/fishing) get
+coarser gaps. Heartbeats back off as a vessel stays parked (10m→30m→1h). Unit-tested:
+`node tests/compress.test.mjs`.
+
+## Visited destinations (zones)
+
+Named places (ports/rivers/chokepoints) a vessel has been — the data behind the
+`/vessel/:mmsi/zones` map dots. `src/zones.ts` holds a **hardcoded** `ZONES` registry
+(config-in-code, like the coastline fine-zones — NOT a DB table) and `zoneOf(lat,lon)`.
+`zoneOf` runs in every scan, so **local/nearby** zones (Vancouver, Deltaport, Tacoma,
+Seattle, …) are attributed **for free** from the direct/local boxes we already drain;
+of-interest vessels heard worldwide by the global scan get foreign attribution for free
+too. `commitZoneVisits` (`storage.ts`) is **saturating**: one row per `(mmsi, zone_id)`
+— first sighting inserts, later sightings only bump `last_ts` once past
+`ZONE_VISIT_THROTTLE_MS` (30 min), so a parked ship doesn't re-write every scan. Never
+deleted; bounded by the vessel×zone matrix. Distant ports we don't otherwise stream
+need the (not-yet-built) rotating foreign scan — see the plan; that's the only part
+gated on the aisstream multi-box cap + a 4th cron.
 
 ## Adding a migration
 
@@ -81,6 +107,7 @@ Drop a new `NNN_my_change.sql` file in `worker/migrations/`. On next push to mai
 
 - `GET /current` → of-interest vessels within tier TTLs: direct/local 6h, global 72h. `max_extent` reflects the strongest extent actually observed in D1.
 - `GET /vessel/:mmsi/track?tier=direct,local` → movement event positions, `Cache-Control: public, max-age=60`
+- `GET /vessel/:mmsi/zones` → visited destinations `[{zone_id,name,kind,lat,lon,first_t,last_t}]` (zone_visits joined with code metadata), `Cache-Control: public, max-age=300`
 - `OPTIONS *` → CORS preflight
 
 ## Secrets
@@ -154,6 +181,51 @@ Validated by `docs/fraser-river-test-cases.md` (all 15 river coords → `pointIn
 = -1; home stays land; Strait stays water). Current Vancouver/Fraser water ≈124 KB
 (includes inland lakes — harmless, bbox-skipped at runtime; could filter to navigable
 water later if size matters as more zones are added).
+
+### Coarse continental layer (`frontend/app/coast_coarse.js`) — anti-cut-through
+A third land layer: a very low-res NA Pacific landmass so long open-ocean inferred
+routes (Vancouver↔California/Mexico, or up to Alaska) bow around the continent instead
+of cutting through Oregon / N. California / Baja. **Natural Earth 1:50M** (coarse is
+correct here — opposite of the local need), clipped to lat strips that EXCLUDE the fine
+OSM band [46.9, 51.3] N so it tiles with `coastline.js` and never coarsens the Salish
+Sea channels. `trail_geometry.js` (+ `tests/lib.mjs`) concatenate it into the land array
+(`LAND = LAND_POLYGONS.concat(COARSE_LAND_POLYGONS)`) — no `geo.js` change, since the
+strips don't overlap the fine region. `routeWater` raises `cellKm` to ~5 km for >300 km
+gaps so the continental A* grid stays tractable. The trail test allows a larger
+penetration tolerance for clips on coarse polygons (index ≥ fine count) — coarse data,
+coarse precision. Regenerate (run from `worker/`):
+```bash
+curl -sS -o /tmp/ne_50m_land.geojson \
+  https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_50m_land.geojson
+node scripts/build-coarse-coast.mjs /tmp/ne_50m_land.geojson   # ~24 KB, 47 polys
+```
+To extend to other oceans (Asia coast for trans-Pacific), add strips in
+`build-coarse-coast.mjs`. The fine band exclusion is specific to the Salish Sea OSM clip.
+
+### Lazy per-region geometry (`frontend/app/coast/<id>.js` + `region_coast.js`)
+Foreign harbour/river ports are built as **separate per-region files** loaded ON DEMAND,
+so the base download stays small as ports are added (54 zones in `zones.ts`). Each
+region is uniformly FINE (it only exists to render trails *into* a port; the coarse
+layer + zone dots cover everything else).
+- `scripts/build-region.mjs <id>` — bbox from its `REGIONS` map; reads
+  `/tmp/osm_coast_<id>.json` + `/tmp/osm_water_<id>.json`; emits
+  `frontend/app/coast/<id>.js` = `{ id, bbox, land:[rings], water:[{o,h?}] }`. Land at
+  ~40 m, water at ~50 m, and **water keeps only navigable bodies** (`WATER_DROP_SPAN_KM`
+  ~1 km — drops the region's ponds/lakes that otherwise bloat the file). A river region
+  re-opens its channel over the coarse continent because water subtraction applies to
+  ANY land layer (`pointOnLand = inLand && !inWater`). Proven region: `columbia`
+  (Astoria→Portland up the Columbia/Willamette), ~223 KB.
+- `frontend/app/coast/manifest.js` — tiny upfront list `[{id, bbox, load:()=>import()}]`.
+- `frontend/app/region_coast.js` — owns the combined land/water arrays (base = home
+  coast + coarse + home water; regions appended on demand). `ensureRegionsForExtent(bbox)`
+  dynamically imports + appends every region intersecting `bbox` (once, cached).
+  `trail_geometry.js` reads geometry via its getters (live, so appends are picked up).
+  Works in browser, module Worker, and Node (the future A* precompute).
+- **Wired:** the routed-compute paths `await ensureRegionsForExtent(extentOf(allPoints))`
+  before `computeRuns` — `trail_worker.js` (primary, off-thread) and the inline fallback
+  in `map_page.js`. First paint (`route=false`) needs no regions. All 39 foreign regions
+  are built (`build-all-regions.mjs`), manifest lists them, ~2.8 MB total but lazy so a
+  client only fetches the region(s) for a vessel it's viewing.
 
 ### Coastline resolution policy (be intentional per destination)
 Resolution is chosen by a zone's **tightest navigable feature, not distance from home**.

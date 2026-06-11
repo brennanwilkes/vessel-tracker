@@ -1,8 +1,12 @@
 // Shared test helpers: load coastline + water + geo, normalize D1 trail dumps, land tests.
 import { readFileSync } from 'fs';
 import { LAND_POLYGONS } from '../frontend/app/coastline.js';
+import { COARSE_LAND_POLYGONS } from '../frontend/app/coast_coarse.js';
 import { WATER_POLYGONS } from '../frontend/app/water.js';
 export { LAND_POLYGONS, WATER_POLYGONS };
+
+// Fine OSM coast + coarse continental fallback — mirrors trail_geometry.js's LAND.
+const LAND = LAND_POLYGONS.concat(COARSE_LAND_POLYGONS);
 
 const ringBbox = ring => {
   let minLat = 90, maxLat = -90, minLon = 180, maxLon = -180;
@@ -15,7 +19,7 @@ const ringBbox = ring => {
   return { minLat, maxLat, minLon, maxLon };
 };
 
-export const POLYGON_BBOXES = LAND_POLYGONS.map(ringBbox);
+export const POLYGON_BBOXES = LAND.map(ringBbox);
 export const WATER_BBOXES = WATER_POLYGONS.map(w => ringBbox(w.o));
 
 export function pointInPolygon(pt, polygon) {
@@ -46,10 +50,10 @@ export function pointInAnyWater(pt) {
 // polygon (river/harbour the coastline closed) is NOT land. Mirrors geo.pointOnLand.
 export function pointInAnyLand(pt) {
   let hit = -1;
-  for (let i = 0; i < LAND_POLYGONS.length; i++) {
+  for (let i = 0; i < LAND.length; i++) {
     const bb = POLYGON_BBOXES[i];
     if (pt[0] < bb.minLat || pt[0] > bb.maxLat || pt[1] < bb.minLon || pt[1] > bb.maxLon) continue;
-    if (pointInPolygon(pt, LAND_POLYGONS[i])) { hit = i; break; }
+    if (pointInPolygon(pt, LAND[i])) { hit = i; break; }
   }
   if (hit === -1) return -1;
   return pointInAnyWater(pt) ? -1 : hit;

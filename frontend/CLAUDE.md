@@ -89,9 +89,24 @@ continuously. The pipeline (`map_page.js`, all functions exported for testing):
    went around, so we route it regardless of gap size; the detour is marked
    `inferred` (dashed) **only** when it also spans a data gap
    (`LAND_AVOIDANCE.gapMinMs`/`gapMinKm`) — routing that fills dense tracking
-   around an island is confident movement, drawn solid. Final dedup collapses
+   around an island is confident movement, drawn solid. Each routed gap's raw
+   waypoints are first run through **`smoothRoute`** (densify to ~uniform spacing,
+   then land-rejecting Laplacian relaxation with pinned endpoints — see below) and
+   **tangent-anchored** to the boat's real course either side of the gap, so the
+   inferred path can't kink where it meets the real track. Final dedup collapses
    near-duplicate spliced points. (Pass `route=false` for the instant first paint
    — see Performance.)
+   - **`smoothRoute`** — A\*+string-pull is a shortest water path with no notion of
+     a turning radius, so spliced raw it produces sharp corners (esp. at the
+     real→A\* boundary). `smoothRoute` densifies the path to ~uniform spacing
+     (`ROUTE_SMOOTHING.minStepKm`/`targetPoints`), then relaxes each interior point
+     toward its neighbour-midpoint (`passes`/`factor`) with the **endpoints pinned**
+     and a move accepted **only if BOTH touched segments stay clear of land** (a
+     point-only check would let the curve bulge ashore as relaxation erodes A\*'s
+     clearance). Result: open-water doglegs round out, channel-forced turns stay —
+     the inferred curve never shows a turn a boat couldn't make, yet stays
+     water-tight. Tangent anchors (`stepBeyond` a short step along the real COG just
+     outside the gap, water-checked) make the exit/entry tangential.
 4. `repairOffLand` — re-splines and, for each output run on land, looks at the
    bracketing control points: **skip if either is itself on our "land"** (a real
    fix our coastline wrongly calls land — trust the boat, don't fight); else if
@@ -130,19 +145,27 @@ snap-to-water net.
   option still route. It only changes cost, never passability, so water-tightness
   is unaffected. The ring search is depth-capped (`maxProxCells` ≤ 8) so it
   doesn't dominate runtime at fine cell sizes.
-- **Narrow-channel penalty** (`narrowWeight` 3): a *quadratic* term on `nearness`
-  (`+ narrowWeight·nearness²`) so cost/km is disproportionately higher in a narrow
-  waterway (land close on both sides → high nearness throughout) than mid-channel
-  in a wide one. Nudges the route onto the main channel (the Fraser) instead of a
-  shortcut up a small tributary. Vanishes in open water (nearness→0), so it's
-  mild — a big-enough real shortcut still wins. Tune up if a vessel still takes a
-  tributary (watch the regression for over-detours).
+- **Narrow-channel penalty** (`narrowWeight`, default 3): a *quadratic* term on
+  `nearness` (`+ narrowWeight·nearness²`) so cost/km is disproportionately higher
+  in a narrow waterway (land close on both sides → high nearness throughout) than
+  mid-channel in a wide one. Nudges the route onto the main channel (the Fraser)
+  instead of a shortcut up a small tributary. Vanishes in open water
+  (nearness→0), so it's mild — a big-enough real shortcut still wins. **Scaled by
+  vessel length** (`NARROW_WEIGHT` config in `config.js`, threaded
+  `computeRuns(opts.vesselLength) → buildControlPoints/repairOffLand → routeWater`):
+  big ships (≥`maxLenM` 120 m → `large` 7) hold the main channel even when slower;
+  small craft (≤`minLenM` 20 m → `small` 0.5) dart through tight Gulf Island passes;
+  linear between; null/unknown length → `default` 3. Tune up if a vessel still
+  takes a tributary (watch the regression for over-detours).
 - **Adaptive cell size** (`cellKm`, 0.2–1 km by gap length) and **margin**
   (`marginKm`, 12–90 km). The 0.2 km floor lets it thread Gulf Island channels
   and harbour mouths now that the coastline is high-resolution.
-- Out of coverage (the coastline data is clipped to `[46.9,-128.8]→[51.3,-121.9]`):
-  `routeWater` returns `null` and the gap is bridged with a straight spline
-  segment — still C¹ since it's just more control points.
+- Out of coverage: `routeWater` returns `null` and the gap is bridged with a
+  straight spline segment (still C¹ — just more control points). The fine OSM clip
+  is `[46.9,-128.8]→[51.3,-121.9]`, but the **coarse continental layer**
+  (`coast_coarse.js`) now extends usable coverage along the whole NA Pacific coast,
+  so Vancouver↔California/Mexico routes bow around the continent instead of bridging
+  straight through it. Truly-uncovered = open Pacific / other oceans.
 
 ### Performance: cached geometry + off-thread routing
 
@@ -170,12 +193,28 @@ server-side precompute (Future work).
 
 ### Coastline data (two layers)
 
-Land avoidance uses **two** generated layers: `coastline.js` (`LAND_POLYGONS`, OSM
-`natural=coastline`, sub-100 m — harbours, breakwaters, Deception Pass, every Gulf
-Island) and `water.js` (`WATER_POLYGONS`, OSM `natural=water`/`riverbank` per fine
-zone — rivers/harbour basins the coastline closes). `pointOnLand = inLand && !inWater`,
-so the water layer re-opens narrow navigable features. See `worker/CLAUDE.md` →
-"Coastline data generation" + "Water layer" for regenerate / expand-coverage steps. (Earlier it was Natural Earth 1:10,000,000 — "10m" = ten
+Land avoidance uses **three** generated layers, all concatenated/threaded in
+`trail_geometry.js`:
+1. `coastline.js` (`LAND_POLYGONS`, OSM `natural=coastline`, sub-100 m — harbours,
+   Deception Pass, every Gulf Island) — the fine Salish Sea region.
+2. `water.js` (`WATER_POLYGONS`, OSM `natural=water`/`riverbank` per fine zone) —
+   subtracted: `pointOnLand = inLand && !inWater`, re-opening rivers/harbour basins
+   the coastline closes (the Fraser fix).
+3. `coast_coarse.js` (`COARSE_LAND_POLYGONS`, Natural Earth 1:50M, lat strips OUTSIDE
+   the fine band) — a tiny coarse NA-west-coast landmass so long open-ocean routes
+   bend around the continent (don't cut through Oregon/California).
+4. **Lazy per-region** `coast/<id>.js` (foreign harbour/river ports) — loaded ON DEMAND.
+
+`region_coast.js` owns the combined geometry: base = layers 1–3 (always present), plus
+any region from `coast/manifest.js` appended by `ensureRegionsForExtent(bbox)` when a
+trail reaches it. `trail_geometry.js` reads it via `getLand()/getWater()` getters (live).
+The routed-compute paths `await ensureRegionsForExtent(extentOf(allPoints))` before
+`computeRuns` — `trail_worker.js` (primary) + the inline fallback in `map_page.js` — so
+a Portland-bound trail loads the `columbia` region first (first paint, `route=false`,
+needs none). All 39 foreign regions are built; lazy so only the viewed vessel's region
+loads. See `worker/CLAUDE.md` →
+"Coastline data generation" / "Water layer" / "Coarse continental layer" / "Lazy
+per-region geometry". (Earlier it was Natural Earth 1:10,000,000 — "10m" = ten
 *million*, the coarsest tier, NOT 10-metre — which dropped sub-km features and
 caused routes to cut unmapped islands and mis-route Deception Pass. If a curve
 crosses land that `pointInAnyLand` reports as water, it's a data-coverage gap,
@@ -185,11 +224,15 @@ not a router bug — see `tests/README.md` §1.)
 
 `tests/trail.test.mjs` runs the real `trail_geometry.js` pipeline over captured
 trails in `tests/fixtures/*.json` (chasing-daylight, buena-ventura, mount-aso,
-twr-8, glovis-star, venturosa, plus the Fraser cases luther + mv-harken-no-7) and
-asserts: no spline point on land (beyond a 150 m graze tolerance, ignoring clips
-that hug a real on/near-land fix) and bounded overshoot from the control polyline
-(catches the old div-by-zero spike, which threw 50–200 km excursions; real sharp
-turns and wide sparse-gap curve-bulges are fine). `KNOWN_DATA_LIMITED` is now empty
+twr-8, glovis-star, venturosa, pacific-grace, plus the Fraser cases luther +
+mv-harken-no-7) and asserts: no spline point on land (beyond a 150 m graze
+tolerance, ignoring clips that hug a real on/near-land fix); bounded overshoot
+from the control polyline (catches the old div-by-zero spike, which threw 50–200
+km excursions; real sharp turns and wide sparse-gap curve-bulges are fine); and
+**no inferred kink** — a spline turn >60° more than 2 km from any real fix (the
+old sparse-string-pull mid-channel dogleg, 68–168° — a turn no boat could make).
+Genuine sharp turns sit AT a real fix (dock wiggle, a lone fix between long gaps)
+or where the channel forces them, and are exempt. `KNOWN_DATA_LIMITED` is now empty
 — glovis-star (upper Fraser) graduated to PASS once the water layer landed. Run:
 `node tests/trail.test.mjs`. See `tests/README.md` for the A* troubleshooting
 techniques and `docs/fraser-river-test-cases.md` for the river coverage criteria.

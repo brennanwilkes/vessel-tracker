@@ -10,29 +10,20 @@
 // See frontend/CLAUDE.md "Trail rendering & land avoidance" for the design and
 // the core "trust the boat" principle.
 import { haversineKm, routeWater, segmentCrossesLand, pointOnLand } from './geo.js';
-import { LAND_POLYGONS } from './coastline.js';
-import { WATER_POLYGONS } from './water.js';
-import { MOVING_SPEED_KN, TRAIL_GAP_SEVER_MS, LAND_AVOIDANCE } from '../config.js';
+import { getLand, getLandBboxes, getWater, getWaterBboxes } from './region_coast.js';
+import { MOVING_SPEED_KN, TRAIL_GAP_SEVER_MS, LAND_AVOIDANCE, ROUTE_SMOOTHING, NARROW_WEIGHT } from '../config.js';
 
-const ringBbox = ring => {
-  let minLat = 90, maxLat = -90, minLon = 180, maxLon = -180;
-  for (const [lat, lon] of ring) {
-    if (lat < minLat) minLat = lat;
-    if (lat > maxLat) maxLat = lat;
-    if (lon < minLon) minLon = lon;
-    if (lon > maxLon) maxLon = lon;
-  }
-  return { minLat, maxLat, minLon, maxLon };
-};
-
-export const POLYGON_BBOXES = LAND_POLYGONS.map(ringBbox);
-export const WATER_BBOXES = WATER_POLYGONS.map(w => ringBbox(w.o));
-
-// Bound land/water helpers — the two-layer land test (coastline minus water rivers/
-// harbours) lives behind these so every call site stays consistent. See geo.js.
-const isLand = (lat, lon) => pointOnLand(lat, lon, LAND_POLYGONS, POLYGON_BBOXES, WATER_POLYGONS, WATER_BBOXES);
-const crossesLand = (a, b, stepKm) => segmentCrossesLand(a, b, LAND_POLYGONS, POLYGON_BBOXES, stepKm, WATER_POLYGONS, WATER_BBOXES);
-const routeAroundLand = (a, b) => routeWater(a, b, LAND_POLYGONS, POLYGON_BBOXES, { waterPolygons: WATER_POLYGONS, waterBboxes: WATER_BBOXES });
+// Geometry (home OSM coast + coarse continental + home water, plus any lazily-loaded
+// foreign regions) is owned by region_coast.js. We read it live via getters so a
+// region appended by `ensureRegionsForExtent` (call it before routing a trail whose
+// extent reaches a foreign port) is picked up here without re-importing.
+//
+// Bound land/water helpers — the layered land test (coastline minus water rivers/
+// harbours, plus the coarse continental fallback) lives behind these so every call
+// site stays consistent. See geo.js.
+const isLand = (lat, lon) => pointOnLand(lat, lon, getLand(), getLandBboxes(), getWater(), getWaterBboxes());
+const crossesLand = (a, b, stepKm) => segmentCrossesLand(a, b, getLand(), getLandBboxes(), stepKm, getWater(), getWaterBboxes());
+const routeAroundLand = (a, b, narrowWeight) => routeWater(a, b, getLand(), getLandBboxes(), { waterPolygons: getWater(), waterBboxes: getWaterBboxes(), narrowWeight });
 
 const SPLINE_SAMPLES = 12;
 
@@ -92,10 +83,64 @@ function denoise(points, passes = 2, factor = 0.2) {
   return cur;
 }
 
+// Turn a raw A*+string-pull water path (sparse and angular — shortest-path has
+// no notion of a vessel's turning radius, so spliced raw it kinks hard where it
+// meets the real track) into a physically-plausible inferred path. Densify to
+// ~uniform spacing, then Laplacian-relax toward the neighbour-midpoint with the
+// endpoints pinned and every moved point land-checked. Corners round out as much
+// as the surrounding water allows and stay sharp ONLY where the channel forces
+// the turn — the inferred curve never shows a turn a boat couldn't make, yet
+// stays water-tight (a move onto land is rejected, the same "trust the water"
+// guard as denoise). Returns [[lat,lon], …] including the pinned endpoints.
+function smoothRoute(wp) {
+  if (wp.length < 3) return wp;
+  let totalKm = 0;
+  for (let i = 1; i < wp.length; i++) totalKm += haversineKm(wp[i - 1][0], wp[i - 1][1], wp[i][0], wp[i][1]);
+  const stepKm = Math.max(ROUTE_SMOOTHING.minStepKm, totalKm / ROUTE_SMOOTHING.targetPoints);
+
+  const dense = [wp[0]];
+  for (let i = 1; i < wp.length; i++) {
+    const [ay, ax] = wp[i - 1], [by, bx] = wp[i];
+    const n = Math.max(1, Math.round(haversineKm(ay, ax, by, bx) / stepKm));
+    for (let k = 1; k <= n; k++) dense.push([ay + (by - ay) * k / n, ax + (bx - ax) * k / n]);
+  }
+  if (dense.length < 3) return dense;
+
+  let cur = dense;
+  const f = ROUTE_SMOOTHING.factor;
+  // A move is accepted only if BOTH polyline segments it touches stay clear of
+  // land (not just the point itself) — relaxing toward the chord erodes the
+  // clearance A* left, so a point-only check would let the curve bulge ashore.
+  const moveClear = (prev, p, next) => !isLand(p[0], p[1])
+    && !crossesLand(prev, p, 0.1) && !crossesLand(p, next, 0.1);
+  for (let pass = 0; pass < ROUTE_SMOOTHING.passes; pass++) {
+    const next = [cur[0]];
+    for (let i = 1; i < cur.length - 1; i++) {
+      const my = cur[i][0] + (((cur[i - 1][0] + cur[i + 1][0]) / 2) - cur[i][0]) * f;
+      const mx = cur[i][1] + (((cur[i - 1][1] + cur[i + 1][1]) / 2) - cur[i][1]) * f;
+      next.push(moveClear(cur[i - 1], [my, mx], cur[i + 1]) ? [my, mx] : cur[i]);
+    }
+    next.push(cur[cur.length - 1]);
+    cur = next;
+  }
+  return cur;
+}
+
+// A point dKm beyond `to`, continuing the heading from→to (equirectangular-local).
+// Used to anchor the inferred path's exit/entry to the real course either side of
+// a gap, so the spline leaves/joins the real track tangentially instead of kinking.
+function stepBeyond(from, to, dKm) {
+  const ky = 111.32, kx = 111.32 * Math.cos(to[0] * Math.PI / 180);
+  let vx = (to[1] - from[1]) * kx, vy = (to[0] - from[0]) * ky;
+  const m = Math.hypot(vx, vy);
+  if (m < 1e-9) return null;
+  return [to[0] + (vy / m) * dKm / ky, to[1] + (vx / m) * dKm / kx];
+}
+
 // Build the spline control points for one journey: denoised real fixes, with
-// water-routed waypoints spliced into every land-crossing gap. Each control
-// point carries its time and whether it's an inferred (synthetic) waypoint.
-export function buildControlPoints(journey, route = true) {
+// smoothed water-routed waypoints spliced into every land-crossing gap. Each
+// control point carries its time and whether it's an inferred (synthetic) waypoint.
+export function buildControlPoints(journey, route = true, narrowWeight) {
   const real = denoise(journey);
   const ctrl = [{ lat: real[0][0], lon: real[0][1], t: journey[0].t, synthetic: false }];
   for (let i = 1; i < real.length; i++) {
@@ -108,8 +153,18 @@ export function buildControlPoints(journey, route = true) {
     // instant first-paint pass (no A*).
     const isGap = (journey[i].t - journey[i - 1].t) > LAND_AVOIDANCE.gapMinMs || haversineKm(a[0], a[1], b[0], b[1]) > LAND_AVOIDANCE.gapMinKm;
     if (route && isGap && crossesLand(a, b)) {
-      const wp = routeAroundLand(a, b);
-      if (wp && wp.length > 2) {
+      const raw = routeAroundLand(a, b, narrowWeight);
+      if (raw && raw.length > 2) {
+        // Anchor the inferred path's exit/entry to the boat's real heading just
+        // outside the gap (a real vessel leaves its course gradually, not in a
+        // kink at the first A* waypoint). The anchor sits a short step beyond the
+        // endpoint along that heading; only kept if it lands in clear water.
+        const dKm = Math.max(0.5, Math.min(3, haversineKm(a[0], a[1], b[0], b[1]) * 0.15));
+        const anchorA = i >= 2 ? stepBeyond(real[i - 2], a, dKm) : null;
+        const anchorB = i + 1 < real.length ? stepBeyond(real[i + 1], b, dKm) : null;
+        if (anchorA && !crossesLand(a, anchorA, 0.1)) raw.splice(1, 0, anchorA);
+        if (anchorB && !crossesLand(b, anchorB, 0.1)) raw.splice(raw.length - 1, 0, anchorB);
+        const wp = smoothRoute(raw);
         const t0 = journey[i - 1].t, t1 = journey[i].t;
         for (let k = 1; k < wp.length - 1; k++) {
           ctrl.push({ lat: wp[k][0], lon: wp[k][1], t: t0 + (t1 - t0) * (k / (wp.length - 1)), synthetic: true });
@@ -210,7 +265,7 @@ function nearestWaterBeyond(lat, lon) {
 // across a clear chord — insert a nearest-water control to pull the curve off.
 // Bounded passes, monotonic (keeps the pass with fewest land samples, never
 // returns worse — repair can diverge in very tight harbours like Victoria's).
-export function repairOffLand(ctrl, maxPasses = 6) {
+export function repairOffLand(ctrl, maxPasses = 6, narrowWeight) {
   const landCount = (c) => {
     const sm = catmullRom(c, SPLINE_SAMPLES);
     let n = 0;
@@ -239,8 +294,9 @@ export function repairOffLand(ctrl, maxPasses = 6) {
       const c0 = ctrl[segA], c1 = ctrl[segB + 1];
       if (isLand(c0.lat, c0.lon) || isLand(c1.lat, c1.lon)) continue;
       if (crossesLand([c0.lat, c0.lon], [c1.lat, c1.lon])) {
-        const wp = routeAroundLand([c0.lat, c0.lon], [c1.lat, c1.lon]);
-        if (wp && wp.length > 2) {
+        const raw = routeAroundLand([c0.lat, c0.lon], [c1.lat, c1.lon], narrowWeight);
+        if (raw && raw.length > 2) {
+          const wp = smoothRoute(raw);
           const inferred = c0.synthetic || c1.synthetic;
           const mids = [];
           for (let k = 1; k < wp.length - 1; k++) {
@@ -290,12 +346,22 @@ export function gapEnrichmentScore(allPoints) {
 // Top-level: chronological points → styled spline runs. route=false skips A*
 // (instant straight bridges) for the first paint; route=true does the full
 // water-routing + repair.
-export function computeRuns(allPoints, route) {
+export function computeRuns(allPoints, route, opts = {}) {
+  // Narrow-channel penalty scales with vessel size: big ships hold the main
+  // channel (Fraser), small craft dart through tight Gulf Island passages.
+  // Linear in length between the configured bounds; null length → default.
+  const len = opts.vesselLength;
+  const NW = NARROW_WEIGHT;
+  const narrowWeight = (len === null || len === undefined) ? NW.default
+    : len <= NW.minLenM ? NW.small
+    : len >= NW.maxLenM ? NW.large
+    : NW.small + (NW.large - NW.small) * (len - NW.minLenM) / (NW.maxLenM - NW.minLenM);
+
   const runs = [];
   for (const journey of splitJourneys(dedup(allPoints))) {
     if (journey.length < 2) continue;
-    let ctrl = buildControlPoints(journey, route);
-    if (route) ctrl = repairOffLand(ctrl);
+    let ctrl = buildControlPoints(journey, route, narrowWeight);
+    if (route) ctrl = repairOffLand(ctrl, undefined, narrowWeight);
     for (const run of runsBySynthetic(catmullRom(ctrl))) {
       if (run.samples.length >= 2) runs.push(run);
     }

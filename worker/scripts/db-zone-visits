@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+show_help() { cat <<'HELP'
+Usage: db-zone-visits <mmsi> [--pretty]
+Named "visited destinations" recorded for one vessel (first/last seen per zone).
+HELP
+}
+
+source "$SCRIPT_DIR/db-common"
+
+MMSI="${1:-}"
+if [[ -z "$MMSI" ]]; then echo "Error: MMSI argument is required" >&2; show_help >&2; exit 1; fi
+shift
+validate_mmsi "$MMSI"
+parse_common_flags "$@"
+
+d1_query "
+SELECT zone_id, first_ts, last_ts, lat, lon
+FROM zone_visits
+WHERE mmsi = $MMSI
+ORDER BY last_ts DESC
+"
