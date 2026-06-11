@@ -563,9 +563,7 @@ export function mount(root) {
   function drawObstructions() {
     const size = map.getSize();
     const homePx = map.latLngToContainerPoint([HOME.lat, HOME.lon]);
-    const refPx = map.latLngToContainerPoint(obstDest(HOME.lat, HOME.lon, 0, OBST_MAX_KM));
-    const outerPx = Math.hypot(refPx.x - homePx.x, refPx.y - homePx.y);
-    const margin = Math.max(size.x, size.y, outerPx) + 100;
+    const margin = Math.max(size.x, size.y);
     const w = margin * 2, h = margin * 2;
     obstCanvas.width = w;
     obstCanvas.height = h;
@@ -576,9 +574,11 @@ export function mount(root) {
     const ctx = obstCanvas.getContext('2d');
     if (!ctx) return;
 
+    const refPx = map.latLngToContainerPoint(obstDest(HOME.lat, HOME.lon, 0, OBST_MAX_KM));
+    const outerPx = Math.min(Math.hypot(refPx.x - homePx.x, refPx.y - homePx.y), margin);
     const dx = homePx.x - margin, dy = homePx.y - margin;
-    const hc = { x: homePx.x - dx, y: homePx.y - dy };
     const toC = (p) => ({ x: p.x - dx, y: p.y - dy });
+    const hc = toC(homePx);
 
     function drawSector(startBrg, endBrg, maxOpacity, fadeAngle) {
       if (fadeAngle > 0) {
