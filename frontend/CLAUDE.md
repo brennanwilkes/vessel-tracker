@@ -146,13 +146,15 @@ re-styling on every redraw (poll / highlight / settings) is cheap (`drawRuns`).
 Without this, every highlight toggle re-ran A* for all vessels — jank.
 
 First paint stays slick: on a cache miss `drawTrail` paints instant straight
-bridges (`computeRuns(allPoints, false)` — no A*) immediately, then dispatches the
-full routed compute to a **Web Worker** (`trail_worker.js`, off the main thread —
-A* is 0.1–2 s/vessel and would freeze the map inline). The Worker posts back
-styled runs; `applyRoutedRuns` caches them and redraws the vessel if still on
-screen. If the Worker can't start (old browser / `file://`), it falls back to a
-main-thread `routeQueue` pumped one vessel per `setTimeout` macrotask. Both are
-keyed/cached identically. **Note:** the Worker path can't run under Node — verify
+bridges (`computeRuns(allPoints, false)` — no A*) immediately, then queues the full
+routed compute for a **Web Worker** (`trail_worker.js`, off the main thread — A*
+is 0.1–2 s/vessel and would freeze the map inline). The Worker posts back styled
+runs; `applyRoutedRuns` caches them and redraws the vessel if still on screen.
+Pending trails are a priority queue (`pendingRoute`) processed one at a time
+**worst-first**: `gapEnrichmentScore` (cheap — land-crossing gap km, no A*) ranks
+them so the most-wrong trails get their real curves first. If the Worker can't
+start (old browser / `file://`), the same queue runs inline via `setTimeout`
+(brief jank, no freeze). **Note:** the Worker path can't run under Node — verify
 it in a real browser. Per-vessel A* is still ~0.1–2 s, so cold loads with many
 gapped vessels stream in over a few seconds (see Future work for the durable fix).
 
@@ -194,11 +196,12 @@ gracefully until they land.
    missing-river "land"). Fix: fetch the water layer **per fine-zone** (the
    combined query truncates), ship `WATER_POLYGONS`, make `pointOnLand = inLand &&
    !inWater`. See `worker/CLAUDE.md` → "Rivers & harbours OSM tags".
-2. **Server-side precompute cron.** Move A* off the client entirely: a GitHub
-   Actions cron (NOT a CF Worker — CPU-capped) reuses `trail_geometry.js`,
-   precomputes inferred waypoints **only for land-crossing gaps**, stores the
-   **sparse** waypoints in `inferred_positions` (hash-deduped, write-once,
-   `generator_version`), served unioned with real points (flagged → dashed). Fixes
-   the cold-load cost and the reload-recompute. See `worker/CLAUDE.md` → "Planned:
-   server-side inferred-positions precompute" for the full design incl. the D1
-   write-budget rules.
+2. **Server-side precompute cron — DEFERRED until the dataset is stable.** Moving
+   A* to a GH-Actions cron (NOT a CF Worker — CPU-capped) storing sparse inferred
+   waypoints in `inferred_positions` would fix cold-load + reload-recompute. But
+   precomputed points are derived from the coastline, so while we're still
+   expanding the dataset (item 1, more fine zones) every change would invalidate
+   them — build it only once the data is stable. Interim: the Web Worker +
+   worst-first ordering keep it usable. Full design (incl. D1 write-budget rules,
+   `generator_version` for regeneration) in `worker/CLAUDE.md` → "Planned
+   (DEFERRED …): server-side inferred-positions precompute".

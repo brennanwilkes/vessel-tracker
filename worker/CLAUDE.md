@@ -129,8 +129,16 @@ needed), ship as `WATER_POLYGONS`, and make `pointOnLand = inLand && !inWater`
 in `geo.js`. Until then such upper-river transits degrade gracefully (the real
 track is drawn through the missing-river "land" — see frontend trust-the-boat).
 
-### Planned: server-side inferred-positions precompute
-To get the client A* off the main thread entirely (it's the load lag), precompute
+### Planned (DEFERRED until the coastline dataset is stable): server-side inferred-positions precompute
+**Do NOT build this yet.** Precomputed inferred points are derived from the
+coastline; while we're still expanding the dataset (water layer, more fine zones),
+every dataset change would invalidate and churn the stored points. The client Web
+Worker (`trail_worker.js`) handles the load cost acceptably for now. Build this
+once the coastline is stable — `generator_version` (below) then handles the rarer
+intentional regenerations. Worst-first client ordering (`gapEnrichmentScore`)
+already makes the most-wrong trails self-correct first in the meantime.
+
+When we do build it — to get the client A* off the main thread entirely — precompute
 the inferred waypoints **off the client** and serve them as data. Design notes:
 - **Run in a GitHub Actions cron, NOT a CF Worker** — free Workers are CPU-capped
   (~10 ms); our A* is 0.1–2 s. The Action runs Node and **reuses the geometry

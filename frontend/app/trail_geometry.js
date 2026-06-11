@@ -262,6 +262,22 @@ export function repairOffLand(ctrl, maxPasses = 6) {
   return best;
 }
 
+// Cheap estimate of how much a trail needs routed enrichment: total km of
+// land-crossing data gaps (coarse-sampled — gaps only, not the whole track).
+// Used to enrich the "worst" ships first. No A*, no spline — fast.
+export function gapEnrichmentScore(allPoints) {
+  let score = 0;
+  for (const journey of splitJourneys(dedup(allPoints))) {
+    for (let i = 1; i < journey.length; i++) {
+      const a = journey[i - 1], b = journey[i];
+      const gapKm = haversineKm(a.lat, a.lon, b.lat, b.lon);
+      if ((b.t - a.t) <= LAND_AVOIDANCE.gapMinMs && gapKm <= LAND_AVOIDANCE.gapMinKm) continue;
+      if (segmentCrossesLand([a.lat, a.lon], [b.lat, b.lon], LAND_POLYGONS, POLYGON_BBOXES, 5)) score += gapKm;
+    }
+  }
+  return score;
+}
+
 // Top-level: chronological points → styled spline runs. route=false skips A*
 // (instant straight bridges) for the first paint; route=true does the full
 // water-routing + repair.

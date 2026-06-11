@@ -5,7 +5,7 @@ import { haversineNm, bearingDeg } from './geo.js';
 import { vesselColor, vesselCategoryLabel, vesselFlag } from './vessels.js';
 import { getTrail, pruneTrails } from './trails.js';
 import { subscribe as subscribeHighlight, getHighlight, setHighlight, clearHighlight } from './highlight_store.js';
-import { computeRuns } from './trail_geometry.js';
+import { computeRuns, gapEnrichmentScore } from './trail_geometry.js';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -250,13 +250,17 @@ function drawRuns(vessel, runs, bounds) {
 }
 
 // The expensive routed geometry (A* + repair) runs OFF the main thread in a Web
-// Worker so the map never freezes while curves compute. First paint is instant
-// (straight bridges, computed inline), then routed curves stream back in and
-// replace them boat-by-boat. If the Worker can't start (old browser, file://),
-// we fall back to a main-thread macrotask queue (one vessel per tick) so trails
-// still fill in, just with brief jank.
+// Worker so the map never freezes. First paint is instant straight bridges
+// (inline); routed curves stream back and replace them. Pending trails form a
+// priority queue processed one at a time, WORST-FIRST — the ships whose straight
+// bridges cross the most land (gapEnrichmentScore) get their real curves first,
+// so the most-wrong trails self-correct soonest. If the Worker can't start (old
+// browser / file://), the same queue runs inline via setTimeout (brief jank, no
+// freeze).
+let pendingRoute = new Map(); // mmsi → { allPoints, sig, bounds, score } (latest wins)
+let routeInFlight = false;
 
-// Cache the worker result and redraw the vessel if its trail is still on screen.
+// Cache a routed result and redraw the vessel if its trail is still on screen.
 function applyRoutedRuns(mmsi, sig, bounds, runs) {
   trailGeom.set(mmsi, { sig, runs });
   const live = lastVessels.find(v => v.mmsi === mmsi);
@@ -268,43 +272,42 @@ function startTrailWorker() {
     const w = new Worker(new URL('./trail_worker.js', import.meta.url), { type: 'module' });
     w.onmessage = (e) => {
       const { mmsi, sig, bounds, runs } = e.data;
-      if (!runs) return; // error → keep the instant straight-bridge fallback
-      const cached = trailGeom.get(mmsi);
-      if (cached === undefined || cached.sig !== sig) applyRoutedRuns(mmsi, sig, bounds, runs);
+      if (runs) {
+        const cached = trailGeom.get(mmsi);
+        if (cached === undefined || cached.sig !== sig) applyRoutedRuns(mmsi, sig, bounds, runs);
+      }
+      routeInFlight = false;
+      pumpRoute();
     };
-    w.onerror = () => { trailWorker = null; }; // fall back to main thread
+    w.onerror = () => { trailWorker = null; routeInFlight = false; pumpRoute(); };
     return w;
   } catch {
     return null;
   }
 }
 
-// Main-thread fallback queue (only used when the Worker is unavailable).
-let routeQueue = [];
-let pumping = false;
-
-function pumpRouteQueue() {
-  if (pumping) return;
-  pumping = true;
-  const step = () => {
-    const job = routeQueue.shift();
-    if (job === undefined || map === null) { pumping = false; return; }
-    const { mmsi, allPoints, sig, bounds } = job;
-    const existing = trailGeom.get(mmsi);
-    if (existing === undefined || existing.sig !== sig) applyRoutedRuns(mmsi, sig, bounds, computeRuns(allPoints, true));
-    setTimeout(step, 0);
-  };
-  setTimeout(step, 0);
+function requestRoutedRuns(mmsi, allPoints, sig, bounds) {
+  pendingRoute.set(mmsi, { allPoints, sig, bounds, score: gapEnrichmentScore(allPoints) });
+  pumpRoute();
 }
 
-// Dispatch the routed compute for a trail: Worker if available, else queue it.
-function requestRoutedRuns(mmsi, allPoints, sig, bounds) {
+function pumpRoute() {
+  if (routeInFlight || map === null || pendingRoute.size === 0) return;
+  // Pick the worst (highest enrichment score) pending trail.
+  let pickMmsi = null, pickJob = null, best = -Infinity;
+  for (const [mmsi, job] of pendingRoute) if (job.score > best) { best = job.score; pickMmsi = mmsi; pickJob = job; }
+  pendingRoute.delete(pickMmsi);
+  const cached = trailGeom.get(pickMmsi);
+  if (cached !== undefined && cached.sig === pickJob.sig) { pumpRoute(); return; } // already routed
+  routeInFlight = true;
   if (trailWorker !== null) {
-    trailWorker.postMessage({ mmsi, allPoints, sig, bounds });
+    trailWorker.postMessage({ mmsi: pickMmsi, allPoints: pickJob.allPoints, sig: pickJob.sig, bounds: pickJob.bounds });
   } else {
-    routeQueue = routeQueue.filter(j => j.mmsi !== mmsi);
-    routeQueue.push({ mmsi, allPoints, sig, bounds });
-    pumpRouteQueue();
+    setTimeout(() => {
+      applyRoutedRuns(pickMmsi, pickJob.sig, pickJob.bounds, computeRuns(pickJob.allPoints, true));
+      routeInFlight = false;
+      pumpRoute();
+    }, 0);
   }
 }
 
@@ -374,7 +377,7 @@ async function scheduleTrails(visibleVessels, token) {
   for (const mmsi of trailGeom.keys()) {
     if (!liveSet.has(mmsi)) trailGeom.delete(mmsi);
   }
-  routeQueue = routeQueue.filter(j => liveSet.has(j.mmsi));
+  for (const mmsi of pendingRoute.keys()) if (!liveSet.has(mmsi)) pendingRoute.delete(mmsi);
 
   const TRAIL_TIERS = ['direct', 'local'];
 
@@ -545,7 +548,8 @@ export function unmount() {
   }
   trailLayers.clear();
   trailGeom.clear();
-  routeQueue = [];
+  pendingRoute.clear();
+  routeInFlight = false;
   if (trailWorker !== null) { trailWorker.terminate(); trailWorker = null; }
   trailReqToken++;
   container = null;
