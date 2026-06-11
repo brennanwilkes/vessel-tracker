@@ -70,10 +70,12 @@ function buildHTML() {
       <div class="settings-header">Settings</div>
 
       <div class="settings-card">
-        <div class="settings-card-title">Distance Unit</div>
-        <div class="unit-selector">
-          <button class="unit-option${unitNm ? ' active' : ''}" data-unit="nm">NM</button>
-          <button class="unit-option${unitNm ? '' : ' active'}" data-unit="km">KM</button>
+        <div class="settings-card-row">
+          <div class="settings-card-title">Distance Unit</div>
+          <div class="unit-selector">
+            <button class="unit-option${unitNm ? ' active' : ''}" data-unit="nm">NM</button>
+            <button class="unit-option${unitNm ? '' : ' active'}" data-unit="km">KM</button>
+          </div>
         </div>
       </div>
 

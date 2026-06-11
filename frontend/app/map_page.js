@@ -28,6 +28,7 @@ let container = null;
 let statusEl = null;
 let resetBtn = null;
 let highlightedMmsi = null;
+let keydownHandler = null;
 let lastVessels = [];
 let lastSettings = getSettings();
 let trailReqToken = 0;
@@ -502,6 +503,14 @@ export function mount(root) {
 
   container.querySelector('.detail-backdrop').addEventListener('click', closeSheet);
 
+  keydownHandler = e => {
+    if (e.key === 'Escape' && highlightedMmsi !== null) {
+      clearHighlight();
+      closeSheet();
+    }
+  };
+  document.addEventListener('keydown', keydownHandler);
+
   map = L.map('leaflet-map', { zoomControl: true, attributionControl: true, preferCanvas: true })
     .setView([HOME.lat, HOME.lon], 11);
 
@@ -545,6 +554,7 @@ export function unmount() {
   if (unsubscribeVessels !== null) { unsubscribeVessels(); unsubscribeVessels = null; }
   if (unsubscribeSettings !== null) { unsubscribeSettings(); unsubscribeSettings = null; }
   if (unsubscribeHighlight !== null) { unsubscribeHighlight(); unsubscribeHighlight = null; }
+  if (keydownHandler !== null) { document.removeEventListener('keydown', keydownHandler); keydownHandler = null; }
   if (map !== null) { map.remove(); map = null; }
   markers.clear();
   for (const layers of trailLayers.values()) {
