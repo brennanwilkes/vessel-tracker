@@ -569,9 +569,9 @@ export function mount(root) {
     const ctx = obstCanvas.getContext('2d');
     if (!ctx) return;
 
-    const homePx = map.latLngToContainerPoint([HOME.lat, HOME.lon]);
-    const mPerPx = 156543.03392 * Math.cos(HOME.lat * Math.PI / 180) / Math.pow(2, map.getZoom());
-    const outerPx = (OBST_MAX_KM * 1000) / mPerPx;
+    const homePx = map.latLngToLayerPoint([HOME.lat, HOME.lon]);
+    const refPx = map.latLngToLayerPoint(obstDest(HOME.lat, HOME.lon, 0, OBST_MAX_KM));
+    const outerPx = Math.hypot(refPx.x - homePx.x, refPx.y - homePx.y);
 
     function drawSector(startBrg, endBrg, maxOpacity, fadeAngle) {
       if (fadeAngle > 0) {
@@ -585,8 +585,8 @@ export function mount(root) {
           const grad = ctx.createRadialGradient(homePx.x, homePx.y, 0, homePx.x, homePx.y, outerPx);
           grad.addColorStop(0, `rgba(0,0,0,${(maxOpacity * fadeMul).toFixed(3)})`);
           grad.addColorStop(1, 'rgba(0,0,0,0)');
-          const p1 = map.latLngToContainerPoint(obstDest(HOME.lat, HOME.lon, a, OBST_MAX_KM));
-          const p2 = map.latLngToContainerPoint(obstDest(HOME.lat, HOME.lon, b, OBST_MAX_KM));
+          const p1 = map.latLngToLayerPoint(obstDest(HOME.lat, HOME.lon, a, OBST_MAX_KM));
+          const p2 = map.latLngToLayerPoint(obstDest(HOME.lat, HOME.lon, b, OBST_MAX_KM));
           ctx.beginPath();
           ctx.moveTo(homePx.x, homePx.y);
           ctx.lineTo(p1.x, p1.y);
@@ -599,8 +599,8 @@ export function mount(root) {
         const grad = ctx.createRadialGradient(homePx.x, homePx.y, 0, homePx.x, homePx.y, outerPx);
         grad.addColorStop(0, `rgba(0,0,0,${maxOpacity.toFixed(3)})`);
         grad.addColorStop(1, 'rgba(0,0,0,0)');
-        const p1 = map.latLngToContainerPoint(obstDest(HOME.lat, HOME.lon, startBrg, OBST_MAX_KM));
-        const p2 = map.latLngToContainerPoint(obstDest(HOME.lat, HOME.lon, endBrg, OBST_MAX_KM));
+        const p1 = map.latLngToLayerPoint(obstDest(HOME.lat, HOME.lon, startBrg, OBST_MAX_KM));
+        const p2 = map.latLngToLayerPoint(obstDest(HOME.lat, HOME.lon, endBrg, OBST_MAX_KM));
         ctx.beginPath();
         ctx.moveTo(homePx.x, homePx.y);
         ctx.lineTo(p1.x, p1.y);
