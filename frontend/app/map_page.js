@@ -579,9 +579,18 @@ export function mount(root) {
     drawSector(183.26, 204.86);
   }
 
-  // The CSS transform on mapPane carries the canvas along during pan and zoom
-  // animations for free — no per-frame redraws needed. Only redraw after the
-  // map settles (pane position / pixelOrigin are stable at these points).
+  // Leaflet only CSS-scales tilePane during zoom animation — overlayPane does
+  // NOT scale automatically. Apply a matching CSS transform on every zoomanim
+  // frame so our canvas stays in sync with the tiles (same pattern as L.Renderer).
+  // Formula: scale around the animation's target center, corrected for any
+  // current mapPane CSS translate offset.
+  map.on('zoomanim', e => {
+    const scale       = map.getZoomScale(e.zoom);
+    const centerPx    = map.latLngToContainerPoint(e.center).subtract(map.getSize().divideBy(2));
+    const mapPanePos  = L.DomUtil.getPosition(map.getPanes().mapPane) || L.point(0, 0);
+    L.DomUtil.setTransform(obstCanvas, centerPx.multiplyBy(-scale).subtract(mapPanePos), scale);
+  });
+  // After zoom/pan settles, reset the animated transform and redraw at correct coords.
   map.on('moveend', drawObstructions);
   map.on('zoomend', drawObstructions);
   map.on('resize',  drawObstructions);
