@@ -503,9 +503,11 @@ export function mount(root) {
   const OBST_MAX_OPACITY = 0.55;
   const OBST_FADE_STRIPS = 60;
 
-  const obstCanvas = L.DomUtil.create('canvas', '');
-  obstCanvas.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none';
-  map.getPanes().overlayPane.appendChild(obstCanvas);
+  const obstCanvas = document.createElement('canvas');
+  // Attached to the map container directly (not a pane) so Leaflet's pane CSS
+  // transforms don't offset canvas coords relative to latLngToContainerPoint.
+  obstCanvas.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none;z-index:400';
+  map.getContainer().appendChild(obstCanvas);
 
   function drawObstructions() {
     const size = map.getSize();
