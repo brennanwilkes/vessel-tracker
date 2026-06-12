@@ -129,6 +129,10 @@ const NEIGHBORS = [[-1,0],[1,0],[0,-1],[0,1],[-1,-1],[-1,1],[1,-1],[1,1]];
 export function routeWater(a, b, polygons, bboxes, opts = {}) {
   const waterPolygons = opts.waterPolygons;
   const waterBboxes = opts.waterBboxes;
+  // Region-aware land test (region_coast.isLand): fine regions override the coarse layer
+  // within their bbox, so shipping waterways coarse would close stay open. Falls back to
+  // the flat polygon test when not supplied.
+  const isLandAt = opts.isLand || ((la, lo) => pointOnLand(la, lo, polygons, bboxes, waterPolygons, waterBboxes));
   const directKm = haversineKm(a[0], a[1], b[0], b[1]);
   // Fine enough to thread Gulf Island channels and harbour mouths (~150 m floor) while
   // staying coarse on long offshore detours. Very long continental gaps (Vancouver↔
@@ -156,7 +160,7 @@ export function routeWater(a, b, polygons, bboxes, opts = {}) {
   const cellIsLand = (r, c) => {
     const k = r * cols + c;
     let v = landMemo[k];
-    if (v === -1) { v = pointOnLand(cellLat(r), cellLon(c), polygons, bboxes, waterPolygons, waterBboxes) ? 1 : 0; landMemo[k] = v; }
+    if (v === -1) { v = isLandAt(cellLat(r), cellLon(c)) ? 1 : 0; landMemo[k] = v; }
     return v === 1;
   };
 
@@ -193,6 +197,20 @@ export function routeWater(a, b, polygons, bboxes, opts = {}) {
   // cells offshore, so the term vanishes). Mild by design — a big-enough real
   // shortcut still wins; it won't detour absurdly.
   const narrowWeight = opts.narrowWeight ?? 3;
+  // Heading bias (trust the boat): near the endpoints we KNOW the vessel's real
+  // course — the COG into the start (`entryBearing`) and out of the goal
+  // (`exitBearing`). Without this the proximity cost can make A* leave the start
+  // by REVERSING the boat's heading (backtracking to skirt a narrow exit), which
+  // renders as an ugly ~150° kink right where the real track hands off to the
+  // inferred path. Penalize early moves that oppose the entry heading (and late
+  // moves that oppose the exit heading), decaying to 0 over `headingKm` so the
+  // route leaves/arrives along the real course and only the open-water middle is
+  // shaped by proximity. Soft cost — land still wins (it changes cost, not
+  // passability). Bearings optional (omit at journey ends → no bias).
+  const entryBearing = opts.entryBearing;
+  const exitBearing = opts.exitBearing;
+  const headingWeight = opts.headingWeight ?? 5;
+  const headingKm = opts.headingKm ?? 4;
   // Cap the ring-search depth: at a fine cell size proximityKm/cellKm would be
   // huge and the per-cell ring search O(d^2) would dominate runtime.
   const maxProxCells = Math.min(8, Math.max(1, Math.round(proximityKm / cellKm)));
@@ -271,7 +289,19 @@ export function routeWater(a, b, polygons, bboxes, opts = {}) {
         if (closed[n] || (n !== goalN && !passable(nr, nc))) continue;
         const step = haversineKm(cellLat(r), cellLon(c), cellLat(nr), cellLon(nc));
         const nn = nearness(nr, nc);
-        const tentative = gScore[node] + step * (1 + proximityWeight * nn + narrowWeight * nn * nn);
+        let bias = 0;
+        if (entryBearing !== undefined || exitBearing !== undefined) {
+          const eb = bearingDeg(cellLat(r), cellLon(c), cellLat(nr), cellLon(nc));
+          if (entryBearing !== undefined) {
+            const dStart = haversineKm(cellLat(r), cellLon(c), a[0], a[1]);
+            if (dStart < headingKm) bias += headingWeight * Math.max(0, -Math.cos((eb - entryBearing) * Math.PI / 180)) * (1 - dStart / headingKm);
+          }
+          if (exitBearing !== undefined) {
+            const dGoal = haversineKm(cellLat(r), cellLon(c), b[0], b[1]);
+            if (dGoal < headingKm) bias += headingWeight * Math.max(0, -Math.cos((eb - exitBearing) * Math.PI / 180)) * (1 - dGoal / headingKm);
+          }
+        }
+        const tentative = gScore[node] + step * (1 + proximityWeight * nn + narrowWeight * nn * nn + bias);
         if (tentative < gScore[n]) { gScore[n] = tentative; parent[n] = node; heap.push(n, tentative + hCost(nr, nc)); }
       }
     }
@@ -287,7 +317,7 @@ export function routeWater(a, b, polygons, bboxes, opts = {}) {
   // sight (same inflation as the successful search).
   const losStep = Math.min(0.3, cellKm * 0.5);
   const sampleBlocked = (lat, lon) => {
-    if (pointOnLand(lat, lon, polygons, bboxes, waterPolygons, waterBboxes)) return true;
+    if (isLandAt(lat, lon)) return true;
     if (!inflated) return false;
     const r = Math.round((lat - minLat) / latCell), c = Math.round((lon - minLon) / lonCell);
     return r >= 0 && r < rows && c >= 0 && c < cols && blocked(r, c);

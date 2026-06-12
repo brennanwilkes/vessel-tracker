@@ -67,3 +67,41 @@ export const GLOBAL_DRAIN_MS  = 30_000;
 export const GLOBAL_MMSI_CHUNK_SIZE = 75;
 export const GLOBAL_SCAN_ATTEMPTS   = 3;
 export const GLOBAL_SCAN_BUDGET_MS  = 14 * 60 * 1000;
+
+// ── Rotating foreign scan ────────────────────────────────────────────────────
+// The worldwide global scan above rarely hears its MMSI-filtered targets (a 30 s
+// window over the whole planet seldom catches a specific vessel mid-broadcast). The
+// foreign scan instead drains a rotating SLICE of distant port boxes (zones.ts, no
+// MMSI filter) — dense, so it reliably hears everything there. It functions like the
+// local scan (skip confirmed-small new vessels, create an initial row for unknown
+// types so a later ping can enrich+classify them) but adds two data-frugality
+// conditionals so a busy world port can't blow the free-tier write cap:
+//   1. RELEVANCE gate — only a large, plausibly-inbound vessel becomes of-interest
+//      (a ≥150 m ship anywhere on the Pacific rim, or ≥100 m bound for a NA-Pacific-NW
+//      port per its AIS destination). Already-of-interest vessels always qualify.
+//   2. LOW RESOLUTION — a relevant vessel gets one zone_visit (saturating/throttled)
+//      and a single anchor position on first entry to a port, NOT a position track.
+//      Full-resolution tracking only begins if it actually reaches the home box.
+// Cron is FOREIGN_SCAN_CRON (also add it to wrangler.toml [triggers]).
+export const FOREIGN_SCAN_CRON      = '*/15 * * * *';
+export const FOREIGN_DRAIN_MS       = 60_000;
+export const FOREIGN_SCAN_BOX_BATCH = 6;                      // boxes per connection (aisstream cap unknown → conservative)
+export const FOREIGN_REFRESH_MS     = 6 * 60 * 60 * 1000;     // re-upsert a parked foreign vessel at most this often
+export const FOREIGN_MAX_NEW_PER_SCAN = 200;                  // cap initial rows/scan so a first run can't exhaust the write cap
+export const FOREIGN_RELEVANCE = {
+  bigLenM: 150,   // any ≥150 m vessel at a Pacific-rim port is plausibly trans-Pacific → track
+  midLenM: 100,   // 100–150 m only when its destination is a NA-Pacific-NW port
+  // AIS destination tokens (UPPERCASE substrings) for ports in/inbound to the viewshed.
+  // Free-text + UN/LOCODE; deliberately PNW-weighted. Tune after measuring real writes.
+  destPatterns: [
+    'VANCOUVER', 'CAVAN', 'PRINCE RUPERT', 'CAPRR', 'VICTORIA', 'CAVIC', 'NANAIMO', 'CANAN',
+    'SEATTLE', 'USSEA', 'TACOMA', 'USTIW', 'EVERETT', 'USEVR', 'BELLINGHAM', 'ANACORTES',
+    'PORTLAND', 'USPDX', 'CHERRY POINT', 'PUGET', 'SALISH',
+  ],
+};
+
+// Trail precompute runs as a GitHub Actions cron. The global scan triggers it on
+// completion (most new land-crossing gaps appear after the hourly global data
+// lands) via workflow_dispatch; the workflow also keeps its own hourly fallback.
+export const GITHUB_REPO = 'brennanwilkes/vessel-tracker';
+export const PRECOMPUTE_WORKFLOW_FILE = 'precompute-trails.yml';

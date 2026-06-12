@@ -2,6 +2,9 @@ export interface Env {
   VESSELS_DB: D1Database;
   AISSTREAM_API_KEY: string;
   ALLOWED_ORIGIN: string;
+  // Optional: fire the trail-precompute GitHub Action right after the global
+  // scan (when most new gaps appear). Absent in local dev → trigger skipped.
+  GITHUB_DISPATCH_TOKEN?: string;
 }
 
 export type Tier = 'direct' | 'local' | 'global';
@@ -57,4 +60,13 @@ export interface PositionRow {
   heading: number | null;
   ts: number;
   tier: Tier;
+}
+
+// A precomputed inferred (A*-routed) waypoint, served unioned with real positions.
+export interface InferredRow {
+  lat: number;
+  lon: number;
+  t: number;
+  tier: Tier;
+  dashed: number;
 }

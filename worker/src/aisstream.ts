@@ -5,8 +5,12 @@ export type BoundingBox = [[number, number], [number, number]];
 
 export interface DrainOptions {
   apiKey: string;
-  boundingBox: BoundingBox;
-  /** Restrict to specific MMSIs. Omit to receive all vessels in the bounding box. */
+  /** Single bounding box. Ignored if `boundingBoxes` is given. */
+  boundingBox?: BoundingBox;
+  /** Multiple bounding boxes in ONE subscription (aisstream `BoundingBoxes` is an array).
+   *  Used by the rotating foreign scan to drain several distant port boxes per connection. */
+  boundingBoxes?: BoundingBox[];
+  /** Restrict to specific MMSIs. Omit to receive all vessels in the bounding box(es). */
   mmsis?: number[];
   /** Wall-clock time to collect messages before closing (ms). */
   drainMs: number;
@@ -28,7 +32,9 @@ export async function drainAisStream(opts: DrainOptions): Promise<DrainResult> {
   let nPosition = 0;
   let nStatic = 0;
 
-  console.log(`[aisstream] connecting — box ${JSON.stringify(opts.boundingBox)}, drain ${opts.drainMs}ms, mmsis: ${opts.mmsis?.length ?? 'all'}`);
+  const boxes = opts.boundingBoxes ?? (opts.boundingBox ? [opts.boundingBox] : []);
+  if (boxes.length === 0) throw new Error('drainAisStream: no bounding box(es) given');
+  console.log(`[aisstream] connecting — ${boxes.length} box(es), drain ${opts.drainMs}ms, mmsis: ${opts.mmsis?.length ?? 'all'}`);
 
   await new Promise<void>((resolve, reject) => {
     const ws = new WebSocket('wss://stream.aisstream.io/v0/stream');
@@ -40,7 +46,7 @@ export async function drainAisStream(opts: DrainOptions): Promise<DrainResult> {
       console.log('[aisstream] connected, subscribing');
       const frame: Record<string, unknown> = {
         APIKey: opts.apiKey,
-        BoundingBoxes: [opts.boundingBox],
+        BoundingBoxes: boxes,
         FilterMessageTypes: ['PositionReport', 'ShipStaticData'],
       };
       if (opts.mmsis && opts.mmsis.length > 0) {

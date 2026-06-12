@@ -4,11 +4,12 @@ Cloudflare Worker (TypeScript). Two handlers: `fetch` (HTTP API) and `scheduled`
 
 ## Cron model
 
-Three cron schedules in `wrangler.toml [triggers]`, all handled in `scheduled` (branch on `event.cron`):
+Four cron schedules in `wrangler.toml [triggers]`, all handled in `scheduled` (branch on `event.cron`):
 
 - `* * * * *` — direct scan every 1 min: drain DIRECT box (apartment view, ≤45s), write every vessel as of_interest=1.
 - `*/5 * * * *` — local scan every 5 min: drain LOCAL box (~90s), write only large vessels (≥50m / cargo / tanker) or already-of-interest vessels.
 - `0 * * * *` — global scan hourly: drain global box filtered to of-interest MMSIs in retrying batches, with stale vessels prioritized first, widen max_extent.
+- `*/15 * * * *` (`FOREIGN_SCAN_CRON`) — rotating **foreign scan**: drain a rotating SLICE of distant port boxes (`zones.ts` foreign zones, ~6/tick via the aisstream `BoundingBoxes` array, NO MMSI filter) and pre-seed large, plausibly-inbound vessels. The worldwide global scan above rarely hears its targets (a 30 s window over the planet seldom catches a specific MMSI); a dense port box hears everything there. **Write-frugal** (free-tier): functions like the local scan (skip confirmed-small new, keep an initial row for unknown types to enrich+reclassify later) but ingests only a relevant vessel (≥150 m anywhere on the Pacific rim, or ≥100 m bound for a NA-Pacific-NW port per AIS destination, or already-of-interest) as of-interest='global' + a `zone_visit` + **one anchor position on first entry to a port — NOT a track**. Full-resolution tracking begins only if the vessel reaches the home box (`first_direct_at` stays null → not on `/current` until then). Config + the relevance gate are in `constants.ts` "Rotating foreign scan" (`FOREIGN_*`); cursor persists in `scan_meta`. The `BoundingBoxes` cap is unprobed → `FOREIGN_SCAN_BOX_BATCH` is conservative; per-port heard counts are logged so the write rate can be projected and the gate narrowed.
 
 **Why cron not Durable Objects:** Durable Objects require the paid Workers plan. Scheduled Workers are free-tier and sufficient. See `docs/decisions.md`.
 
@@ -17,10 +18,11 @@ Three cron schedules in `wrangler.toml [triggers]`, all handled in `scheduled` (
 ```
 src/
   index.ts       — exports fetch + scheduled handlers, routes only
-  ingest.ts      — three scan functions: runDirectScan, runLocalScan, runGlobalScan
-  aisstream.ts   — promise-based AIS stream client (all WS wiring hidden here)
+  ingest.ts      — four scan functions: runDirectScan, runLocalScan, runGlobalScan, runForeignScan
+  aisstream.ts   — promise-based AIS stream client (single box OR multi-box `boundingBoxes`)
   ais.ts         — pure AIS parsing + vessel-type codes + pointInBox + isLargeVessel
-  storage.ts     — D1-only: loadVesselStates, commitScan, getCurrentVessels, getTrack
+  storage.ts     — D1-only: loadVesselStates, commitScan, getCurrentVessels, getTrack;
+                   foreign-scan helpers loadForeignStates / loadZoneVisitKeys / get|setScanCursor
   cors.ts        — CORS headers (reads ALLOWED_ORIGIN from env)
   http.ts        — json() / errorJson() response helpers
   types.ts       — Env (no KV), Vessel, VesselRow, PositionRow, Tier, MaxExtent
@@ -89,9 +91,10 @@ of-interest vessels heard worldwide by the global scan get foreign attribution f
 too. `commitZoneVisits` (`storage.ts`) is **saturating**: one row per `(mmsi, zone_id)`
 — first sighting inserts, later sightings only bump `last_ts` once past
 `ZONE_VISIT_THROTTLE_MS` (30 min), so a parked ship doesn't re-write every scan. Never
-deleted; bounded by the vessel×zone matrix. Distant ports we don't otherwise stream
-need the (not-yet-built) rotating foreign scan — see the plan; that's the only part
-gated on the aisstream multi-box cap + a 4th cron.
+deleted; bounded by the vessel×zone matrix. **Distant ports are now covered by the
+rotating foreign scan** (see Cron model → foreign scan): it drains the foreign `zones.ts`
+boxes directly, so a vessel at Tokyo/Shanghai/Hawaii gets its foreign zone attributed even
+though the worldwide global scan almost never hears it.
 
 ## Adding a migration
 
@@ -183,30 +186,52 @@ Validated by `docs/fraser-river-test-cases.md` (all 15 river coords → `pointIn
 water later if size matters as more zones are added).
 
 ### Coarse continental layer (`frontend/app/coast_coarse.js`) — anti-cut-through
-A third land layer: a very low-res NA Pacific landmass so long open-ocean inferred
-routes (Vancouver↔California/Mexico, or up to Alaska) bow around the continent instead
-of cutting through Oregon / N. California / Baja. **Natural Earth 1:50M** (coarse is
-correct here — opposite of the local need), clipped to lat strips that EXCLUDE the fine
-OSM band [46.9, 51.3] N so it tiles with `coastline.js` and never coarsens the Salish
-Sea channels. `trail_geometry.js` (+ `tests/lib.mjs`) concatenate it into the land array
-(`LAND = LAND_POLYGONS.concat(COARSE_LAND_POLYGONS)`) — no `geo.js` change, since the
-strips don't overlap the fine region. `routeWater` raises `cellKm` to ~5 km for >300 km
-gaps so the continental A* grid stays tractable. The trail test allows a larger
-penetration tolerance for clips on coarse polygons (index ≥ fine count) — coarse data,
-coarse precision. Regenerate (run from `worker/`):
+A third land layer: a low-res landmass of the **WHOLE WORLD** so long open-ocean inferred
+routes bow around continents instead of cutting through them — both NA-Pacific
+(Vancouver↔California/Mexico/Alaska) and now foreign/trans-Pacific (Asia, Oceania;
+e.g. a route that would slice across Taiwan now goes around). **Natural Earth 1:50M**
+(coarse is correct here — opposite of the local need). The build (`build-coarse-coast.mjs`)
+tiles the world (Antarctica/high-Arctic dropped) into **disjoint** rects that carve out
+the fine OSM **home bbox** [46.9,-128.8]→[51.3,-121.9] so coarse never coarsens the Salish
+Sea channels; the NA-Pacific coast is kept at ≈2 km (shipped fidelity preserved), the rest
+of the world at ≈5 km. Disjoint (not overlapping) so two simplifications of one coast can't
+OR together into a seaward bulge. Loaded as the COARSE base layer in `region_coast.js`
+(`isLand` ignores it inside any loaded **fine** region, so a port's channel stays open).
+A foreign **fine** region (`coast/<id>.js`) overrides coarse in its bbox at runtime.
+`routeWater` raises `cellKm` to ~5 km for >300 km gaps so the continental A* grid stays
+tractable, and its `marginKm` caps detours at 90 km — a route that would have to circle a
+whole peninsula correctly falls back to a straight bridge (graceful degradation). Regression:
+`tests/coarse-global.test.mjs` (worldwide classification, home preserved, Taiwan avoided).
+Regenerate (run from `worker/`):
 ```bash
 curl -sS -o /tmp/ne_50m_land.geojson \
   https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_50m_land.geojson
-node scripts/build-coarse-coast.mjs /tmp/ne_50m_land.geojson   # ~24 KB, 47 polys
+node scripts/build-coarse-coast.mjs /tmp/ne_50m_land.geojson   # ~271 KB / ~100 KB gzip, ~700 polys
 ```
-To extend to other oceans (Asia coast for trans-Pacific), add strips in
-`build-coarse-coast.mjs`. The fine band exclusion is specific to the Salish Sea OSM clip.
+Tune `NEAR_KM`/`FAR_KM`/`DROP_SPAN_KM`/the `HOME` carve-out in `build-coarse-coast.mjs`.
+(Always-loaded base layer — watch the size; bump `FAR_KM` or `DROP_SPAN_KM` to trim.)
 
 ### Lazy per-region geometry (`frontend/app/coast/<id>.js` + `region_coast.js`)
-Foreign harbour/river ports are built as **separate per-region files** loaded ON DEMAND,
-so the base download stays small as ports are added (54 zones in `zones.ts`). Each
-region is uniformly FINE (it only exists to render trails *into* a port; the coarse
-layer + zone dots cover everything else).
+Foreign regions are **separate files loaded ON DEMAND** (so base download stays small).
+`region_coast.js` is **REGION-AWARE**: inside a loaded region's bbox its fine geometry
+**overrides the coarse layer** (so shipping waterways coarse would close stay open);
+elsewhere it's home+coarse land minus all loaded water.
+
+Two region shapes (resolution follows navigation):
+- **Open-coast ports → WATER-ONLY** (`land:[]`). Coarse already has the mainland/ocean
+  correct; the region's job is just to open the bay/river basin (`water`). Fine land
+  here would only re-introduce the closeOpenChains ocean-as-land bug for no benefit.
+- **Archipelago/channel corridors → ISLAND fine-land + water.** `build-region` ships
+  land from **closed coastline ways (islands) ONLY** — it DROPS the open-mainland
+  `closeOpenChains` closure (the orientation-fragile step that filled ocean as land,
+  e.g. Golden Gate). Islands are reliable closed loops, and they're exactly what opens
+  the inter-island channels coarse's 2 km merges shut (Inside Passage). `CORRIDORS` in
+  `build-all-regions.mjs` (e.g. `inside-passage`, ~150 m land per the resolution policy).
+
+Caveat (the cell-size limit, mitigated by server A*): a single LONG gap into/through a
+narrow channel uses coarse A* cells (≥0.68 km) that can't thread it → straight-bridge.
+Real tracks (intermediate fixes → short gaps → fine cells) and the planned server-side
+A* precompute thread it; verified Prince Rupert→Ketchikan threads at `cellKm 0.4`.
 - `scripts/build-region.mjs <id>` — bbox from its `REGIONS` map; reads
   `/tmp/osm_coast_<id>.json` + `/tmp/osm_water_<id>.json`; emits
   `frontend/app/coast/<id>.js` = `{ id, bbox, land:[rings], water:[{o,h?}] }`. Land at
@@ -227,10 +252,20 @@ layer + zone dots cover everything else).
   are built (`build-all-regions.mjs`), manifest lists them, ~2.8 MB total but lazy so a
   client only fetches the region(s) for a vessel it's viewing.
 
-### Coastline resolution policy (be intentional per destination)
-Resolution is chosen by a zone's **tightest navigable feature, not distance from home**.
-Hard rule (prevents "closed chokepoints"): **simplify tol ≤ ⅓ × the narrowest channel
-to keep open**, and **`routeWater` cellKm ≤ ½ × that width**.
+### Coastline resolution policy (resolution follows NAVIGATION, not geography)
+**Guiding principle (essential):** never close an important **shipping waterway** — a
+channel/strait/passage/approach vessels actually transit (Inside Passage, Juan de Fuca,
+river approaches to inland ports, port channels). It is fine to be coarse on **sail-past
+coastline** vessels never enter (open outer coast) — a slight clip there is cosmetic;
+a closed shipping lane breaks routing. So the tradeoff is always resolved in favour of
+keeping navigable waterways open.
+
+Concretely, resolution is chosen by a zone's **tightest navigable feature, not distance
+from home**. Hard rule (prevents "closed chokepoints"): **simplify tol ≤ ⅓ × the
+narrowest channel to keep open**, and **`routeWater` cellKm ≤ ½ × that width**. The
+coarse continental layer (~2 km) is acceptable ONLY where it borders sail-past coast;
+where a shipping waterway runs through coarse territory, a fine region must override it
+(see task: "High-res channel routability — fine regions override coarse").
 
 | Zone class | simplify tol | A* cellKm |
 |---|---|---|
@@ -249,33 +284,42 @@ regions, bucket polygon indices into a coarse grid (~0.5–1° cells) so `pointO
 tests only the cell covering the point and `routeWater` selects candidates once from
 the gap bbox — a Singapore boat then never tests Vancouver polygons.
 
-### Planned (DEFERRED until the coastline dataset is stable): server-side inferred-positions precompute
-**Do NOT build this yet.** Precomputed inferred points are derived from the
-coastline; while we're still expanding the dataset (water layer, more fine zones),
-every dataset change would invalidate and churn the stored points. The client Web
-Worker (`trail_worker.js`) handles the load cost acceptably for now. Build this
-once the coastline is stable — `generator_version` (below) then handles the rarer
-intentional regenerations. Worst-first client ordering (`gapEnrichmentScore`)
-already makes the most-wrong trails self-correct first in the meantime.
+### Server-side inferred-positions precompute — IMPLEMENTED
+A* is off the client entirely: a GitHub Actions cron (`.github/workflows/precompute-trails.yml`,
+NOT a CF Worker — free Workers are CPU-capped ~10 ms, our A* is 0.1–2 s) runs
+`scripts/precompute-trails.mjs`, which reuses the frontend's land-aware pipeline
+(`frontend/app/trail_geometry.js`) under Node, finds where each of-interest vessel's
+rendered curve would cross land, and stores the FEWEST inferred waypoints that keep
+it off land. The Worker serves them unioned with live `positions` at `/track`
+(`getInferredTrack` in `storage.ts`); the **browser loads NO coastline** — it
+re-splines the union with the pure pipeline (`frontend/app/trail_spline.js`).
 
-When we do build it — to get the client A* off the main thread entirely — precompute
-the inferred waypoints **off the client** and serve them as data. Design notes:
-- **Run in a GitHub Actions cron, NOT a CF Worker** — free Workers are CPU-capped
-  (~10 ms); our A* is 0.1–2 s. The Action runs Node and **reuses the geometry
-  pipeline module** (extract it from `map_page.js` first), reads recent trails,
-  writes results to D1.
-- **D1 write frugality (hard requirement — free tier write cap):** only store
-  points where geometry matters — i.e. only the **land-crossing gaps** that
-  `routeWater` actually routes (open-water/straight gaps get nothing; the client
-  draws them straight). Store only the **sparse string-pulled waypoints** (~3–12
-  per gap), not the dense spline. **Write-once + dedup:** key each gap's points
-  by a content hash of its real endpoints + a `generator_version`; the hourly
-  cron writes only new/changed gaps and skips unchanged ones, so it does not
-  re-write hundreds of rows every run as coverage grows. Bump `generator_version`
-  to force regeneration after a routing bug; provide a clear/regenerate script.
-- Schema: `inferred_positions(mmsi, lat, lon, t, gap_hash, generator_version)`,
-  returned unioned with real points (flagged `fake=1` → client dashes them).
-- Keep the client straight-bridge fallback for gaps the cron hasn't reached yet.
+- **What's stored (D1 frugality):** only the inferred (A*-routed / repair) waypoints —
+  never real fixes (those live in `positions`). Per land-crossing **segment** (a run
+  of fakes bracketed by two real fixes), reduced by `simplifyForSpline` to the minimum
+  control points whose spline still keeps the curve off land (`TRAIL_SIMPLIFY.tolKm`,
+  ~3–12/segment). A real fix that itself sits on land is left as-is (trust the boat).
+- **Converge, don't churn (determinism):** the precompute is built over RAW reals
+  (`computeControlPoints(..., {denoise:false})`) so the stored fakes and the client's
+  re-splined curve agree exactly and stay water-tight (`tests/trail-precompute.test.mjs`).
+  A vessel is skipped — no A*, no D1 write — when EITHER its newest position hasn't
+  advanced since last run (`precompute_state.last_pos_ts_seen`) OR its already-stored
+  fakes still keep the curve off land (cheap spline + region-aware `isLand`, no A*).
+  Only a new land-crossing triggers a localized recompute; only changed segments are
+  written. `seg_hash` = bracketing real timestamps + length + `GENERATOR_VERSION`
+  (a script constant — bump it / pass `--regenerate` to force a full rebuild).
+- **Schema** (migration `006_inferred_positions.sql`): `inferred_positions(mmsi,
+  seg_hash, seq, lat, lon, t, tier, dashed, generator_version)` (fakes carry an
+  inherited `tier` so the client tier filter works, and `dashed` for solid/dashed
+  styling), plus `inferred_segments` (processed marker, present even at 0 points →
+  out-of-coverage segments never retried) and `precompute_state` (the heuristic).
+- **Trigger:** the hourly global scan fires the workflow on completion (most new gaps
+  appear then) via `workflow_dispatch` (`triggerPrecompute` in `index.ts`, needs the
+  `GITHUB_DISPATCH_TOKEN` Worker secret — optional); the workflow's own hourly cron is
+  the fallback. Shrinks the straight-bridge window (an un-routed gap renders straight
+  until filled) to minutes.
+- **Run manually:** `node scripts/precompute-trails.mjs [--local] [--dry-run]
+  [--regenerate] [--limit N] [--mmsi N]` (same wrangler D1 backend as `db-*`).
 
 ### Expanding coverage (Portland river, Alaska, foreign ports, …)
 1. Edit `BB` in **both** `build-coastline.mjs` and the Overpass bbox in step 1 (and `HOME`/`TIERS`

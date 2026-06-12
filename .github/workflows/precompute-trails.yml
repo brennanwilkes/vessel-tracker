@@ -1,0 +1,44 @@
+name: Precompute Trails
+
+# Routes each of-interest vessel's land-crossing trail gaps with A* (too heavy for
+# a CPU-capped CF Worker) and stores the sparse inferred waypoints in D1, which the
+# Worker serves unioned with live positions. Primary trigger is the Worker firing
+# workflow_dispatch right after the hourly global scan (when new gaps appear); the
+# schedule is a fallback. Converges — vessels with no new crossing are skipped.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 * * * *"
+
+# Don't pile up overlapping runs; let an in-flight run finish.
+concurrency:
+  group: precompute-trails
+  cancel-in-progress: false
+
+jobs:
+  precompute:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    defaults:
+      run:
+        working-directory: worker
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --no-fund --no-audit
+
+      - name: Precompute trail waypoints
+        run: node scripts/precompute-trails.mjs
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

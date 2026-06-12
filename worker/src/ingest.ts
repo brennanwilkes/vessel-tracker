@@ -6,14 +6,15 @@ import {
   PHANTOM_SPEED_MIN_KN, PHANTOM_STALL_MS,
   GLOBAL_MMSI_CHUNK_SIZE, GLOBAL_SCAN_ATTEMPTS, GLOBAL_SCAN_BUDGET_MS,
   LIVE_TTL_LOCAL_MS, ZONE_VISIT_THROTTLE_MS,
+  FOREIGN_DRAIN_MS, FOREIGN_SCAN_BOX_BATCH, FOREIGN_REFRESH_MS, FOREIGN_MAX_NEW_PER_SCAN, FOREIGN_RELEVANCE,
 } from './constants';
 import { isSignificantMove } from './compress';
 import { drainAisStream } from './aisstream';
 import { pointInBox, isLargeVessel, isConfirmedSmall } from './ais';
-import { zoneOf } from './zones';
+import { zoneOf, ZONES } from './zones';
 import {
   loadVesselStates, commitScan, enrichStaticData, getOfInterestMmsis, widenExtent,
-  commitZoneVisits,
+  commitZoneVisits, loadForeignStates, loadZoneVisitKeys, getScanCursor, setScanCursor,
   type VesselUpsert, type PositionInsert, type VesselState, type ZoneObservation,
 } from './storage';
 
@@ -397,4 +398,125 @@ export async function runGlobalScan(env: Env): Promise<void> {
   await commitZoneVisits(env, zoneObs, ZONE_VISIT_THROTTLE_MS);
   await enrichStaticData(env, staticOnly);
   console.log(`[ingest] GLOBAL_SCAN_DONE vessel_writes=${upserts.length} position_writes=${positions.length} static_only=${staticOnly.length} duration_ms=${Date.now() - start}`);
+}
+
+const FOREIGN_SCAN_CURSOR = 'foreign_scan_cursor';
+const FOREIGN_ZONES = ZONES.filter(z => z.reach === 'foreign');
+
+// Is a vessel at a foreign port plausibly bound for the local viewshed (so worth
+// pre-seeding)? Size is the primary signal — a ≥bigLenM ship anywhere on the Pacific
+// rim is ocean-going and could route here. A smaller-but-still-large vessel qualifies
+// only if its AIS destination names a NA-Pacific-NW port; the type clause keeps the
+// destination case to passenger/cargo/tanker (60–89) so an unknown-length workboat with
+// a coincidental destination string isn't tracked.
+function isForeignInbound(type: number | null, len: number | null, dest: string | null): boolean {
+  if (len !== null && len >= FOREIGN_RELEVANCE.bigLenM) return true;
+  const destMatch = dest !== null && FOREIGN_RELEVANCE.destPatterns.some(p => dest.toUpperCase().includes(p));
+  if (!destMatch) return false;
+  if (len !== null && len >= FOREIGN_RELEVANCE.midLenM) return true;
+  return type !== null && type >= 60 && type <= 89; // unknown length, but inbound + ocean-going type
+}
+
+// Rotating foreign scan — see constants.ts "Rotating foreign scan". Drains a rotating
+// slice of distant port boxes in one connection (no MMSI filter), then ingests only
+// large/plausibly-inbound vessels frugally: of-interest + a zone visit + a single anchor
+// position on first entry to a port. Functions like the local scan (skip confirmed-small
+// new vessels, keep an initial row for unknown types to enrich+reclassify later).
+export async function runForeignScan(env: Env): Promise<void> {
+  const start = Date.now();
+  if (FOREIGN_ZONES.length === 0) { console.log('[ingest] FOREIGN_SCAN_SKIPPED reason=no_foreign_zones'); return; }
+
+  const cursor = await getScanCursor(env, FOREIGN_SCAN_CURSOR);
+  const startIdx = cursor % FOREIGN_ZONES.length;
+  const slice: typeof FOREIGN_ZONES = [];
+  for (let i = 0; i < FOREIGN_SCAN_BOX_BATCH && i < FOREIGN_ZONES.length; i++) {
+    slice.push(FOREIGN_ZONES[(startIdx + i) % FOREIGN_ZONES.length]);
+  }
+  const nextCursor = (startIdx + slice.length) % FOREIGN_ZONES.length;
+  console.log(`[ingest] FOREIGN_SCAN_START ports=${slice.map(z => z.id).join(',')} cursor=${startIdx}->${nextCursor}`);
+
+  const { vessels } = await drainAisStream({
+    apiKey: env.AISSTREAM_API_KEY,
+    boundingBoxes: slice.map(z => z.box),
+    drainMs: FOREIGN_DRAIN_MS,
+  });
+
+  // Advance the cursor regardless of yield so a quiet port can't stall the rotation.
+  await setScanCursor(env, FOREIGN_SCAN_CURSOR, nextCursor);
+
+  if (vessels.length === 0) {
+    console.log(`[ingest] FOREIGN_SCAN_SUMMARY heard=0 ports=${slice.length} duration_ms=${Date.now() - start}`);
+    return;
+  }
+
+  const mmsis = vessels.map(v => v.mmsi);
+  const fstates = await loadForeignStates(env, mmsis);
+  const visitKeys = await loadZoneVisitKeys(env, mmsis);
+  const nowMs = Date.now();
+
+  const upserts: VesselUpsert[] = [];
+  const positions: PositionInsert[] = [];
+  const zoneObs: ZoneObservation[] = [];
+  const heardByPort: Record<string, number> = {};
+  let nRelevant = 0, nInitial = 0, nFilteredSmall = 0, nSkipped = 0, nAnchors = 0;
+
+  for (const v of vessels) {
+    const zid = zoneOf(v.lat, v.lon);
+    if (zid === null) continue; // heard just outside a port box edge
+    heardByPort[zid] = (heardByPort[zid] ?? 0) + 1;
+
+    const fs = fstates.get(v.mmsi);
+    const isNew = fs === undefined;
+    const type = v.vesselType ?? fs?.vessel_type ?? null;
+    const len = v.length ?? fs?.length ?? null;
+    const alreadyOI = fs?.of_interest === 1;
+
+    // Known-small new vessel → never track (same gate as the local scan).
+    if (!alreadyOI && isNew && isConfirmedSmall(type, len)) { nFilteredSmall++; continue; }
+
+    if (alreadyOI || isForeignInbound(type, len, v.destination)) {
+      nRelevant++;
+      zoneObs.push({ mmsi: v.mmsi, zone_id: zid, lat: v.lat, lon: v.lon, ts: nowMs });
+      const newZone = !visitKeys.has(`${v.mmsi}|${zid}`);
+      const refresh = isNew || (nowMs - fs!.last_seen) >= FOREIGN_REFRESH_MS;
+
+      if (refresh || newZone) {
+        upserts.push({
+          mmsi: v.mmsi, name: v.name, vessel_type: v.vesselType, length: v.length, destination: v.destination,
+          lat: v.lat, lon: v.lon, speed: v.speed, heading: v.heading, ts: nowMs,
+          of_interest: 1, max_extent: 'global', first_direct_at: null, direct_entry_count: 0,
+          moved: false, heartbeat: true, forceUpsert: false,
+        });
+      }
+      // One anchor position per port (first entry) so the precompute can draw the
+      // inferred ocean crossing — never a full track.
+      if (newZone) {
+        positions.push({ mmsi: v.mmsi, lat: v.lat, lon: v.lon, speed: v.speed, heading: v.heading, ts: nowMs, tier: 'global' });
+        nAnchors++;
+      }
+    } else if (isNew && nInitial < FOREIGN_MAX_NEW_PER_SCAN) {
+      // Unknown type/length (not confirmed small, not yet relevant): one initial row so a
+      // later ping can enrich its static data and reclassify it. No zone visit, no position.
+      nInitial++;
+      upserts.push({
+        mmsi: v.mmsi, name: v.name, vessel_type: v.vesselType, length: v.length, destination: v.destination,
+        lat: v.lat, lon: v.lon, speed: v.speed, heading: v.heading, ts: nowMs,
+        of_interest: 0, max_extent: 'global', first_direct_at: null, direct_entry_count: 0,
+        moved: false, heartbeat: true, forceUpsert: false,
+      });
+    } else {
+      nSkipped++; // re-seen unknown (already has a row), or the per-scan initial-row cap was hit
+    }
+  }
+
+  await commitScan(env, upserts, positions);
+  await commitZoneVisits(env, zoneObs, ZONE_VISIT_THROTTLE_MS);
+
+  const portBreakdown = Object.entries(heardByPort).map(([z, n]) => `${z}:${n}`).join(' ');
+  console.log(
+    `[ingest] FOREIGN_SCAN_SUMMARY heard=${vessels.length} ports=${slice.length}` +
+    ` | relevant=${nRelevant} initial_rows=${nInitial} small_filtered=${nFilteredSmall} skipped=${nSkipped}` +
+    ` | vessel_writes=${upserts.length} anchor_positions=${nAnchors} zone_obs=${zoneObs.length}` +
+    ` | by_port: ${portBreakdown} | duration_ms=${Date.now() - start}`
+  );
 }

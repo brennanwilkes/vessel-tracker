@@ -37,6 +37,13 @@ const BBOX_OVERRIDE = {
   columbia: { minLat: 45.45, minLon: -124.10, maxLat: 46.35, maxLon: -122.50 },
 };
 
+// Shipping CORRIDORS — regions covering navigable channels (not derived from a port
+// zone). Island fine-land here opens the inter-island passages the coarse layer closes.
+// landSimplifyKm coarser than a harbour (channels are ~0.5 km+, per the resolution policy).
+const CORRIDORS = [
+  { id: 'inside-passage', bbox: { minLat: 54.0, minLon: -134.2, maxLat: 58.6, maxLon: -129.6 }, landSimplifyKm: 0.15 },
+];
+
 const args = process.argv.slice(2);
 const FORCE = args.includes('--force');
 const ONLY = (args.find(a => a.startsWith('--only=')) || '').slice(7).split(',').filter(Boolean);
@@ -74,6 +81,7 @@ function deriveRegions() {
     if (used.has(z.id)) continue;
     regions.push({ id: z.id, bbox: BBOX_OVERRIDE[z.id] ?? unionPad([z.box]) });
   }
+  for (const c of CORRIDORS) regions.push({ id: c.id, bbox: c.bbox, landSimplifyKm: c.landSimplifyKm });
   return regions;
 }
 function unionPad(boxes) {
@@ -112,8 +120,8 @@ async function fetchWithRetry(label, query, tries = 3) {
   throw new Error(`${label}: all ${tries} attempts failed`);
 }
 
-function regenerateManifest(regions) {
-  const built = regions.filter(r => fs.existsSync(path.join(COAST_DIR, `${r.id}.js`)));
+function regenerateManifest(allRegions) {
+  const built = allRegions.filter(r => fs.existsSync(path.join(COAST_DIR, `${r.id}.js`)));
   const entries = built.map(r => {
     const b = r.bbox;
     return `  { id: ${JSON.stringify(r.id)}, bbox: [[${b.minLat}, ${b.minLon}], [${b.maxLat}, ${b.maxLon}]], load: () => import(${JSON.stringify('./' + r.id + '.js')}) },`;
@@ -131,9 +139,9 @@ ${entries}
 }
 
 // ── Run ─────────────────────────────────────────────────────────────────────
-let regions = deriveRegions();
-if (ONLY.length) regions = regions.filter(r => ONLY.includes(r.id));
-console.log(`[regions] ${regions.length} regions derived from foreign zones`);
+const allRegions = deriveRegions();              // full set — manifest always lists all built
+let regions = ONLY.length ? allRegions.filter(r => ONLY.includes(r.id)) : allRegions;
+console.log(`[regions] ${allRegions.length} regions derived; ${regions.length} in this run`);
 
 let pending = regions.filter(r => FORCE || !fs.existsSync(path.join(COAST_DIR, `${r.id}.js`)));
 console.log(`[regions] ${pending.length} to build, ${regions.length - pending.length} already present`);
@@ -148,10 +156,10 @@ for (let round = 1; round <= MAX_ROUNDS && pending.length; round++) {
       await sleep(DELAY_MS);
       console.log(`[${r.id}] fetching water…`);
       const waterElements = await fetchWithRetry(`${r.id} water`, waterQuery(r.bbox));
-      const s = buildRegion({ id: r.id, bbox: r.bbox, coastElements, waterElements });
+      const s = buildRegion({ id: r.id, bbox: r.bbox, coastElements, waterElements, landSimplifyKm: r.landSimplifyKm });
       if (s.landRings === 0 && s.waterPolys === 0) console.warn(`[${r.id}] WARN: empty (no land or water in bbox)`);
       console.log(`[${r.id}] ✓ ${s.landRings} land, ${s.waterPolys} water (${s.holes} holes), ${s.kb} KB`);
-      regenerateManifest(regions); // keep manifest current as we go
+      regenerateManifest(allRegions); // keep manifest current as we go
       await sleep(DELAY_MS);
     } catch (e) {
       console.error(`[${r.id}] ✗ ${e.message}`);
@@ -162,6 +170,6 @@ for (let round = 1; round <= MAX_ROUNDS && pending.length; round++) {
   if (pending.length) { console.log(`round ${round} done; ${pending.length} failed, retrying after backoff`); await sleep(DELAY_MS * 3); }
 }
 
-const builtCount = regenerateManifest(regions);
-console.log(`\n[regions] done. manifest lists ${builtCount}/${regions.length} regions.`);
+const builtCount = regenerateManifest(allRegions);
+console.log(`\n[regions] done. manifest lists ${builtCount}/${allRegions.length} regions.`);
 if (pending.length) { console.error(`[regions] STILL FAILED: ${pending.map(r => r.id).join(', ')} — re-run to retry.`); process.exit(1); }

@@ -1,7 +1,8 @@
-// Trail geometry pipeline — pure, DOM-free, no Leaflet. Turns chronological AIS
-// points into smooth, water-tight spline runs. Shared by map_page.js (main
-// thread + Web Worker) and the server-side precompute cron, so it imports only
-// geo math + coastline + config.
+// Land-aware half of the trail pipeline — denoise real fixes, splice water-routed
+// (A*) waypoints into land-crossing gaps, repair spline bulges off land. Imports
+// geo math + region-aware coastline + config, so this module is for NODE (the
+// precompute cron) and tests only; the BROWSER imports the pure half
+// (trail_spline.js) and renders precomputed points without loading coastline data.
 //
 //   dedup → split journeys at stops → per journey: denoise real points, splice
 //   water-routed waypoints into land-crossing gaps, repair spline bulges off
@@ -9,56 +10,26 @@
 //
 // See frontend/CLAUDE.md "Trail rendering & land avoidance" for the design and
 // the core "trust the boat" principle.
-import { haversineKm, routeWater, segmentCrossesLand, pointOnLand } from './geo.js';
-import { getLand, getLandBboxes, getWater, getWaterBboxes } from './region_coast.js';
-import { MOVING_SPEED_KN, TRAIL_GAP_SEVER_MS, LAND_AVOIDANCE, ROUTE_SMOOTHING, NARROW_WEIGHT } from '../config.js';
+import { haversineKm, bearingDeg, routeWater } from './geo.js';
+import { isLand } from './region_coast.js';
+import { LAND_AVOIDANCE, ROUTE_SMOOTHING, NARROW_WEIGHT } from '../config.js';
+import { dedup, splitJourneys, catmullRom, runsBySynthetic, simplifyForSpline, SPLINE_SAMPLES, DEDUP_KM } from './trail_spline.js';
 
-// Geometry (home OSM coast + coarse continental + home water, plus any lazily-loaded
-// foreign regions) is owned by region_coast.js. We read it live via getters so a
-// region appended by `ensureRegionsForExtent` (call it before routing a trail whose
-// extent reaches a foreign port) is picked up here without re-importing.
-//
-// Bound land/water helpers — the layered land test (coastline minus water rivers/
-// harbours, plus the coarse continental fallback) lives behind these so every call
-// site stays consistent. See geo.js.
-const isLand = (lat, lon) => pointOnLand(lat, lon, getLand(), getLandBboxes(), getWater(), getWaterBboxes());
-const crossesLand = (a, b, stepKm) => segmentCrossesLand(a, b, getLand(), getLandBboxes(), stepKm, getWater(), getWaterBboxes());
-const routeAroundLand = (a, b, narrowWeight) => routeWater(a, b, getLand(), getLandBboxes(), { waterPolygons: getWater(), waterBboxes: getWaterBboxes(), narrowWeight });
+// Re-export the pure pipeline pieces so existing callers/tests that import them
+// from here keep working (the browser should import them from trail_spline.js).
+export { dedup, splitJourneys, catmullRom, runsBySynthetic, simplifyForSpline } from './trail_spline.js';
 
-const SPLINE_SAMPLES = 12;
-
-// Drop consecutive fixes closer than this. Duplicate/near-duplicate AIS reports
-// otherwise make centripetal Catmull-Rom divide by ~0 and spike.
-const DEDUP_KM = 0.02;
-
-export function dedup(points) {
-  if (points.length === 0) return points;
-  const out = [points[0]];
-  for (let i = 1; i < points.length; i++) {
-    const p = out[out.length - 1];
-    if (haversineKm(p.lat, p.lon, points[i].lat, points[i].lon) > DEDUP_KM) out.push(points[i]);
-  }
-  return out;
-}
-
-// Break the trail into journeys at stops only: the vessel was stationary at its
-// last fix (speed ~0) and then a long gap followed — it parked and we lost it.
-// Wherever it resurfaces starts a fresh journey/curve. A vessel still moving
-// when signal dropped stays in one journey so the spline bridges the gap
-// continuously (the derivative stays continuous across the bridge).
-export function splitJourneys(points) {
-  const journeys = [];
-  let cur = [points[0]];
-  for (let i = 1; i < points.length; i++) {
-    const gap = points[i].t - points[i - 1].t;
-    const sever = TRAIL_GAP_SEVER_MS[points[i - 1].tier] ?? TRAIL_GAP_SEVER_MS.local;
-    const parked = (points[i - 1].speed ?? 0) <= MOVING_SPEED_KN;
-    if (sever !== null && gap > sever && parked) { journeys.push(cur); cur = [points[i]]; }
-    else cur.push(points[i]);
-  }
-  journeys.push(cur);
-  return journeys;
-}
+// Land/water geometry is owned by region_coast.js, which is REGION-AWARE: inside a
+// lazily-loaded fine region (loaded via ensureRegionsForExtent before routing a trail)
+// that region's geometry overrides the coarse layer, so shipping waterways stay open.
+// `isLand` is imported directly; the two helpers below sample it for segments and pass
+// it into routeWater so the A* grid uses the same region-aware test.
+const crossesLand = (a, b, stepKm = 1) => {
+  const n = Math.max(2, Math.ceil(haversineKm(a[0], a[1], b[0], b[1]) / stepKm));
+  for (let s = 0; s <= n; s++) { const f = s / n; if (isLand(a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f)) return true; }
+  return false;
+};
+const routeAroundLand = (a, b, narrowWeight, entryBearing, exitBearing) => routeWater(a, b, null, null, { isLand, narrowWeight, entryBearing, exitBearing });
 
 // cos-weighted Laplacian denoise of real AIS positions. A point that would move
 // onto land (smoothing toward a neighbor-midpoint near a concave shore) keeps
@@ -126,23 +97,12 @@ function smoothRoute(wp) {
   return cur;
 }
 
-// A point dKm beyond `to`, continuing the heading from→to (equirectangular-local).
-// Used to anchor the inferred path's exit/entry to the real course either side of
-// a gap, so the spline leaves/joins the real track tangentially instead of kinking.
-function stepBeyond(from, to, dKm) {
-  const ky = 111.32, kx = 111.32 * Math.cos(to[0] * Math.PI / 180);
-  let vx = (to[1] - from[1]) * kx, vy = (to[0] - from[0]) * ky;
-  const m = Math.hypot(vx, vy);
-  if (m < 1e-9) return null;
-  return [to[0] + (vy / m) * dKm / ky, to[1] + (vx / m) * dKm / kx];
-}
-
 // Build the spline control points for one journey: denoised real fixes, with
 // smoothed water-routed waypoints spliced into every land-crossing gap. Each
 // control point carries its time and whether it's an inferred (synthetic) waypoint.
-export function buildControlPoints(journey, route = true, narrowWeight) {
-  const real = denoise(journey);
-  const ctrl = [{ lat: real[0][0], lon: real[0][1], t: journey[0].t, synthetic: false }];
+export function buildControlPoints(journey, route = true, narrowWeight, doDenoise = true) {
+  const real = doDenoise ? denoise(journey) : journey.map(p => [p.lat, p.lon]);
+  const ctrl = [{ lat: real[0][0], lon: real[0][1], t: journey[0].t, synthetic: false, fake: false }];
   for (let i = 1; i < real.length; i++) {
     const a = real[i - 1], b = real[i];
     // Route around land only across a real data GAP (lost signal). Dense
@@ -153,25 +113,21 @@ export function buildControlPoints(journey, route = true, narrowWeight) {
     // instant first-paint pass (no A*).
     const isGap = (journey[i].t - journey[i - 1].t) > LAND_AVOIDANCE.gapMinMs || haversineKm(a[0], a[1], b[0], b[1]) > LAND_AVOIDANCE.gapMinKm;
     if (route && isGap && crossesLand(a, b)) {
-      const raw = routeAroundLand(a, b, narrowWeight);
+      // Bias A* to leave/arrive along the boat's real course either side of the
+      // gap (the COG just outside it) so it doesn't backtrack against the boat's
+      // heading — that read as a sharp kink at the real→inferred boundary.
+      const entryBearing = i >= 2 ? bearingDeg(real[i - 2][0], real[i - 2][1], a[0], a[1]) : undefined;
+      const exitBearing = i + 1 < real.length ? bearingDeg(b[0], b[1], real[i + 1][0], real[i + 1][1]) : undefined;
+      const raw = routeAroundLand(a, b, narrowWeight, entryBearing, exitBearing);
       if (raw && raw.length > 2) {
-        // Anchor the inferred path's exit/entry to the boat's real heading just
-        // outside the gap (a real vessel leaves its course gradually, not in a
-        // kink at the first A* waypoint). The anchor sits a short step beyond the
-        // endpoint along that heading; only kept if it lands in clear water.
-        const dKm = Math.max(0.5, Math.min(3, haversineKm(a[0], a[1], b[0], b[1]) * 0.15));
-        const anchorA = i >= 2 ? stepBeyond(real[i - 2], a, dKm) : null;
-        const anchorB = i + 1 < real.length ? stepBeyond(real[i + 1], b, dKm) : null;
-        if (anchorA && !crossesLand(a, anchorA, 0.1)) raw.splice(1, 0, anchorA);
-        if (anchorB && !crossesLand(b, anchorB, 0.1)) raw.splice(raw.length - 1, 0, anchorB);
         const wp = smoothRoute(raw);
         const t0 = journey[i - 1].t, t1 = journey[i].t;
         for (let k = 1; k < wp.length - 1; k++) {
-          ctrl.push({ lat: wp[k][0], lon: wp[k][1], t: t0 + (t1 - t0) * (k / (wp.length - 1)), synthetic: true });
+          ctrl.push({ lat: wp[k][0], lon: wp[k][1], t: t0 + (t1 - t0) * (k / (wp.length - 1)), synthetic: true, fake: true });
         }
       }
     }
-    ctrl.push({ lat: b[0], lon: b[1], t: journey[i].t, synthetic: false });
+    ctrl.push({ lat: b[0], lon: b[1], t: journey[i].t, synthetic: false, fake: false });
   }
   // Splicing in/out routes through a narrow feature can leave near-duplicate
   // control points; collapse them so the spline doesn't spike.
@@ -181,61 +137,6 @@ export function buildControlPoints(journey, route = true, narrowWeight) {
     if (haversineKm(p.lat, p.lon, ctrl[i].lat, ctrl[i].lon) > DEDUP_KM) out.push(ctrl[i]);
   }
   return out;
-}
-
-// Centripetal Catmull-Rom spline (α=0.5) over a whole journey's control points
-// (one spline ⇒ continuous derivative everywhere, including real→inferred
-// transitions). Each output sample carries an interpolated time and the
-// inferred flag of the segment it lies on (either endpoint synthetic), for styling.
-export function catmullRom(ctrl, samples = SPLINE_SAMPLES) {
-  if (ctrl.length < 2) return ctrl.map(c => ({ lat: c.lat, lon: c.lon, t: c.t, synthetic: c.synthetic }));
-
-  const knot = (t, a, b) => Math.pow(Math.max(Math.hypot(b.lat - a.lat, b.lon - a.lon), 1e-10), 0.5) + t;
-  const mirror = (a, b) => ({ lat: 2 * a.lat - b.lat, lon: 2 * a.lon - b.lon });
-  const out = [];
-
-  for (let i = 0; i < ctrl.length - 1; i++) {
-    const p0 = i > 0 ? ctrl[i - 1] : mirror(ctrl[0], ctrl[1]);
-    const p1 = ctrl[i], p2 = ctrl[i + 1];
-    const p3 = i < ctrl.length - 2 ? ctrl[i + 2] : mirror(ctrl[ctrl.length - 1], ctrl[ctrl.length - 2]);
-    const t0 = 0, t1 = knot(t0, p0, p1), t2 = knot(t1, p1, p2), t3 = knot(t2, p2, p3);
-    const inferred = p1.synthetic || p2.synthetic;
-
-    for (let j = 0; j < samples; j++) {
-      const t = t1 + (t2 - t1) * (j / samples);
-      const lat = catmull('lat', p0, p1, p2, p3, t, t0, t1, t2, t3);
-      const lon = catmull('lon', p0, p1, p2, p3, t, t0, t1, t2, t3);
-      out.push({ lat, lon, t: p1.t + (p2.t - p1.t) * (j / samples), synthetic: inferred });
-    }
-  }
-  const lastC = ctrl[ctrl.length - 1];
-  out.push({ lat: lastC.lat, lon: lastC.lon, t: lastC.t, synthetic: lastC.synthetic });
-  return out;
-}
-
-// Barry-Goldman pyramidal evaluation of one coordinate of the centripetal spline.
-function catmull(k, p0, p1, p2, p3, t, t0, t1, t2, t3) {
-  const A1 = p0[k] + (p1[k] - p0[k]) * (t - t0) / (t1 - t0);
-  const A2 = p1[k] + (p2[k] - p1[k]) * (t - t1) / (t2 - t1);
-  const A3 = p2[k] + (p3[k] - p2[k]) * (t - t2) / (t3 - t2);
-  const B1 = A1 + (A2 - A1) * (t - t0) / (t2 - t0);
-  const B2 = A2 + (A3 - A2) * (t - t1) / (t3 - t1);
-  return B1 + (B2 - B1) * (t - t1) / (t2 - t1);
-}
-
-// Split spline samples into contiguous runs of equal `synthetic` flag so each
-// run can be styled (solid for real tracking, dashed/faint for inferred gaps).
-// Runs overlap by one sample at boundaries so there is no visual seam.
-export function runsBySynthetic(samples) {
-  const runs = [];
-  let start = 0;
-  for (let i = 1; i <= samples.length; i++) {
-    if (i === samples.length || samples[i].synthetic !== samples[start].synthetic) {
-      runs.push({ synthetic: samples[start].synthetic, samples: samples.slice(start, Math.min(i + 1, samples.length)) });
-      start = i;
-    }
-  }
-  return runs;
 }
 
 // Find the nearest water point to an on-land point, then step a little further
@@ -300,7 +201,7 @@ export function repairOffLand(ctrl, maxPasses = 6, narrowWeight) {
           const inferred = c0.synthetic || c1.synthetic;
           const mids = [];
           for (let k = 1; k < wp.length - 1; k++) {
-            mids.push({ lat: wp[k][0], lon: wp[k][1], t: c0.t + (c1.t - c0.t) * (k / (wp.length - 1)), synthetic: inferred });
+            mids.push({ lat: wp[k][0], lon: wp[k][1], t: c0.t + (c1.t - c0.t) * (k / (wp.length - 1)), synthetic: inferred, fake: true });
           }
           ctrl.splice(segA + 1, segB - segA, ...mids); // replace bracketed controls with the water path
           changed = true;
@@ -314,7 +215,7 @@ export function repairOffLand(ctrl, maxPasses = 6, narrowWeight) {
         ctrl.splice(segA + 1, 0, {
           lat: water[0], lon: water[1],
           t: c0.t + (c1.t - c0.t) * Math.max(0, Math.min(1, frac)),
-          synthetic: c0.synthetic || c1.synthetic,
+          synthetic: c0.synthetic || c1.synthetic, fake: true,
         });
         changed = true;
       }
@@ -343,20 +244,72 @@ export function gapEnrichmentScore(allPoints) {
   return score;
 }
 
+// Narrow-channel penalty scales with vessel size: big ships hold the main
+// channel (Fraser), small craft dart through tight Gulf Island passages.
+// Linear in length between the configured bounds; null/unknown length → default.
+function narrowWeightFor(len) {
+  const NW = NARROW_WEIGHT;
+  return (len === null || len === undefined) ? NW.default
+    : len <= NW.minLenM ? NW.small
+    : len >= NW.maxLenM ? NW.large
+    : NW.small + (NW.large - NW.small) * (len - NW.minLenM) / (NW.maxLenM - NW.minLenM);
+}
+
+// Land-aware control points per journey (denoised reals + routed/repaired
+// synthetic waypoints), ready to spline. Used by the server precompute, which
+// harvests the synthetic points to store. Always routes (A*); the browser never
+// calls this — it renders precomputed points via trail_spline.catmullRom.
+export function computeControlPoints(allPoints, opts = {}) {
+  const narrowWeight = narrowWeightFor(opts.vesselLength);
+  // The precompute passes denoise:false so the routed/repaired control set is
+  // built over RAW real fixes — the same fixes the browser receives from /track.
+  // The client can't denoise (no coastline), so matching it here keeps the stored
+  // fakes and the client's re-splined curve in agreement (and water-tight).
+  const doDenoise = opts.denoise !== false;
+  const journeys = [];
+  for (const journey of splitJourneys(dedup(allPoints))) {
+    if (journey.length < 2) continue;
+    const ctrl = repairOffLand(buildControlPoints(journey, true, narrowWeight, doDenoise), undefined, narrowWeight);
+    journeys.push({ controls: ctrl });
+  }
+  return journeys;
+}
+
+// Harvest the inferred (fake) waypoints to store server-side. Runs the full
+// land-aware pipeline, then for each maximal run of inserted (`fake`) control
+// points — bracketed by two real fixes — reduces it to the FEWEST points
+// (simplifyForSpline, land-tight) whose spline still keeps the curve off land.
+// Returns one entry per inferred SEGMENT: the bracketing real timestamps (which
+// the script hashes into a stable per-segment key + uses to inherit a tier) and
+// the kept fake points. Only the fakes are stored; the client already has the
+// reals from /track and re-splines the union with pure math (no coastline).
+export function harvestInferredSegments(allPoints, opts = {}) {
+  const segments = [];
+  for (const { controls } of computeControlPoints(allPoints, { ...opts, denoise: false })) {
+    let i = 0;
+    while (i < controls.length) {
+      if (!controls[i].fake) { i++; continue; }
+      const runStart = i;
+      while (i < controls.length && controls[i].fake) i++;
+      const before = controls[runStart - 1];   // always real — controls[0] is real
+      const after = controls[i];                // always real — controls[last] is real
+      if (!before || !after) continue;
+      const segCtrl = [before, ...controls.slice(runStart, i), after];
+      const kept = simplifyForSpline(segCtrl, isLand);
+      const fakes = kept
+        .filter(c => c.fake)
+        .map(c => ({ lat: c.lat, lon: c.lon, t: c.t, dashed: c.synthetic ? 1 : 0 }));
+      if (fakes.length > 0) segments.push({ aT: before.t, bT: after.t, fakes });
+    }
+  }
+  return segments;
+}
+
 // Top-level: chronological points → styled spline runs. route=false skips A*
 // (instant straight bridges) for the first paint; route=true does the full
 // water-routing + repair.
 export function computeRuns(allPoints, route, opts = {}) {
-  // Narrow-channel penalty scales with vessel size: big ships hold the main
-  // channel (Fraser), small craft dart through tight Gulf Island passages.
-  // Linear in length between the configured bounds; null length → default.
-  const len = opts.vesselLength;
-  const NW = NARROW_WEIGHT;
-  const narrowWeight = (len === null || len === undefined) ? NW.default
-    : len <= NW.minLenM ? NW.small
-    : len >= NW.maxLenM ? NW.large
-    : NW.small + (NW.large - NW.small) * (len - NW.minLenM) / (NW.maxLenM - NW.minLenM);
-
+  const narrowWeight = narrowWeightFor(opts.vesselLength);
   const runs = [];
   for (const journey of splitJourneys(dedup(allPoints))) {
     if (journey.length < 2) continue;

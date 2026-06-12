@@ -42,4 +42,5 @@ export const REGIONS = [
   { id: "manila", bbox: [[14.34, 120.64], [14.86, 121.2]], load: () => import("./manila.js") },
   { id: "sydney", bbox: [[-34.12, 150.94], [-33.62, 151.5]], load: () => import("./sydney.js") },
   { id: "auckland", bbox: [[-37.1, 174.5], [-36.6, 175.06]], load: () => import("./auckland.js") },
+  { id: "inside-passage", bbox: [[54, -134.2], [58.6, -129.6]], load: () => import("./inside-passage.js") },
 ];

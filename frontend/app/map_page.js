@@ -5,8 +5,10 @@ import { haversineNm, bearingDeg } from './geo.js';
 import { vesselColor, vesselCategoryLabel, vesselFlag } from './vessels.js';
 import { getTrail, pruneTrails } from './trails.js';
 import { subscribe as subscribeHighlight, getHighlight, setHighlight, clearHighlight } from './highlight_store.js';
-import { computeRuns, gapEnrichmentScore } from './trail_geometry.js';
-import { ensureRegionsForExtent, extentOf } from './region_coast.js';
+// Pure spline pipeline only — NO coastline/A* in the browser. The trail's
+// inferred (A*-routed) waypoints are precomputed server-side and arrive inline
+// in /track (flagged `fake`/`dashed`); the client just splines the union.
+import { dedup, splitJourneys, catmullRom, runsBySynthetic } from './trail_spline.js';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -20,8 +22,7 @@ const TILE_ATTR = '&copy; <a href="https://www.openstreetmap.org/copyright">Open
 let map = null;
 let markers = new Map();
 let trailLayers = new Map();   // mmsi → [L.polyline, ...]
-let trailGeom = new Map();     // mmsi → { sig, runs } — cached spline geometry (the A*/spline work)
-let trailWorker = null;        // Web Worker running the routed geometry off the main thread
+let trailGeom = new Map();     // mmsi → { sig, runs } — cached spline geometry (cheap re-style)
 let unsubscribeVessels = null;
 let unsubscribeSettings = null;
 let unsubscribeHighlight = null;
@@ -251,67 +252,23 @@ function drawRuns(vessel, runs, bounds) {
   trailLayers.set(mmsi, layers);
 }
 
-// The expensive routed geometry (A* + repair) runs OFF the main thread in a Web
-// Worker so the map never freezes. First paint is instant straight bridges
-// (inline); routed curves stream back and replace them. Pending trails form a
-// priority queue processed one at a time, WORST-FIRST — the ships whose straight
-// bridges cross the most land (gapEnrichmentScore) get their real curves first,
-// so the most-wrong trails self-correct soonest. If the Worker can't start (old
-// browser / file://), the same queue runs inline via setTimeout (brief jank, no
-// freeze).
-let pendingRoute = new Map(); // mmsi → { allPoints, sig, bounds, score } (latest wins)
-let routeInFlight = false;
-
-// Cache a routed result and redraw the vessel if its trail is still on screen.
-function applyRoutedRuns(mmsi, sig, bounds, runs) {
-  trailGeom.set(mmsi, { sig, runs });
-  const live = lastVessels.find(v => v.mmsi === mmsi);
-  if (live !== undefined && trailLayers.has(mmsi)) drawRuns(live, runs, bounds);
-}
-
-function startTrailWorker() {
-  try {
-    const w = new Worker(new URL('./trail_worker.js', import.meta.url), { type: 'module' });
-    w.onmessage = (e) => {
-      const { mmsi, sig, bounds, runs } = e.data;
-      if (runs) {
-        const cached = trailGeom.get(mmsi);
-        if (cached === undefined || cached.sig !== sig) applyRoutedRuns(mmsi, sig, bounds, runs);
-      }
-      routeInFlight = false;
-      pumpRoute();
-    };
-    w.onerror = () => { trailWorker = null; routeInFlight = false; pumpRoute(); };
-    return w;
-  } catch {
-    return null;
+// Spline the combined real+inferred point stream into styled runs — PURE, no
+// coastline, no A*. The server already routed every land-crossing gap and the
+// fakes arrive inline (flagged `fake`/`dashed`); a gap not yet precomputed has
+// no fakes, so it simply bridges straight (the fast "good-enough" fallback).
+function clientRuns(allPoints) {
+  const ctrl = allPoints.map(p => ({
+    lat: p.lat, lon: p.lon, t: p.t, speed: p.speed, tier: p.tier,
+    fake: p.fake === true, synthetic: p.dashed === 1,
+  }));
+  const runs = [];
+  for (const journey of splitJourneys(dedup(ctrl))) {
+    if (journey.length < 2) continue;
+    for (const run of runsBySynthetic(catmullRom(journey))) {
+      if (run.samples.length >= 2) runs.push(run);
+    }
   }
-}
-
-function requestRoutedRuns(mmsi, allPoints, sig, bounds, vesselLength) {
-  pendingRoute.set(mmsi, { allPoints, sig, bounds, vesselLength, score: gapEnrichmentScore(allPoints) });
-  pumpRoute();
-}
-
-function pumpRoute() {
-  if (routeInFlight || map === null || pendingRoute.size === 0) return;
-  // Pick the worst (highest enrichment score) pending trail.
-  let pickMmsi = null, pickJob = null, best = -Infinity;
-  for (const [mmsi, job] of pendingRoute) if (job.score > best) { best = job.score; pickMmsi = mmsi; pickJob = job; }
-  pendingRoute.delete(pickMmsi);
-  const cached = trailGeom.get(pickMmsi);
-  if (cached !== undefined && cached.sig === pickJob.sig) { pumpRoute(); return; } // already routed
-  routeInFlight = true;
-  if (trailWorker !== null) {
-    trailWorker.postMessage({ mmsi: pickMmsi, allPoints: pickJob.allPoints, sig: pickJob.sig, bounds: pickJob.bounds, vesselLength: pickJob.vesselLength });
-  } else {
-    setTimeout(async () => {
-      await ensureRegionsForExtent(extentOf(pickJob.allPoints)); // load any foreign region this trail reaches
-      applyRoutedRuns(pickMmsi, pickJob.sig, pickJob.bounds, computeRuns(pickJob.allPoints, true, { vesselLength: pickJob.vesselLength }));
-      routeInFlight = false;
-      pumpRoute();
-    }, 0);
-  }
+  return runs;
 }
 
 function drawTrail(vessel, points, token) {
@@ -324,11 +281,12 @@ function drawTrail(vessel, points, token) {
   // API returns points newest-first; reverse to chronological order for drawing.
   const chronological = [...points].reverse();
 
-  // Extend to the vessel's current position so the trail is always live.
+  // Extend to the vessel's current position so the trail is always live. The
+  // newest point is always a real fix (inferred points sit between reals).
   const last = chronological[chronological.length - 1];
   const allPoints = (last.lat === vessel.lat && last.lon === vessel.lon)
     ? chronological
-    : [...chronological, { ...last, lat: vessel.lat, lon: vessel.lon }];
+    : [...chronological, { ...last, lat: vessel.lat, lon: vessel.lon, fake: false, dashed: 0 }];
 
   // When AIS reports no true heading, infer direction of travel from the last
   // two distinct trail points and rotate the arrow to match.
@@ -356,17 +314,13 @@ function drawTrail(vessel, points, token) {
   const bounds = { t0: allPoints[0].t, t1: lastPt.t };
   const sig = `${allPoints.length}|${allPoints[0].t}|${lastPt.t}|${lastPt.lat},${lastPt.lon}`;
 
-  // Full routed geometry is cached per vessel keyed on trail content, and the
-  // expensive A* depends only on the points (not highlight/fade). Cache hit →
-  // draw the curves immediately. Cache miss → paint instant straight bridges
-  // now and queue the routing to fill in.
+  // Spline geometry depends only on the points, not highlight/fade — cache it per
+  // vessel so re-styling on poll/highlight/settings stays cheap. The spline is
+  // pure now (server did the A*), so a miss computes inline without freezing.
   const cached = trailGeom.get(mmsi);
-  if (cached !== undefined && cached.sig === sig) {
-    drawRuns(vessel, cached.runs, bounds);
-    return;
-  }
-  drawRuns(vessel, computeRuns(allPoints, false), bounds);
-  requestRoutedRuns(mmsi, allPoints, sig, bounds, vessel.length);
+  const runs = (cached !== undefined && cached.sig === sig) ? cached.runs : clientRuns(allPoints);
+  if (cached === undefined || cached.sig !== sig) trailGeom.set(mmsi, { sig, runs });
+  drawRuns(vessel, runs, bounds);
 }
 
 async function scheduleTrails(visibleVessels, token) {
@@ -380,7 +334,6 @@ async function scheduleTrails(visibleVessels, token) {
   for (const mmsi of trailGeom.keys()) {
     if (!liveSet.has(mmsi)) trailGeom.delete(mmsi);
   }
-  for (const mmsi of pendingRoute.keys()) if (!liveSet.has(mmsi)) pendingRoute.delete(mmsi);
 
   const TRAIL_TIERS = ['direct', 'local'];
 
@@ -516,8 +469,6 @@ export function mount(root) {
   map = L.map('leaflet-map', { zoomControl: true, attributionControl: true, preferCanvas: true })
     .setView([HOME.lat, HOME.lon], 11);
 
-  trailWorker = startTrailWorker();
-
   L.tileLayer(TILE_URL, { attribution: TILE_ATTR, maxZoom: 18 }).addTo(map);
 
   requestAnimationFrame(() => map !== null && map.invalidateSize());
@@ -540,21 +491,75 @@ export function mount(root) {
   });
   L.marker([HOME.lat, HOME.lon], { icon: homeIcon, interactive: false }).addTo(map);
 
-  // ── TODO: Viewshed obstructions ────────────────────────────────────────────
-  // Show radial shadows emanating from the home point where the building or
-  // terrain blocks the view. The shaded regions should track pan/zoom perfectly
-  // with smooth gradients — dark/opaque near the home point, fading to
-  // transparent further out. Some edges firm, some soft/faded.
-  //
-  // View obstructions from the window (bearings from HOME = 48.429861, -123.362194):
-  //   1. Left/east block: everything counterclockwise of bearing 141.07° is
-  //      blocked. This edge (141.07°) is a firm edge. The left (counterclockwise)
-  //      side of this wedge should fade to zero over ~25° of arc.
-  //   2. Between bearing 153.66° and 162.38° — firm edges.
-  //   3. Between bearing 183.26° and 204.86° — firm edges.
-  // Right/west side (clockwise of everything above) is unblocked.
-  // Radial extent should reach ~0 before the Washington coast (~30 km).
-  //
+  // ── Viewshed obstructions (canvas overlay) ──────────────────────────────────
+  // Dark sectors radiating from HOME where terrain/building blocks the view.
+  // Each sector: opaque at home, fades radially to transparent at OBST_MAX_KM.
+  // View obstructions (bearings from HOME):
+  //   1. East block: 0°→141.07° — firm edge at 141.07°, fades out over the 25° before it
+  //   2. 153.66°→162.38° — firm edges
+  //   3. 183.26°→204.86° — firm edges
+
+  const OBST_MAX_KM = 30;
+  const OBST_MAX_OPACITY = 0.55;
+  const OBST_FADE_STRIPS = 60;
+
+  const obstCanvas = L.DomUtil.create('canvas', '');
+  obstCanvas.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none';
+  map.getPanes().overlayPane.appendChild(obstCanvas);
+
+  function drawObstructions() {
+    const size = map.getSize();
+    obstCanvas.width  = size.x;
+    obstCanvas.height = size.y;
+    const ctx = obstCanvas.getContext('2d');
+    if (!ctx) return;
+
+    const homePx = map.latLngToContainerPoint([HOME.lat, HOME.lon]);
+    const mPerPx  = 156543.03392 * Math.cos(HOME.lat * Math.PI / 180) / Math.pow(2, map.getZoom());
+    const outerPx = (OBST_MAX_KM * 1000) / mPerPx;
+
+    // Geographic bearing (N=0, clockwise) → canvas angle (E=0, clockwise, radians).
+    const toCanvas = brg => (brg - 90) * Math.PI / 180;
+
+    function fillArc(startBrg, endBrg, opacity) {
+      const grad = ctx.createRadialGradient(homePx.x, homePx.y, 0, homePx.x, homePx.y, outerPx);
+      grad.addColorStop(0,   `rgba(0,0,0,${opacity.toFixed(3)})`);
+      grad.addColorStop(1,   'rgba(0,0,0,0)');
+      ctx.beginPath();
+      ctx.moveTo(homePx.x, homePx.y);
+      ctx.arc(homePx.x, homePx.y, outerPx, toCanvas(startBrg), toCanvas(endBrg));
+      ctx.closePath();
+      ctx.fillStyle = grad;
+      ctx.fill();
+    }
+
+    // Draw a sector with optional angular fades on either edge.
+    // fadeRight: degrees at the endBrg side that fade from MAX_OPACITY → 0.
+    function drawSector(startBrg, endBrg, fadeRight = 0) {
+      const solidEnd = endBrg - fadeRight;
+      if (solidEnd > startBrg) fillArc(startBrg, solidEnd, OBST_MAX_OPACITY);
+      if (fadeRight <= 0) return;
+      const step = fadeRight / OBST_FADE_STRIPS;
+      for (let i = 0; i < OBST_FADE_STRIPS; i++) {
+        fillArc(
+          solidEnd + step * i,
+          solidEnd + step * (i + 1),
+          OBST_MAX_OPACITY * (1 - (i + 0.5) / OBST_FADE_STRIPS),
+        );
+      }
+    }
+
+    // East block: solid 0°→116.07°, then fades to 0 at the view-window edge (141.07°).
+    drawSector(0, 141.07, 25);
+    // Obstructions with firm edges on both sides.
+    drawSector(153.66, 162.38);
+    drawSector(183.26, 204.86);
+  }
+
+  map.on('move',    drawObstructions);
+  map.on('zoomend', drawObstructions);
+  map.on('resize',  drawObstructions);
+  drawObstructions();
 
   unsubscribeVessels = subscribeVessels(onVesselsUpdate);
   unsubscribeSettings = subscribeSettings(onSettingsUpdate);
@@ -580,9 +585,6 @@ export function unmount() {
   }
   trailLayers.clear();
   trailGeom.clear();
-  pendingRoute.clear();
-  routeInFlight = false;
-  if (trailWorker !== null) { trailWorker.terminate(); trailWorker = null; }
   trailReqToken++;
   container = null;
   statusEl = null;

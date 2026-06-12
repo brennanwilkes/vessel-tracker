@@ -48,3 +48,18 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      # Lets the global scan trigger the trail-precompute workflow on completion
+      # (workflow_dispatch). Optional — without it, the precompute cron still runs
+      # hourly. Set the GH_DISPATCH_TOKEN secret to a PAT with `actions:write`.
+      - name: Set GITHUB_DISPATCH_TOKEN secret
+        run: |
+          if [ -n "$GH_DISPATCH_TOKEN" ]; then
+            echo "$GH_DISPATCH_TOKEN" | npx wrangler secret put GITHUB_DISPATCH_TOKEN
+          else
+            echo "GH_DISPATCH_TOKEN not set — skipping (precompute cron fallback still runs)."
+          fi
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          GH_DISPATCH_TOKEN: ${{ secrets.GH_DISPATCH_TOKEN }}

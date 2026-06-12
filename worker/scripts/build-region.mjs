@@ -15,7 +15,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { stitchCoastline, closeOpenChains } from './lib-osm-coastline.mjs';
+import { stitchCoastline } from './lib-osm-coastline.mjs';
 import { assembleWater } from './lib-osm-water.mjs';
 
 const LAND_SIMPLIFY_KM = 0.04;   // ~40 m harbour-grade
@@ -98,15 +98,24 @@ function clipRingToBox(ring, bbox) {
 
 // Build a region from already-parsed OSM dumps. bbox = {minLat,minLon,maxLat,maxLon}.
 // Writes frontend/app/coast/<id>.js and returns stats.
-export function buildRegion({ id, bbox, coastElements, waterElements, outDir = COAST_DIR }) {
-  // Land (OSM coastline)
-  const { closed, open } = stitchCoastline(coastElements ?? []);
-  const mainland = closeOpenChains(open, bbox, true);
+//
+// Ships fine LAND (validated against the coarse layer to drop the closeOpenChains
+// ocean-as-land rings) + navigable WATER. The frontend uses regions to OVERRIDE coarse
+// within their bbox (region_coast.js), so fine region land is what keeps shipping
+// waterways (Inside Passage, port/river approaches) open where coarse would close them.
+export function buildRegion({ id, bbox, coastElements, waterElements, landSimplifyKm = LAND_SIMPLIFY_KM, outDir = COAST_DIR }) {
+  // Land = ISLANDS only (closed OSM coastline ways — reliable closed loops). We DROP the
+  // open-mainland perimeter closure (closeOpenChains): it's orientation-fragile and was
+  // filling open ocean as land (the Golden-Gate bug). The coarse layer handles the
+  // mainland correctly; region fine-land exists to open inter-island channels (Inside
+  // Passage) where coarse 2 km wrongly merges islands and closes the passages. Open-coast
+  // ports therefore carry no fine land (water-only) — coarse land + region water is right.
+  const { closed } = stitchCoastline(coastElements ?? []);
   const land = [];
-  for (const raw of closed.concat(mainland)) {
+  for (const raw of closed) {
     const ring = clipRingToBox(raw, bbox);
     if (ring.length < 4 || spanKm(ring) < LAND_DROP_SPAN_KM) continue;
-    const simp = simplifyRing(ring, LAND_SIMPLIFY_KM).map(([lo, la]) => [round(la), round(lo)]);
+    const simp = simplifyRing(ring, landSimplifyKm).map(([lo, la]) => [round(la), round(lo)]);
     if (simp.length >= 4) land.push(simp);
   }
   land.sort((a, b) => b.length - a.length);

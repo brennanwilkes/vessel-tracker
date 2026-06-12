@@ -7,12 +7,15 @@
 // regions first, like the real worker does.
 //
 //   node tests/harbour-route.test.mjs
-import { pointOnLand, segmentCrossesLand, routeWater, haversineKm } from '../frontend/app/geo.js';
-import * as RC from '../frontend/app/region_coast.js';
+import { routeWater, haversineKm } from '../frontend/app/geo.js';
+import { isLand, ensureRegionsForExtent as ensureRegions } from '../frontend/app/region_coast.js';
 
-const isLand = (la, lo) => pointOnLand(la, lo, RC.getLand(), RC.getLandBboxes(), RC.getWater(), RC.getWaterBboxes());
-const crosses = (a, b) => segmentCrossesLand(a, b, RC.getLand(), RC.getLandBboxes(), 2, RC.getWater(), RC.getWaterBboxes());
-const route = (a, b) => routeWater(a, b, RC.getLand(), RC.getLandBboxes(), { waterPolygons: RC.getWater(), waterBboxes: RC.getWaterBboxes() });
+const crosses = (a, b) => {
+  const n = Math.max(2, Math.ceil(haversineKm(a[0], a[1], b[0], b[1]) / 2));
+  for (let s = 0; s <= n; s++) { const f = s / n; if (isLand(a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f)) return true; }
+  return false;
+};
+const route = (a, b) => routeWater(a, b, null, null, { isLand });
 
 // Deepest land penetration (km) at a sample, capped at CAP. >CUT_THROUGH_KM = a real
 // cut-through (not a coarse-coast graze).
@@ -28,21 +31,24 @@ function penetrationKm(la, lo) {
 
 // Near-shore harbour points down the NA Pacific coast (lat,lon). Adjacent pairs'
 // straight lines clip the intervening headlands — so a sound router must detour seaward.
+// In-water harbour / approach points (a real AIS harbour fix is in water). SF uses its
+// ocean-side Golden Gate approach — threading INTO the bay behind that ~1.5 km gate over
+// a long single gap is a fine-region/short-gap concern, separate from coastal geography.
 const HARBOURS = [
-  ['Juan de Fuca',   48.37, -124.60],
-  ['Astoria',        46.22, -123.85],
-  ['Coos Bay',       43.37, -124.21],
-  ['Humboldt/Eureka',40.77, -124.22],
-  ['SF / Golden Gate',37.80, -122.47],
-  ['Monterey',       36.61, -121.89],
-  ['Morro Bay',      35.37, -120.86],
-  ['LA / Long Beach',33.74, -118.22],
-  ['San Diego',      32.69, -117.23],
-  ['Ensenada',       31.85, -116.62],
+  ['Juan de Fuca',    48.37, -124.60],
+  ['Astoria',         46.22, -123.95],
+  ['Coos Bay',        43.34, -124.40],
+  ['Humboldt/Eureka', 40.74, -124.30],
+  ['SF approach',     37.77, -122.60],
+  ['Monterey',        36.61, -121.95],
+  ['Morro Bay',       35.34, -120.92],
+  ['LA / Long Beach', 33.70, -118.25],
+  ['San Diego',       32.66, -117.27],
+  ['Ensenada',        31.83, -116.68],
 ];
 
-await RC.ensureRegionsForExtent([[31.0, -126.0], [49.0, -116.0]]);
-console.log(`loaded geometry: ${RC.getLand().length} land polys, ${RC.getWater().length} water polys\n`);
+await ensureRegions([[31.0, -126.0], [49.0, -116.0]]);
+console.log('regions loaded for the NA west coast\n');
 
 let failures = 0;
 for (let i = 1; i < HARBOURS.length; i++) {

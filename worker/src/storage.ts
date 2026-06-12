@@ -1,4 +1,4 @@
-import type { Env, VesselRow, PositionRow, StaticUpdate, Tier, MaxExtent } from './types';
+import type { Env, VesselRow, PositionRow, InferredRow, StaticUpdate, Tier, MaxExtent } from './types';
 
 const EXTENT_ORDER: Record<MaxExtent, number> = { direct: 0, local: 1, global: 2 };
 
@@ -278,6 +278,24 @@ export async function getTrack(env: Env, mmsi: number, tiers: Tier[], limit: num
   return result.results;
 }
 
+// Precomputed inferred waypoints for a vessel, optionally filtered to tiers
+// (a fake inherits its bracketing reals' tier so the client tier filter works).
+export async function getInferredTrack(env: Env, mmsi: number, tiers: Tier[]): Promise<InferredRow[]> {
+  if (tiers.length === 0) {
+    const result = await env.VESSELS_DB
+      .prepare(`SELECT lat,lon,t,tier,dashed FROM inferred_positions WHERE mmsi=?1 ORDER BY t ASC`)
+      .bind(mmsi)
+      .all<InferredRow>();
+    return result.results;
+  }
+  const placeholders = tiers.map((_, i) => `?${i + 2}`).join(',');
+  const result = await env.VESSELS_DB
+    .prepare(`SELECT lat,lon,t,tier,dashed FROM inferred_positions WHERE mmsi=?1 AND tier IN (${placeholders}) ORDER BY t ASC`)
+    .bind(mmsi, ...tiers)
+    .all<InferredRow>();
+  return result.results;
+}
+
 export interface ZoneVisitRow {
   zone_id: string;
   first_ts: number;
@@ -320,4 +338,73 @@ export async function getOfInterestMmsis(env: Env, staleCutoffMs?: number): Prom
     .prepare(`SELECT mmsi FROM vessels WHERE of_interest = 1 ORDER BY last_seen ASC`)
     .all<{ mmsi: number }>();
   return result.results.map(r => r.mmsi);
+}
+
+// ── Rotating foreign scan support ────────────────────────────────────────────
+// The foreign scan classifies relevance from a vessel's stored type/length (the
+// current drain often carries only a PositionReport, not the ShipStaticData), so it
+// needs those fields — but unlike the live scans it does NOT need the full position
+// reference. A dedicated lightweight loader keeps it separate from loadVesselStates.
+export interface ForeignVesselState {
+  mmsi: number;
+  vessel_type: number | null;
+  length: number | null;
+  of_interest: number;
+  last_seen: number;
+}
+
+export async function loadForeignStates(env: Env, mmsis: number[]): Promise<Map<number, ForeignVesselState>> {
+  if (mmsis.length === 0) return new Map();
+  const stmts: D1PreparedStatement[] = [];
+  for (let i = 0; i < mmsis.length; i += MMSI_CHUNK) {
+    const chunk = mmsis.slice(i, i + MMSI_CHUNK);
+    const placeholders = chunk.map((_, k) => `?${k + 1}`).join(',');
+    stmts.push(
+      env.VESSELS_DB
+        .prepare(`SELECT mmsi,vessel_type,length,of_interest,last_seen FROM vessels WHERE mmsi IN (${placeholders})`)
+        .bind(...chunk)
+    );
+  }
+  const results = await env.VESSELS_DB.batch<ForeignVesselState>(stmts);
+  const map = new Map<number, ForeignVesselState>();
+  for (const result of results) for (const row of result.results) map.set(row.mmsi, row);
+  return map;
+}
+
+// Tiny key/value cursor in scan_meta (used by the rotating foreign scan to remember
+// which slice of foreign ports to drain next). Missing key → 0.
+export async function getScanCursor(env: Env, key: string): Promise<number> {
+  const row = await env.VESSELS_DB
+    .prepare(`SELECT value FROM scan_meta WHERE key=?1`)
+    .bind(key)
+    .first<{ value: number }>();
+  return row?.value ?? 0;
+}
+
+export async function setScanCursor(env: Env, key: string, value: number): Promise<void> {
+  await env.VESSELS_DB
+    .prepare(`INSERT INTO scan_meta (key,value) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=?2`)
+    .bind(key, value)
+    .run();
+}
+
+// Which (mmsi, zone_id) pairs already have a zone_visits row, for the heard MMSIs.
+// The foreign scan drops a single anchor position only on a vessel's FIRST entry to a
+// zone (so the precompute can draw the ocean crossing) — not on every rotation.
+export async function loadZoneVisitKeys(env: Env, mmsis: number[]): Promise<Set<string>> {
+  const keys = new Set<string>();
+  if (mmsis.length === 0) return keys;
+  const stmts: D1PreparedStatement[] = [];
+  for (let i = 0; i < mmsis.length; i += MMSI_CHUNK) {
+    const chunk = mmsis.slice(i, i + MMSI_CHUNK);
+    const placeholders = chunk.map((_, k) => `?${k + 1}`).join(',');
+    stmts.push(
+      env.VESSELS_DB
+        .prepare(`SELECT mmsi,zone_id FROM zone_visits WHERE mmsi IN (${placeholders})`)
+        .bind(...chunk)
+    );
+  }
+  const results = await env.VESSELS_DB.batch<{ mmsi: number; zone_id: string }>(stmts);
+  for (const result of results) for (const row of result.results) keys.add(`${row.mmsi}|${row.zone_id}`);
+  return keys;
 }

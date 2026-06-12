@@ -91,6 +91,13 @@ export const ROUTE_SMOOTHING = { minStepKm: 1, targetPoints: 16, passes: 12, fac
 // between [minLenM → small] and [maxLenM → large]; null/unknown length → default.
 export const NARROW_WEIGHT = { minLenM: 20, maxLenM: 120, small: 0.5, large: 7, default: 3 };
 
+// Server-side precompute (worker/scripts/precompute-trails.mjs) stores only the
+// inferred waypoints of each routed segment, reduced by `simplifyForSpline`
+// (trail_spline.js) to the FEWEST control points whose Catmull-Rom spline still
+// reproduces the full curve within `tolKm` and stays off land. Smaller tol = more
+// fidelity but more stored points (D1 write budget); ~30 m is visually identical.
+export const TRAIL_SIMPLIFY = { tolKm: 0.03 };
+
 export const DEFAULT_EXTENT_FILTERS = { local_boat: true, passing_through: true, distant_visitor: true };
 export const DEFAULT_TRAIL_FILTERS  = { local_boat: true, passing_through: true, distant_visitor: false };
 

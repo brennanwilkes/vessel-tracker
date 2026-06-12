@@ -22,9 +22,10 @@ app/
   store.js          — 30s polling loop, pub/sub (subscribe returns an unsubscribe fn)
   settings_store.js — extent + trail filter state, localStorage persistence, passesExtentFilter()
   geo.js            — haversineNm, haversineKm, bearingDeg, pointInPolygon, pointOnLand, segmentCrossesLand, routeWater (A* water router)
-  trail_geometry.js — PURE, DOM-free trail pipeline (dedup → splitJourneys → buildControlPoints → repairOffLand → catmullRom → runsBySynthetic → computeRuns). Shared by map_page + the Web Worker + (future) the precompute cron. Imports only geo/coastline/config.
-  trail_worker.js   — module Web Worker: runs computeRuns(…, true) (A* + repair) off the main thread
-  map_page.js       — Leaflet map, dot/arrow markers, trail drawing (quick straight-bridge first paint → Worker fills in routed curves), caching, extent filter, settings subscription
+  trail_spline.js   — PURE, coastline-free spline half (dedup → splitJourneys → catmullRom → runsBySynthetic + simplifyForSpline). The ONLY trail module the BROWSER imports — imports geo math + config, NO coastline. Shared with the precompute.
+  trail_geometry.js — LAND-AWARE half (denoise, smoothRoute, buildControlPoints, repairOffLand, computeControlPoints, harvestInferredSegments, computeRuns). Imports region-aware coastline → NODE (precompute cron) + tests only; never the browser. Re-exports trail_spline's pure pieces for existing callers/tests.
+  map_page.js       — Leaflet map, dot/arrow markers, trail drawing: splines the combined real+inferred /track stream with trail_spline (pure, no A*/coastline), per-vessel render cache, extent filter, settings subscription
+  (trail_worker.js — REMOVED: in-browser A* is gone; the precompute cron does it server-side)
   list_page.js      — distance-sorted vessel list, extent filter, unit toggle (nm/km in localStorage)
   trails.js         — lazy trail fetch + in-memory cache (TTL + tier-union widening)
   settings_page.js  — settings page: extent bucket toggles + trail tier toggles
@@ -89,24 +90,23 @@ continuously. The pipeline (`map_page.js`, all functions exported for testing):
    went around, so we route it regardless of gap size; the detour is marked
    `inferred` (dashed) **only** when it also spans a data gap
    (`LAND_AVOIDANCE.gapMinMs`/`gapMinKm`) — routing that fills dense tracking
-   around an island is confident movement, drawn solid. Each routed gap's raw
-   waypoints are first run through **`smoothRoute`** (densify to ~uniform spacing,
-   then land-rejecting Laplacian relaxation with pinned endpoints — see below) and
-   **tangent-anchored** to the boat's real course either side of the gap, so the
-   inferred path can't kink where it meets the real track. Final dedup collapses
-   near-duplicate spliced points. (Pass `route=false` for the instant first paint
-   — see Performance.)
+   around an island is confident movement, drawn solid. Each routed gap is given
+   the boat's real **entry/exit heading** (COG just outside the gap) to bias A\*
+   (see `routeWater` below), and its raw waypoints are run through **`smoothRoute`**
+   (densify + land-rejecting Laplacian relaxation — see below), so the inferred
+   path leaves/rejoins the real track along the boat's actual course and can't kink
+   where they meet. Final dedup collapses near-duplicate spliced points. (Pass
+   `route=false` for the instant first paint — see Performance.)
    - **`smoothRoute`** — A\*+string-pull is a shortest water path with no notion of
-     a turning radius, so spliced raw it produces sharp corners (esp. at the
-     real→A\* boundary). `smoothRoute` densifies the path to ~uniform spacing
-     (`ROUTE_SMOOTHING.minStepKm`/`targetPoints`), then relaxes each interior point
-     toward its neighbour-midpoint (`passes`/`factor`) with the **endpoints pinned**
-     and a move accepted **only if BOTH touched segments stay clear of land** (a
-     point-only check would let the curve bulge ashore as relaxation erodes A\*'s
-     clearance). Result: open-water doglegs round out, channel-forced turns stay —
-     the inferred curve never shows a turn a boat couldn't make, yet stays
-     water-tight. Tangent anchors (`stepBeyond` a short step along the real COG just
-     outside the gap, water-checked) make the exit/entry tangential.
+     a turning radius, so spliced raw it produces sharp corners. `smoothRoute`
+     densifies the path to ~uniform spacing (`ROUTE_SMOOTHING.minStepKm`/`targetPoints`),
+     then relaxes each interior point toward its neighbour-midpoint (`passes`/`factor`)
+     with the **endpoints pinned** and a move accepted **only if BOTH touched
+     segments stay clear of land** (a point-only check would let the curve bulge
+     ashore as relaxation erodes A\*'s clearance). Result: open-water doglegs round
+     out, channel-forced turns stay — the inferred curve never shows a turn a boat
+     couldn't make, yet stays water-tight. (The real→A\* *boundary* kink is fixed
+     upstream by `routeWater`'s heading bias, not here.)
 4. `repairOffLand` — re-splines and, for each output run on land, looks at the
    bracketing control points: **skip if either is itself on our "land"** (a real
    fix our coastline wrongly calls land — trust the boat, don't fight); else if
@@ -157,6 +157,18 @@ snap-to-water net.
   small craft (≤`minLenM` 20 m → `small` 0.5) dart through tight Gulf Island passes;
   linear between; null/unknown length → `default` 3. Tune up if a vessel still
   takes a tributary (watch the regression for over-detours).
+- **Heading bias** (`entryBearing`/`exitBearing`, `headingWeight` 5, `headingKm` 4):
+  near the endpoints we KNOW the vessel's real course — the COG into the start and
+  out of the goal (threaded from `buildControlPoints`: `real[i-2]→a` and
+  `b→real[i+1]`). Early moves opposing the entry heading (and late moves opposing
+  the exit heading) are penalized, decaying to 0 over `headingKm`. Without it the
+  proximity cost could make A\* **leave the start by reversing the boat's heading**
+  — backtracking to skirt a narrow exit — which rendered as a sharp ~150° kink
+  right at the real→inferred boundary (the South Pender case: boat steaming WNW
+  into Swanson Channel, A\* backtracked SE 5 km before turning). Trust the boat: it
+  leaves on the course it was actually steering; the open-water middle is still
+  shaped by proximity. Soft cost (changes cost, not passability → water-tight).
+  Omitted at journey ends (no neighbour → no bias).
 - **Adaptive cell size** (`cellKm`, 0.2–1 km by gap length) and **margin**
   (`marginKm`, 12–90 km). The 0.2 km floor lets it thread Gulf Island channels
   and harbour mouths now that the coastline is high-resolution.
@@ -167,29 +179,25 @@ snap-to-water net.
   so Vancouver↔California/Mexico routes bow around the continent instead of bridging
   straight through it. Truly-uncovered = open Pacific / other oceans.
 
-### Performance: cached geometry + off-thread routing
+### Performance: A* is server-side; the client only splines
 
-The spline + A* work depends only on the trail points, not on highlight/fade
-state, so it's cached per vessel in `trailGeom` keyed on a trail signature
-(`length|firstT|lastT|lastLatLon`) and recomputed only when the trail changes;
-re-styling on every redraw (poll / highlight / settings) is cheap (`drawRuns`).
-Without this, every highlight toggle re-ran A* for all vessels — jank.
+A* no longer runs in the browser. The land-crossing gaps are routed by the
+**server-side precompute cron** and the inferred waypoints arrive inline in
+`/track` (flagged `fake`/`dashed`). `drawTrail` just splines the combined
+real+inferred stream with the PURE pipeline (`clientRuns` → `trail_spline`): no
+A*, no `repairOffLand`, no coastline data loaded in the browser at all. So a
+reload is instant and there's no jank to hide. See `worker/CLAUDE.md` →
+"Server-side inferred-positions precompute — IMPLEMENTED".
 
-First paint stays slick: on a cache miss `drawTrail` paints instant straight
-bridges (`computeRuns(allPoints, false)` — no A*) immediately, then queues the full
-routed compute for a **Web Worker** (`trail_worker.js`, off the main thread — A*
-is 0.1–2 s/vessel and would freeze the map inline). The Worker posts back styled
-runs; `applyRoutedRuns` caches them and redraws the vessel if still on screen.
-Pending trails are a priority queue (`pendingRoute`) processed one at a time
-**worst-first**: `gapEnrichmentScore` (cheap — land-crossing gap km, no A*) ranks
-them so the most-wrong trails get their real curves first. If the Worker can't
-start (old browser / `file://`), the same queue runs inline via `setTimeout`
-(brief jank, no freeze). **Note:** the Worker path can't run under Node — verify
-it in a real browser. Per-vessel A* is still ~0.1–2 s, so cold loads with many
-gapped vessels stream in over a few seconds (see Future work for the durable fix).
+The pure spline still depends only on the points (not highlight/fade), so it's
+cached per vessel in `trailGeom` keyed on the trail signature
+(`length|firstT|lastT|lastLatLon`); re-styling on poll/highlight/settings stays
+cheap (`drawRuns`). A cache miss recomputes inline — cheap now.
 
-In-memory cache only — **a reload recomputes everything.** The durable fix is the
-server-side precompute (Future work).
+**Fallback:** a gap the cron hasn't routed yet has no fakes, so it simply bridges
+straight (may cross land briefly) until the next precompute run fills it. The
+global scan triggers that run on completion, so the window is minutes. This is the
+best achievable without shipping coastline to the browser (a deliberate trade).
 
 ### Coastline data (two layers)
 
@@ -249,12 +257,10 @@ gracefully until they land.
    with `worker/scripts/build-water.mjs`. See `worker/CLAUDE.md` → "Water layer —
    rivers & harbours" for the regenerate steps + the resolution policy. (Open follow-up:
    a regional spatial index before global coverage so `pointOnLand` stays local.)
-2. **Server-side precompute cron — DEFERRED until the dataset is stable.** Moving
-   A* to a GH-Actions cron (NOT a CF Worker — CPU-capped) storing sparse inferred
-   waypoints in `inferred_positions` would fix cold-load + reload-recompute. But
-   precomputed points are derived from the coastline, so while we're still
-   expanding the dataset (item 1, more fine zones) every change would invalidate
-   them — build it only once the data is stable. Interim: the Web Worker +
-   worst-first ordering keep it usable. Full design (incl. D1 write-budget rules,
-   `generator_version` for regeneration) in `worker/CLAUDE.md` → "Planned
-   (DEFERRED …): server-side inferred-positions precompute".
+2. **Server-side precompute cron — DONE.** A* moved to a GitHub Actions cron
+   (`worker/scripts/precompute-trails.mjs`); sparse inferred waypoints stored in
+   `inferred_positions`, served unioned into `/track`, re-splined client-side with
+   `trail_spline.js`. The browser no longer loads coastline or runs A*. See
+   `worker/CLAUDE.md` → "Server-side inferred-positions precompute — IMPLEMENTED"
+   and the Performance section above. (Open follow-up from item 1 still stands: a
+   regional spatial index before global coverage so `isLand` stays local.)
