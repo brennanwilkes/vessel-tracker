@@ -571,9 +571,14 @@ export function mount(root) {
     drawSector(183.26, 204.86);
   }
 
-  map.on('move',    drawObstructions);
-  map.on('zoom',    drawObstructions);
-  map.on('resize',  drawObstructions);
+  // Pan: latLngToContainerPoint reads the live CSS translate so redraws track correctly.
+  // Zoom: Leaflet CSS-scales mapPane to animate, but latLngToContainerPoint immediately
+  // uses the TARGET zoom coords — any redraw mid-animation is at the wrong scale.
+  // Solution: hide during zoom animation, redraw once it settles.
+  map.on('move',      drawObstructions);
+  map.on('zoomstart', () => { obstCanvas.style.visibility = 'hidden'; });
+  map.on('zoomend',   () => { obstCanvas.style.visibility = ''; drawObstructions(); });
+  map.on('resize',    drawObstructions);
   drawObstructions();
 
   unsubscribeVessels = subscribeVessels(onVesselsUpdate);
