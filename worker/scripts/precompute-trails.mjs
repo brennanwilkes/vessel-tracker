@@ -9,12 +9,21 @@
 //   node scripts/precompute-trails.mjs [--local] [--dry-run] [--regenerate]
 //                                      [--limit N] [--mmsi N]
 //
+// I/O is BATCHED so the run is dominated by A* CPU, not DB round-trips: remote
+// uses the D1 HTTP query API (one fetch per chunk — no per-vessel process spawn,
+// and no `wrangler d1 execute --file` import-lock, which is what prints "your D1
+// will be unavailable"). All reads are chunked `IN(...)`; all writes accumulate
+// into one batched multi-statement flush at the end. `--local` falls back to
+// wrangler against the local dev DB. Needs CLOUDFLARE_API_TOKEN +
+// CLOUDFLARE_ACCOUNT_ID (the deploy workflow provides both).
+//
 // Converge, don't churn: a vessel is skipped (no A*, no write) when either its
 // newest position hasn't advanced since we last looked (precompute_state) OR its
 // already-stored fakes still keep the curve off land. Only a new land-crossing
-// triggers a recompute, and only changed segments are written. Bump
-// GENERATOR_VERSION (or pass --regenerate) to force a full rebuild after a
-// routing/coastline change.
+// triggers a recompute, and only changed segments are written. So the FIRST run
+// (empty state, every gapped vessel needs backfill) is the slow one; later runs
+// touch only the handful of vessels that moved into a new gap since. Bump
+// GENERATOR_VERSION (or pass --regenerate) to force a full rebuild.
 import { execFileSync } from 'node:child_process';
 import { writeFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -26,156 +35,100 @@ import { dedup, splitJourneys, catmullRom } from '../../frontend/app/trail_splin
 import { haversineKm } from '../../frontend/app/geo.js';
 
 const GENERATOR_VERSION = 1;
-const DB = 'vessel-tracker';
+const DB_NAME = 'vessel-tracker';
+const API_BASE = 'https://api.cloudflare.com/client/v4';
+const READ_CHUNK = 60;   // mmsis per IN(...) read
+const WRITE_CHUNK = 50;  // statements per batched write
 
 const argv = process.argv.slice(2);
 const has = (f) => argv.includes(f);
 const valOf = (f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : undefined; };
 const DRY = has('--dry-run');
-const ENV_FLAG = has('--local') ? '--local' : '--remote';
+const LOCAL = has('--local');
 const REGENERATE = has('--regenerate');
 const LIMIT = valOf('--limit') ? parseInt(valOf('--limit'), 10) : Infinity;
 const ONLY_MMSI = valOf('--mmsi') ? parseInt(valOf('--mmsi'), 10) : null;
 
-const tmp = mkdtempSync(join(tmpdir(), 'precompute-'));
-
-// ── D1 via wrangler (same backend as scripts/db-*) ──────────────────────────
-function query(sql) {
-  const out = execFileSync(
-    'npx',
-    ['wrangler', 'd1', 'execute', DB, ENV_FLAG, '--json', '--command', sql],
-    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 256 * 1024 * 1024 }
-  );
-  const start = out.indexOf('[');
-  const parsed = JSON.parse(out.slice(start));
-  return parsed[0]?.results ?? [];
-}
-
-// Run a batch of write statements from a file (multiple statements per call).
-function execWrites(statements, label) {
-  if (statements.length === 0) return;
-  if (DRY) return;
-  const file = join(tmp, `${label}.sql`);
-  writeFileSync(file, statements.join('\n'));
-  execFileSync('npx', ['wrangler', 'd1', 'execute', DB, ENV_FLAG, '--file', file], { stdio: 'inherit' });
-}
-
+const tmp = LOCAL ? mkdtempSync(join(tmpdir(), 'precompute-')) : null;
+const chunk = (arr, n) => { const out = []; for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n)); return out; };
 const sqlStr = (s) => `'${String(s).replace(/'/g, "''")}'`;
 
-// A segment's stable key: the bracketing real timestamps (positions are
-// immutable, so these pin the bracket and its coords) + vessel length + version.
-// Length jitter is rare and a correction SHOULD regenerate, so it's included raw.
-function segHash(aT, bT, length) {
-  return `${aT}-${bT}-${length === null || length === undefined ? 'n' : length}-v${GENERATOR_VERSION}`;
+// ── D1 access ────────────────────────────────────────────────────────────────
+function mustEnv(name) {
+  const v = process.env[name];
+  if (!v) throw new Error(`Missing required env var: ${name} (set it, or pass --local)`);
+  return v;
 }
 
-// ── Main ────────────────────────────────────────────────────────────────────
-async function main() {
-  const vessels = query(
-    `SELECT mmsi, length, last_pos_ts FROM vessels
-     WHERE of_interest = 1 AND first_direct_at IS NOT NULL AND last_pos_ts IS NOT NULL
-     ORDER BY last_seen DESC`
-  ).filter(v => ONLY_MMSI === null || v.mmsi === ONLY_MMSI);
-
-  const stateRows = query(`SELECT mmsi, last_pos_ts_seen FROM precompute_state`);
-  const lastSeenTs = new Map(stateRows.map(r => [r.mmsi, r.last_pos_ts_seen]));
-
-  let examined = 0, skippedHeuristic = 0, skippedConverged = 0;
-  let segmentsWritten = 0, pointsWritten = 0, segmentsDeleted = 0;
-  const now = Date.now();
-
-  for (const v of vessels) {
-    if (examined >= LIMIT) break;
-
-    // Heuristic skip: no new movement since we last examined this vessel.
-    if (!REGENERATE && lastSeenTs.has(v.mmsi) && v.last_pos_ts <= lastSeenTs.get(v.mmsi)) {
-      skippedHeuristic++;
-      continue;
-    }
-    examined++;
-
-    const points = query(
-      `SELECT lat, lon, speed, ts, tier FROM positions WHERE mmsi = ${v.mmsi} ORDER BY ts ASC`
-    ).map(r => ({ lat: r.lat, lon: r.lon, speed: r.speed, t: r.ts, tier: r.tier }));
-    if (points.length < 2) { upsertState(v.mmsi, v.last_pos_ts, now); continue; }
-
-    await ensureRegionsForExtent(extentOf(points));
-
-    const existing = query(
-      `SELECT seg_hash, lat, lon, t, tier, dashed FROM inferred_positions WHERE mmsi = ${v.mmsi}`
-    );
-
-    // Cheap convergence check (no A*): does the curve through the live fixes +
-    // already-stored fakes still stay off land? If so, nothing to do.
-    if (!REGENERATE && curveIsLandFree(points, existing)) {
-      skippedConverged++;
-      upsertState(v.mmsi, v.last_pos_ts, now);
-      continue;
-    }
-
-    // Recompute: route every land-crossing segment, keep the minimal water-tight
-    // fakes. Diff against what's stored — write only new/changed segments.
-    const segments = harvestInferredSegments(points, { vesselLength: v.length });
-    const wantBySeg = new Map();      // seg_hash → fakes (with inherited tier)
-    for (const seg of segments) {
-      const hash = segHash(seg.aT, seg.bT, v.length);
-      const tier = tierForGap(points, seg.aT, seg.bT);
-      wantBySeg.set(hash, seg.fakes.map(f => ({ ...f, tier })));
-    }
-
-    const haveSegs = new Set(existing.map(r => r.seg_hash));
-    const wantSegs = new Set(wantBySeg.keys());
-    const toInsert = [...wantSegs].filter(h => REGENERATE || !haveSegs.has(h));
-    const toDelete = [...haveSegs].filter(h => !wantSegs.has(h) || REGENERATE);
-
-    const writes = [];
-    for (const h of toDelete) {
-      writes.push(`DELETE FROM inferred_positions WHERE mmsi = ${v.mmsi} AND seg_hash = ${sqlStr(h)};`);
-      writes.push(`DELETE FROM inferred_segments WHERE mmsi = ${v.mmsi} AND seg_hash = ${sqlStr(h)};`);
-      segmentsDeleted++;
-    }
-    for (const h of toInsert) {
-      const fakes = wantBySeg.get(h);
-      fakes.forEach((f, seq) => {
-        writes.push(
-          `INSERT OR REPLACE INTO inferred_positions (mmsi, seg_hash, seq, lat, lon, t, tier, dashed, generator_version)` +
-          ` VALUES (${v.mmsi}, ${sqlStr(h)}, ${seq}, ${f.lat}, ${f.lon}, ${Math.round(f.t)}, ${sqlStr(f.tier)}, ${f.dashed}, ${GENERATOR_VERSION});`
-        );
-        pointsWritten++;
-      });
-      writes.push(
-        `INSERT OR REPLACE INTO inferred_segments (mmsi, seg_hash, point_count, generator_version, computed_at)` +
-        ` VALUES (${v.mmsi}, ${sqlStr(h)}, ${fakes.length}, ${GENERATOR_VERSION}, ${now});`
-      );
-      segmentsWritten++;
-    }
-    writes.push(stateUpsertSql(v.mmsi, v.last_pos_ts, now));
-    execWrites(writes, `mmsi-${v.mmsi}`);
+async function cfFetch(url, init = {}) {
+  const token = mustEnv('CLOUDFLARE_API_TOKEN');
+  const res = await fetch(url, {
+    ...init,
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(init.headers ?? {}) },
+  });
+  const data = await res.json().catch(() => null);
+  if (!res.ok || !data?.success) {
+    throw new Error(`Cloudflare API error (${res.status}): ${data?.errors?.[0]?.message ?? res.statusText}`);
   }
+  return data;
+}
 
-  console.log(
-    `[precompute] candidates=${vessels.length} examined=${examined} ` +
-    `skipped_heuristic=${skippedHeuristic} skipped_converged=${skippedConverged} ` +
-    `segments_written=${segmentsWritten} segments_deleted=${segmentsDeleted} points_written=${pointsWritten}` +
-    (DRY ? '  (DRY RUN — no writes)' : '')
-  );
+let DB_ID = null;
+async function resolveDbId() {
+  const acct = mustEnv('CLOUDFLARE_ACCOUNT_ID');
+  const data = await cfFetch(`${API_BASE}/accounts/${acct}/d1/database`);
+  const db = (data.result ?? []).find(d => d.name === DB_NAME);
+  if (!db) throw new Error(`D1 database "${DB_NAME}" not found`);
+  return db.uuid;
+}
 
-  // ── helpers that need the closure's counters/state ────────────────────────
-  function upsertState(mmsi, ts, at) { execWrites([stateUpsertSql(mmsi, ts, at)], `state-${mmsi}`); }
+// Single-statement read → rows. Remote = one HTTP query; local = wrangler.
+async function read(sql) {
+  if (LOCAL) {
+    const out = execFileSync('npx', ['wrangler', 'd1', 'execute', DB_NAME, '--local', '--json', '--command', sql],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 256 * 1024 * 1024 });
+    return JSON.parse(out.slice(out.indexOf('[')))[0]?.results ?? [];
+  }
+  const acct = mustEnv('CLOUDFLARE_ACCOUNT_ID');
+  const data = await cfFetch(`${API_BASE}/accounts/${acct}/d1/database/${DB_ID}/query`,
+    { method: 'POST', body: JSON.stringify({ sql }) });
+  return data.result?.[0]?.results ?? [];
+}
+
+// Batched multi-statement writes. Remote = chunked HTTP queries (no import-lock);
+// local = one wrangler --file.
+async function writeBatch(statements) {
+  if (statements.length === 0 || DRY) return;
+  if (LOCAL) {
+    const file = join(tmp, 'writes.sql');
+    writeFileSync(file, statements.join('\n'));
+    execFileSync('npx', ['wrangler', 'd1', 'execute', DB_NAME, '--local', '--file', file], { stdio: 'inherit' });
+    return;
+  }
+  const acct = mustEnv('CLOUDFLARE_ACCOUNT_ID');
+  for (const c of chunk(statements, WRITE_CHUNK)) {
+    await cfFetch(`${API_BASE}/accounts/${acct}/d1/database/${DB_ID}/query`,
+      { method: 'POST', body: JSON.stringify({ sql: c.join('\n') }) });
+  }
+}
+
+// A segment's stable key: bracketing real timestamps (positions are immutable, so
+// these pin the bracket + its coords) + vessel length + version. Length jitter is
+// rare and a correction SHOULD regenerate, so it's included raw.
+function segHash(aT, bT, length) {
+  return `${aT}-${bT}-${length === null || length === undefined ? 'n' : length}-v${GENERATOR_VERSION}`;
 }
 
 function stateUpsertSql(mmsi, ts, at) {
   return `INSERT OR REPLACE INTO precompute_state (mmsi, last_pos_ts_seen, last_run_at) VALUES (${mmsi}, ${ts}, ${at});`;
 }
 
-// Tier to attribute to a gap's fakes: the tier of its bracketing real fixes
+// Tier to attribute to a gap's fakes: the coarser tier of its bracketing reals
 // (so the client's per-tier trail filter keeps/hides them with the reals).
 function tierForGap(points, aT, bT) {
-  const a = points.find(p => p.t === aT);
-  const b = points.find(p => p.t === bT);
-  // Prefer the coarser tier of the two ends so a fake never outlives its reals.
   const order = { direct: 0, local: 1, global: 2 };
-  const ta = a?.tier ?? 'local', tb = b?.tier ?? 'local';
+  const ta = points.find(p => p.t === aT)?.tier ?? 'local';
+  const tb = points.find(p => p.t === bT)?.tier ?? 'local';
   return order[ta] >= order[tb] ? ta : tb;
 }
 
@@ -191,11 +144,113 @@ function curveIsLandFree(points, existingFakes) {
     if (journey.length < 2) continue;
     for (const s of catmullRom(journey)) {
       if (!isLand(s.lat, s.lon)) continue;
-      const nearReal = realOnLand.some(r => haversineKm(r.lat, r.lon, s.lat, s.lon) < 1.5);
-      if (!nearReal) return false;
+      if (!realOnLand.some(r => haversineKm(r.lat, r.lon, s.lat, s.lon) < 1.5)) return false;
     }
   }
   return true;
+}
+
+// Bulk-read positions / existing fakes for many vessels in chunked IN(...) queries.
+async function readByMmsi(mmsis, sqlFor, rowMap) {
+  const out = new Map(mmsis.map(m => [m, []]));
+  for (const c of chunk(mmsis, READ_CHUNK)) {
+    for (const r of await read(sqlFor(c))) out.get(r.mmsi)?.push(rowMap(r));
+  }
+  return out;
+}
+
+// ── Main ────────────────────────────────────────────────────────────────────
+async function main() {
+  if (!LOCAL) DB_ID = await resolveDbId();
+
+  const vessels = (await read(
+    `SELECT mmsi, length, last_pos_ts FROM vessels
+     WHERE of_interest = 1 AND first_direct_at IS NOT NULL AND last_pos_ts IS NOT NULL
+     ORDER BY last_seen DESC`
+  )).filter(v => ONLY_MMSI === null || v.mmsi === ONLY_MMSI);
+
+  const stateRows = await read(`SELECT mmsi, last_pos_ts_seen FROM precompute_state`);
+  const lastSeenTs = new Map(stateRows.map(r => [r.mmsi, r.last_pos_ts_seen]));
+
+  // Heuristic: examine only vessels whose newest position advanced since last run.
+  let skippedHeuristic = 0;
+  const eligible = vessels.filter(v => {
+    const skip = !REGENERATE && lastSeenTs.has(v.mmsi) && v.last_pos_ts <= lastSeenTs.get(v.mmsi);
+    if (skip) skippedHeuristic++;
+    return !skip;
+  });
+  const candidates = eligible.slice(0, LIMIT);
+  const mmsis = candidates.map(v => v.mmsi);
+
+  const posByMmsi = await readByMmsi(mmsis,
+    c => `SELECT mmsi, lat, lon, speed, ts, tier FROM positions WHERE mmsi IN (${c.join(',')}) ORDER BY mmsi, ts ASC`,
+    r => ({ lat: r.lat, lon: r.lon, speed: r.speed, t: r.ts, tier: r.tier }));
+  const infByMmsi = await readByMmsi(mmsis,
+    c => `SELECT mmsi, seg_hash, lat, lon, t, tier, dashed FROM inferred_positions WHERE mmsi IN (${c.join(',')})`,
+    r => r);
+
+  const writes = [];
+  const now = Date.now();
+  let examined = 0, skippedConverged = 0, segmentsWritten = 0, pointsWritten = 0, segmentsDeleted = 0;
+
+  console.log(`[precompute] ${candidates.length} candidate(s) to examine (${skippedHeuristic} skipped by heuristic)…`);
+  for (const v of candidates) {
+    examined++;
+    if (examined % 25 === 0) console.log(`[precompute] …examined ${examined}/${candidates.length} (routed ${segmentsWritten} segments so far)`);
+    const points = posByMmsi.get(v.mmsi) ?? [];
+    if (points.length < 2) { writes.push(stateUpsertSql(v.mmsi, v.last_pos_ts, now)); continue; }
+
+    await ensureRegionsForExtent(extentOf(points));
+    const existing = infByMmsi.get(v.mmsi) ?? [];
+
+    if (!REGENERATE && curveIsLandFree(points, existing)) {
+      skippedConverged++;
+      writes.push(stateUpsertSql(v.mmsi, v.last_pos_ts, now));
+      continue;
+    }
+
+    // Route every land-crossing segment; keep the minimal water-tight fakes.
+    const wantBySeg = new Map();   // seg_hash → fakes (with inherited tier)
+    for (const seg of harvestInferredSegments(points, { vesselLength: v.length })) {
+      const hash = segHash(seg.aT, seg.bT, v.length);
+      const tier = tierForGap(points, seg.aT, seg.bT);
+      wantBySeg.set(hash, seg.fakes.map(f => ({ ...f, tier })));
+    }
+
+    const haveSegs = new Set(existing.map(r => r.seg_hash));
+    const wantSegs = new Set(wantBySeg.keys());
+    for (const h of haveSegs) {
+      if (REGENERATE || !wantSegs.has(h)) {
+        writes.push(`DELETE FROM inferred_positions WHERE mmsi = ${v.mmsi} AND seg_hash = ${sqlStr(h)};`);
+        writes.push(`DELETE FROM inferred_segments WHERE mmsi = ${v.mmsi} AND seg_hash = ${sqlStr(h)};`);
+        segmentsDeleted++;
+      }
+    }
+    for (const h of wantSegs) {
+      if (!REGENERATE && haveSegs.has(h)) continue;
+      const fakes = wantBySeg.get(h);
+      fakes.forEach((f, seq) => {
+        writes.push(
+          `INSERT OR REPLACE INTO inferred_positions (mmsi, seg_hash, seq, lat, lon, t, tier, dashed, generator_version)` +
+          ` VALUES (${v.mmsi}, ${sqlStr(h)}, ${seq}, ${f.lat}, ${f.lon}, ${Math.round(f.t)}, ${sqlStr(f.tier)}, ${f.dashed}, ${GENERATOR_VERSION});`);
+        pointsWritten++;
+      });
+      writes.push(
+        `INSERT OR REPLACE INTO inferred_segments (mmsi, seg_hash, point_count, generator_version, computed_at)` +
+        ` VALUES (${v.mmsi}, ${sqlStr(h)}, ${fakes.length}, ${GENERATOR_VERSION}, ${now});`);
+      segmentsWritten++;
+    }
+    writes.push(stateUpsertSql(v.mmsi, v.last_pos_ts, now));
+  }
+
+  await writeBatch(writes);
+
+  console.log(
+    `[precompute] candidates=${candidates.length} examined=${examined} ` +
+    `skipped_heuristic=${skippedHeuristic} skipped_converged=${skippedConverged} ` +
+    `segments_written=${segmentsWritten} segments_deleted=${segmentsDeleted} points_written=${pointsWritten} ` +
+    `write_statements=${writes.length}` + (DRY ? '  (DRY RUN — no writes)' : '')
+  );
 }
 
 main().catch(err => { console.error(err); process.exit(1); });
