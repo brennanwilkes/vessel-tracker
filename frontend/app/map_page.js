@@ -503,20 +503,28 @@ export function mount(root) {
   const OBST_MAX_OPACITY = 0.55;
   const OBST_FADE_STRIPS = 60;
 
-  const obstCanvas = document.createElement('canvas');
-  // Attached to the map container directly (not a pane) so Leaflet's pane CSS
-  // transforms don't offset canvas coords relative to latLngToContainerPoint.
-  obstCanvas.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none;z-index:400';
-  map.getContainer().appendChild(obstCanvas);
+  // Canvas lives in overlayPane so Leaflet's CSS zoom/pan transforms carry it
+  // along with markers and polylines automatically. Drawing uses layer coordinates
+  // (latLngToLayerPoint) so the canvas origin stays anchored to the map, not the
+  // viewport — then we position the canvas element itself to cover the viewport.
+  const obstCanvas = L.DomUtil.create('canvas', '');
+  obstCanvas.style.cssText = 'position:absolute;pointer-events:none';
+  map.getPanes().overlayPane.appendChild(obstCanvas);
 
   function drawObstructions() {
     const size = map.getSize();
+    // Anchor canvas at the viewport's top-left in layer space so it covers the viewport.
+    const topLeft = map.containerPointToLayerPoint(L.point(0, 0));
+    L.DomUtil.setPosition(obstCanvas, topLeft);
     obstCanvas.width  = size.x;
     obstCanvas.height = size.y;
     const ctx = obstCanvas.getContext('2d');
     if (!ctx) return;
 
-    const homePx = map.latLngToContainerPoint([HOME.lat, HOME.lon]);
+    // Layer coords are stable during CSS pan/zoom animations; subtract topLeft
+    // to get canvas-local pixel coordinates.
+    const homeLayer = map.latLngToLayerPoint([HOME.lat, HOME.lon]);
+    const homePx = L.point(homeLayer.x - topLeft.x, homeLayer.y - topLeft.y);
     const mPerPx  = 156543.03392 * Math.cos(HOME.lat * Math.PI / 180) / Math.pow(2, map.getZoom());
     const outerPx = (OBST_MAX_KM * 1000) / mPerPx;
 
@@ -571,14 +579,12 @@ export function mount(root) {
     drawSector(183.26, 204.86);
   }
 
-  // Pan: latLngToContainerPoint reads the live CSS translate so redraws track correctly.
-  // Zoom: Leaflet CSS-scales mapPane to animate, but latLngToContainerPoint immediately
-  // uses the TARGET zoom coords — any redraw mid-animation is at the wrong scale.
-  // Solution: hide during zoom animation, redraw once it settles.
-  map.on('move',      drawObstructions);
-  map.on('zoomstart', () => { obstCanvas.style.visibility = 'hidden'; });
-  map.on('zoomend',   () => { obstCanvas.style.visibility = ''; drawObstructions(); });
-  map.on('resize',    drawObstructions);
+  // The CSS transform on mapPane carries the canvas along during pan and zoom
+  // animations for free — no per-frame redraws needed. Only redraw after the
+  // map settles (pane position / pixelOrigin are stable at these points).
+  map.on('moveend', drawObstructions);
+  map.on('zoomend', drawObstructions);
+  map.on('resize',  drawObstructions);
   drawObstructions();
 
   unsubscribeVessels = subscribeVessels(onVesselsUpdate);
