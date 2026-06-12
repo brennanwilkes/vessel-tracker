@@ -536,30 +536,43 @@ export function mount(root) {
     }
 
     // Draw a sector with optional angular fades on either edge.
-    // fadeRight: degrees at the endBrg side that fade from MAX_OPACITY → 0.
-    function drawSector(startBrg, endBrg, fadeRight = 0) {
-      const solidEnd = endBrg - fadeRight;
-      if (solidEnd > startBrg) fillArc(startBrg, solidEnd, OBST_MAX_OPACITY);
-      if (fadeRight <= 0) return;
-      const step = fadeRight / OBST_FADE_STRIPS;
-      for (let i = 0; i < OBST_FADE_STRIPS; i++) {
-        fillArc(
-          solidEnd + step * i,
-          solidEnd + step * (i + 1),
-          OBST_MAX_OPACITY * (1 - (i + 0.5) / OBST_FADE_STRIPS),
-        );
+    // fadeLeft:  degrees at startBrg side — opacity ramps 0 → MAX going CW.
+    // fadeRight: degrees at endBrg side   — opacity ramps MAX → 0 going CW.
+    function drawSector(startBrg, endBrg, fadeLeft = 0, fadeRight = 0) {
+      const solidStart = startBrg + fadeLeft;
+      const solidEnd   = endBrg   - fadeRight;
+      if (solidStart < solidEnd) fillArc(solidStart, solidEnd, OBST_MAX_OPACITY);
+      if (fadeLeft > 0) {
+        const step = fadeLeft / OBST_FADE_STRIPS;
+        for (let i = 0; i < OBST_FADE_STRIPS; i++) {
+          fillArc(
+            startBrg + step * i,
+            startBrg + step * (i + 1),
+            OBST_MAX_OPACITY * ((i + 0.5) / OBST_FADE_STRIPS),
+          );
+        }
+      }
+      if (fadeRight > 0) {
+        const step = fadeRight / OBST_FADE_STRIPS;
+        for (let i = 0; i < OBST_FADE_STRIPS; i++) {
+          fillArc(
+            solidEnd + step * i,
+            solidEnd + step * (i + 1),
+            OBST_MAX_OPACITY * (1 - (i + 0.5) / OBST_FADE_STRIPS),
+          );
+        }
       }
     }
 
-    // East block: solid 0°→116.07°, then fades to 0 at the view-window edge (141.07°).
-    drawSector(0, 141.07, 25);
+    // East block: fades in from 0°→25° (CCW edge), then solid to the firm edge at 141.07°.
+    drawSector(0, 141.07, 25, 0);
     // Obstructions with firm edges on both sides.
     drawSector(153.66, 162.38);
     drawSector(183.26, 204.86);
   }
 
   map.on('move',    drawObstructions);
-  map.on('zoomend', drawObstructions);
+  map.on('zoom',    drawObstructions);
   map.on('resize',  drawObstructions);
   drawObstructions();
 
