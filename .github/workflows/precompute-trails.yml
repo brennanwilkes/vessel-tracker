@@ -38,7 +38,11 @@ jobs:
         run: npm ci --no-fund --no-audit
 
       - name: Precompute trail waypoints
-        run: node scripts/precompute-trails.mjs
+        # --max-old-space-size: routeWater's A* grid is now fine-celled (0.2 km floor) and
+        # bounded by a cell-count budget; a worst-case long gap allocates dense rows*cols
+        # typed arrays up to ~270 MB. Pin the heap so the budget is guaranteed, not reliant
+        # on Node's RAM auto-sizing.
+        run: node --max-old-space-size=4096 scripts/precompute-trails.mjs
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

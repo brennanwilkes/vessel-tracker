@@ -47,7 +47,6 @@ scripts/
   db-search <term>    — search vessels by MMSI or name fragment
   db-zone-visits <mmsi> — visited destinations for one vessel
   db-zones            — per-zone rollup: distinct vessels + most recent visit
-  db-raw <sql>        — run arbitrary SQL (read-only guard; --write to bypass)
   README.md           — quick-reference for AI agents
 ```
 All db-* scripts output JSON by default (--pretty for tables). Use with:
@@ -187,12 +186,22 @@ The build prints merged-way / polygon / vertex counts and KB. Current corridor �
 only — not shipped to the browser). A dense tile that returns a `remark:"... timed out ..."` is
 TRUNCATED — split it further by longitude and merge more dumps.
 
-**Known coverage boundary (future extension):** the BC central coast / Inside-Passage-south
-(51.3–54.6°N) is NOT in the fine corridor — its Overpass tiles are too dense for a single call and
-kept truncating. It's covered (coarsely) by the coarse layer + the `inside-passage` and Alaska port
-regions. To extend the corridor north, raise `BB.maxLat` (and the coarse `HOME.maxLat`) to 54.6 and
-add lat+lon-subtiled dumps for 50.9–54.7 / −130→−116 (the −130→−127 Haida Gwaii / Hecate band is the
-one that truncates — subtile it by latitude).
+**Central-BC coverage (51.3–54°N) — RESOLVED via fine-land regions, not corridor extension.**
+This band (Inside-Passage-south: Queen Charlotte/Johnstone Strait up Finlayson/Grenville/Princess
+Royal channels to Prince Rupert) is NOT in the fine OSM corridor, and the coarse 2 km layer merged
+the inner channels shut → vessels straight-bridged across the mainland (e.g. MMSI 316011773 Prince
+Rupert→N. Vancouver Island). Fixed by adding **`bc-central-south` + `bc-central-north`** fine ISLAND-land
+regions (`CORRIDORS` in `build-all-regions.mjs`), not by raising `BB.maxLat` — regions are lazy and
+bbox-scoped (a build mistake can't regress the Salish Sea), and fine island land is exactly what
+re-opens the inter-island passages coarse closes. Built **coastline-only** (`waterElements:[]`): the
+channels are MARINE (defined by coastline; no `natural=water` polygons needed), and the water query
+on these large bboxes always timed out. Simplify 0.05 km (channels are ~0.5 km → tol ≤ ⅓ width).
+**Gotcha:** the coastline itself truncates on a single Overpass call for this dense −130→−127 band —
+**fetch in longitude halves and merge ways by id** (dedupe the seam); a truncated dump silently builds
+a region that still closes some channels. Validate with a forced full-transit `routeWater` (Queen
+Charlotte Strait → Prince Rupert) — hand-picked "channel centerline" points are unreliable on ~500 m
+channels. Regression: `tests/region-trails.test.mjs`. (To extend coverage further north — Haida Gwaii,
+57°N+ — add more `CORRIDORS` the same way, or raise `BB.maxLat`+coarse `HOME.maxLat` for base fidelity.)
 
 ### Water layer — rivers & harbours (`frontend/app/water.js`) — IMPLEMENTED
 `natural=coastline` follows the sea coast up to a river's tidal limit, then OSM

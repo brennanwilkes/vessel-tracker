@@ -42,6 +42,14 @@ const BBOX_OVERRIDE = {
 // landSimplifyKm coarser than a harbour (channels are ~0.5 km+, per the resolution policy).
 const CORRIDORS = [
   { id: 'inside-passage', bbox: { minLat: 54.0, minLon: -134.2, maxLat: 58.6, maxLon: -129.6 }, landSimplifyKm: 0.15 },
+  // BC central coast / Inside-Passage-south: the 51.3–54°N band between the fine OSM
+  // corridor's north edge (51.3) and the inside-passage region (54.0). Coarse 2 km land
+  // merges these inner channels (Johnstone/Queen Charlotte Strait up Finlayson/Grenville
+  // to Prince Rupert) shut, so a vessel transiting them straight-bridged. Fine ISLAND land
+  // re-opens the passages. Split by latitude — the dense −130→−127 mainland-fjord band
+  // truncates a single Overpass call (worker/CLAUDE.md "Known coverage boundary").
+  { id: 'bc-central-south', bbox: { minLat: 50.7, minLon: -130.8, maxLat: 52.5, maxLon: -125.5 }, landSimplifyKm: 0.15 },
+  { id: 'bc-central-north', bbox: { minLat: 52.3, minLon: -130.8, maxLat: 54.15, maxLon: -126.5 }, landSimplifyKm: 0.15 },
 ];
 
 const args = process.argv.slice(2);

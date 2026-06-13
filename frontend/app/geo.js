@@ -134,12 +134,20 @@ export function routeWater(a, b, polygons, bboxes, opts = {}) {
   // the flat polygon test when not supplied.
   const isLandAt = opts.isLand || ((la, lo) => pointOnLand(la, lo, polygons, bboxes, waterPolygons, waterBboxes));
   const directKm = haversineKm(a[0], a[1], b[0], b[1]);
-  // Fine enough to thread Gulf Island channels and harbour mouths (~150 m floor) while
-  // staying coarse on long offshore detours. Very long continental gaps (Vancouver↔
-  // California) route against the coarse coast layer, where ~5 km cells are plenty and
-  // keep the grid (and A*) tractable — a 1 km cell there would be a multi-million-cell grid.
-  const cellKm = opts.cellKm ?? Math.max(0.2, Math.min(directKm > 300 ? 5.0 : 1.0, directKm / 250));
   const marginKm = opts.marginKm ?? Math.min(90, Math.max(12, directKm * 0.6));
+  // Cell size is driven by a grid CELL-COUNT BUDGET, not the gap length: stay as fine as
+  // possible (0.2 km floor — threads the Columbia, Inside Passage narrows, Gulf Island
+  // channels) while capping the grid's larger side at MAX_CELLS_PER_SIDE so A* stays
+  // tractable. A* runs SERVER-SIDE ONLY now (the precompute cron; the browser never calls
+  // routeWater), so the grid budget can be generous — the old length-based cap was sized for
+  // the browser's ~10 ms CPU limit and forced ≥0.68 km cells on long gaps, which can't thread
+  // a narrow channel → routeWater returned null → the gap straight-bridged through land. Any
+  // gap whose span ≤ MAX_CELLS_PER_SIDE × floor (~800 km) threads at the floor; longer gaps
+  // (trans-Pacific, open ocean — no narrow channel to thread) coarsen gracefully.
+  const FLOOR_KM = 0.2;
+  const MAX_CELLS_PER_SIDE = opts.maxCellsPerSide ?? 4000;
+  const spanKm = directKm + 2 * marginKm;
+  const cellKm = opts.cellKm ?? Math.max(FLOOR_KM, spanKm / MAX_CELLS_PER_SIDE);
   const clearanceCells = opts.clearanceCells ?? 1;
 
   // Equirectangular grid with ~square cells (km), local to this gap.

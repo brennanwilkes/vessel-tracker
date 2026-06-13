@@ -43,4 +43,6 @@ export const REGIONS = [
   { id: "sydney", bbox: [[-34.12, 150.94], [-33.62, 151.5]], load: () => import("./sydney.js") },
   { id: "auckland", bbox: [[-37.1, 174.5], [-36.6, 175.06]], load: () => import("./auckland.js") },
   { id: "inside-passage", bbox: [[54, -134.2], [58.6, -129.6]], load: () => import("./inside-passage.js") },
+  { id: "bc-central-south", bbox: [[50.7, -130.8], [52.5, -125.5]], load: () => import("./bc-central-south.js") },
+  { id: "bc-central-north", bbox: [[52.3, -130.8], [54.15, -126.5]], load: () => import("./bc-central-north.js") },
 ];

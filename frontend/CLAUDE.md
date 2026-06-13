@@ -169,15 +169,29 @@ snap-to-water net.
   leaves on the course it was actually steering; the open-water middle is still
   shaped by proximity. Soft cost (changes cost, not passability → water-tight).
   Omitted at journey ends (no neighbour → no bias).
-- **Adaptive cell size** (`cellKm`, 0.2–1 km by gap length) and **margin**
-  (`marginKm`, 12–90 km). The 0.2 km floor lets it thread Gulf Island channels
-  and harbour mouths now that the coastline is high-resolution.
+- **Cell size = a grid CELL-COUNT BUDGET, not gap length** (`cellKm`, 0.2 km floor;
+  `MAX_CELLS_PER_SIDE` 4000) and **margin** (`marginKm`, 12–90 km). Stay as fine as
+  possible (0.2 km threads Gulf Island channels, harbour mouths, the ~1 km Columbia,
+  Inside Passage narrows) while capping the grid's larger side so A* stays tractable:
+  `cellKm = max(0.2, (directKm + 2·marginKm) / 4000)`. Any gap whose span ≤ ~800 km
+  threads at the floor; longer (trans-Pacific, open ocean — no narrow channel) coarsens.
+  **A* runs server-side ONLY** (the precompute cron; the browser never calls
+  `routeWater`), so the budget is generous — the OLD length-based cap (≥0.68 km cells on
+  >170 km gaps) was sized for the browser's CPU limit and made long gaps straight-bridge
+  through the Columbia / Inside Passage. Tradeoff: a long-gap route at the floor builds a
+  multi-million-cell grid → ~10–60 s/gap in the precompute (bounded; the `isLand`
+  per-cell polygon scan dominates — a spatial index is the deferred speedup).
 - Out of coverage: `routeWater` returns `null` and the gap is bridged with a
   straight spline segment (still C¹ — just more control points). The fine OSM clip
   is `[46.9,-128.8]→[51.3,-121.9]`, but the **coarse continental layer**
   (`coast_coarse.js`) now extends usable coverage along the whole NA Pacific coast,
   so Vancouver↔California/Mexico routes bow around the continent instead of bridging
-  straight through it. Truly-uncovered = open Pacific / other oceans.
+  straight through it. The **central-BC band (51.3–54°N)** — Inside-Passage-south,
+  where coarse 2 km merges the inner channels shut — is now fine-covered by the
+  `bc-central-south`/`bc-central-north` island-land regions, so Prince Rupert↔Vancouver
+  Island routes thread the channels. Truly-uncovered = open Pacific / other oceans.
+  Regression: `tests/region-trails.test.mjs` (real long-gap vessels through the Columbia
+  and the BC Inside Passage, water-tight, region-aware).
 
 ### Performance: A* is server-side; the client only splines
 
