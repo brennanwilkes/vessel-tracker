@@ -80,6 +80,23 @@ fresh, local/global compress hard). Low-value resident types (tug/pleasure/fishi
 coarser gaps. Heartbeats back off as a vessel stays parked (10m→30m→1h). Unit-tested:
 `node tests/compress.test.mjs`.
 
+**Decoupled per-move `vessels` upsert (write reduction).** A move writes a `positions`
+row but **no longer also upserts `vessels` every time** (that paired write was ~half of all
+move-writes). The scan loops push a `vessels` upsert only when `vesselRowNeedsWrite` says so
+— new vessel, a metadata change (`of_interest`/`max_extent`/`first_direct_at`/`direct_entry_count`),
+a due heartbeat, or a phantom correction — so a steady mover with stable metadata writes
+positions only. To make this safe, the **last-emitted fix is read back from the `positions`
+table, not `vessels.last_*`**: `loadVesselStates` LEFT JOINs the latest `positions` row for
+the compression/phantom reference (and keeps `vessel_last_speed` = `vessels.last_speed` purely
+as the phantom "already-corrected-to-0" flag), and `getCurrentVessels` sources the live dot
+from the latest `positions` row (COALESCE fallback to `vessels.last_*`). Liveness/TTL still
+use `vessels.last_seen` (active vessels bump it ≥ every heartbeat interval). `commitScan` and
+the upsert SQL are unchanged. **Nuances:** (1) the per-scan log now shows `writes < pos` when
+movers skip the upsert — that gap *is* the saving; (2) the `db-*` inspection tools read
+`vessels.last_*` directly, so they show a slightly stale position for an active mover (the API
+is correct); (3) a phantom vessel's displayed speed is the last emitted speed (usually ≈0 from
+the emitted stop) rather than a forced 0 — position is unaffected.
+
 ## Visited destinations (zones)
 
 Named places (ports/rivers/chokepoints) a vessel has been — the data behind the
@@ -119,33 +136,63 @@ Drop a new `NNN_my_change.sql` file in `worker/migrations/`. On next push to mai
 
 ## Coastline data generation (`frontend/app/coastline.js`)
 
-The frontend's land-avoidance router needs land polygons. `coastline.js` is generated from
+The land-avoidance router needs land polygons. `coastline.js` is generated from
 **OpenStreetMap `natural=coastline`** (high-resolution: resolves harbours, breakwaters, narrow
 passes like Deception Pass, and every Gulf Island). NOT Natural Earth — its "10m" is 1:10,000,000
 *scale* (coarsest tier), which drops sub-km features and was the cause of routes cutting unmapped
 islands. OSM coastline ways are sub-100 m.
 
+**Clip = the whole NA-Pacific routing CORRIDOR, not just the Salish Sea.** `BB` in
+`build-coastline.mjs` is `[32.0,-130.0]→[51.3,-116.0]` (SoCal → Salish Sea). Why: trails now
+route SERVER-SIDE (the GH-Actions precompute) and the browser no longer loads coastline, so the
+larger file is free — and a vessel last seen locally whose current position is off California must
+route DOWN THE COAST, not across the 2 km coarse layer (which clipped routes ~2–3 km, e.g. up the
+Columbia). The corridor coast is medium-res (≈300 m) — routable, not harbour-grade.
+
+**Resolution tiers** (`TIERS`, km from HOME=Victoria): ≤60 km → 25 m (viewshed); ≤160 km → 120 m
+(Salish Sea); ≤2600 km → 300 m (NA-Pacific corridor coast); beyond → 600 m. Plus `FINE_ZONES`
+(explicit 25 m boxes: Vancouver/Fraser, Bellingham/Anacortes, Puget Sound). **Hard rule:** simplify
+tol ≤ ⅓ × narrowest channel to keep open.
+
+`build-coarse-coast.mjs`'s `HOME` carve-out **MUST stay in sync with `BB`** (same
+`[32.0,-130.0]→[51.3,-116.0]`): the coarse 2 km layer is carved out of the corridor so its
+seaward-bulging outline can't union into the fine routes. Coarse then only fills Baja (<32°),
+BC/Alaska (>51.3°), the far-west ocean, and the inland interior.
+
 ### Pipeline
 - `scripts/lib-osm-coastline.mjs` — `stitchCoastline` (joins directed coastline ways into chains by
   shared node id; a join pass merges fragments) and `closeOpenChains` (clips chains to the bbox and
   closes mainland masses along the boundary keeping land-on-left, `ccw=true`).
-- `scripts/build-coastline.mjs` — fetches nothing itself; reads an Overpass dump, assembles, then
-  **distance-weighted Douglas-Peucker**: fine (~25 m) within ~60 km of the viewshed, ~120 m to
-  160 km, ~600 m beyond — and drops tiny islands by the same tiers. Emits `[lat,lon]` polygons.
+- `scripts/build-coastline.mjs` — reads **one or more** Overpass dumps (latitude tiles — the whole
+  corridor truncates in a single Overpass call), **merges + dedupes ways by OSM id** (a way crossing
+  a tile boundary appears in both, and a duplicate breaks the stitch walk), then distance-weighted
+  Douglas-Peucker per the tiers above. Emits `[lat,lon]` polygons.
 
-### Regenerate (run from `worker/`)
+### Regenerate (run from `worker/`) — tiled fetch + merge
 ```bash
-# 1. Fetch OSM coastline for the region (bbox = south,west,north,east):
-curl -sS -H "User-Agent: vessel-tracker/1.0" \
-  "https://overpass-api.de/api/interpreter" \
-  --data-urlencode 'data=[out:json][timeout:170];(way["natural"="coastline"](46.9,-128.8,51.3,-121.9););out body geom;' \
-  -o /tmp/osm_coast.json
-# 2. Assemble + simplify + emit frontend/app/coastline.js:
-node --max-old-space-size=2048 scripts/build-coastline.mjs /tmp/osm_coast.json
-# 3. Validate routing against the new data:
-node ../tests/trail.test.mjs
+# 1. Fetch OSM coastline in latitude tiles (overlap ~0.6° so boundary ways are shared;
+#    dedup handles the overlap). bbox order = south,west,north,east.
+for t in "32.0 37.6 t1" "37.0 42.6 t2" "42.0 47.6 t3" "46.9 51.3 t4"; do set -- $t
+  curl -sS -H "User-Agent: vessel-tracker/1.0" "https://overpass-api.de/api/interpreter" \
+    --data-urlencode "data=[out:json][timeout:300];(way[\"natural\"=\"coastline\"]($1,-130.0,$2,-116.0););out body geom;" \
+    -o /tmp/osm_coast_$3.json
+done
+# 2. Build (merges all dumps); bump --max-old-space-size for the corridor's size:
+node --max-old-space-size=8192 scripts/build-coastline.mjs /tmp/osm_coast_t1.json /tmp/osm_coast_t2.json /tmp/osm_coast_t3.json /tmp/osm_coast_t4.json
+# 3. Re-carve coarse to match BB, then validate:
+node scripts/build-coarse-coast.mjs
+node ../tests/coverage.test.mjs && node ../tests/trail.test.mjs && node ../tests/scenario.test.mjs
 ```
-The build prints polygon/vertex counts and final KB. Current region ≈ 500 KB (gzips small).
+The build prints merged-way / polygon / vertex counts and KB. Current corridor ≈ 700 KB (server-side
+only — not shipped to the browser). A dense tile that returns a `remark:"... timed out ..."` is
+TRUNCATED — split it further by longitude and merge more dumps.
+
+**Known coverage boundary (future extension):** the BC central coast / Inside-Passage-south
+(51.3–54.6°N) is NOT in the fine corridor — its Overpass tiles are too dense for a single call and
+kept truncating. It's covered (coarsely) by the coarse layer + the `inside-passage` and Alaska port
+regions. To extend the corridor north, raise `BB.maxLat` (and the coarse `HOME.maxLat`) to 54.6 and
+add lat+lon-subtiled dumps for 50.9–54.7 / −130→−116 (the −130→−127 Haida Gwaii / Hecate band is the
+one that truncates — subtile it by latitude).
 
 ### Water layer — rivers & harbours (`frontend/app/water.js`) — IMPLEMENTED
 `natural=coastline` follows the sea coast up to a river's tidal limit, then OSM

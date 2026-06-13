@@ -19,7 +19,12 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { stitchCoastline, closeOpenChains } from './lib-osm-coastline.mjs';
 
-const BB = { minLat: 46.9, maxLat: 51.3, minLon: -128.8, maxLon: -121.9 };
+// Clip covers the whole NA-Pacific routing CORRIDOR (SoCal → SE Alaska reach), not
+// just the Salish Sea, so long coastal trails (e.g. Salish Sea → California) route
+// against real OSM coastline instead of the 2 km coarse layer. Coastline is
+// server-side only now (the browser no longer loads it), so the larger file is fine;
+// fetch is tiled by latitude and merged (one Overpass call over this span truncates).
+const BB = { minLat: 32.0, maxLat: 51.3, minLon: -130.0, maxLon: -116.0 };
 const HOME = { lat: 48.4299, lon: -123.3622 };
 
 // FINE tier (harbour-grade, ~25 m) is applied inside these high-traffic, tight
@@ -40,13 +45,18 @@ const FINE = { simplifyKm: 0.025, dropIslandKm: 0.05 };
 const TIERS = [
   { maxKm: 60,       simplifyKm: 0.025, dropIslandKm: 0.05 }, // viewshed: harbours, passes
   { maxKm: 160,      simplifyKm: 0.12,  dropIslandKm: 0.3  }, // Salish Sea
-  { maxKm: Infinity, simplifyKm: 0.6,   dropIslandKm: 2.0  }, // outer coast
+  { maxKm: 2600,     simplifyKm: 0.30,  dropIslandKm: 1.0  }, // NA-Pacific corridor coast (medium — routable, not harbour)
+  { maxKm: Infinity, simplifyKm: 0.6,   dropIslandKm: 2.0  }, // far outer coast
 ];
 
 const inFineZone = (lon, lat) =>
   FINE_ZONES.some(z => lat >= z.minLat && lat <= z.maxLat && lon >= z.minLon && lon <= z.maxLon);
 
-const INPUT = process.argv[2] || '/tmp/osm_coast.json';
+// Accept one or more Overpass dumps (latitude tiles of the corridor). Merge their
+// elements and dedupe ways by OSM id — a coastline way crossing a tile boundary is
+// returned in both tiles, and a duplicate way starting at a shared node breaks the
+// stitch walk (two ways start at one node), so dedup is required, not optional.
+const INPUTS = process.argv.slice(2).length ? process.argv.slice(2) : ['/tmp/osm_coast.json'];
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const OUT = path.resolve(SCRIPT_DIR, '../../frontend/app/coastline.js');
 
@@ -108,8 +118,17 @@ function ringSpanKm(ring) {
 }
 
 // ── Build ───────────────────────────────────────────────────────────────────
-const data = JSON.parse(fs.readFileSync(INPUT, 'utf8'));
-const { closed, open } = stitchCoastline(data.elements);
+const seenWay = new Set();
+const elements = [];
+for (const file of INPUTS) {
+  const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+  for (const e of data.elements) {
+    if (e.type === 'way') { if (seenWay.has(e.id)) continue; seenWay.add(e.id); }
+    elements.push(e);
+  }
+}
+console.log(`merged ${INPUTS.length} dump(s) → ${elements.length} elements (${seenWay.size} unique ways)`);
+const { closed, open } = stitchCoastline(elements);
 const mainland = closeOpenChains(open, BB, true);
 const rings = closed.concat(mainland); // [lon,lat] rings
 

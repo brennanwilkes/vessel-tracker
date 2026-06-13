@@ -43,12 +43,30 @@ function assessMovement(v: Vessel, prev: VesselState | undefined, tier: Tier, no
     }
     const posAge = prev.last_pos_ts !== null ? nowMs - prev.last_pos_ts : null;
     if (posAge !== null && posAge > PHANTOM_STALL_MS) {
-      const alreadyCorrected = prev.last_speed === 0;
+      // alreadyCorrected reads vessels.last_speed (the phantom flag a prior forceUpsert
+      // set to 0), NOT prev.last_speed — which is now the positions-sourced last emitted
+      // speed and would never be 0 here, re-firing the correction every scan.
+      const alreadyCorrected = prev.vessel_last_speed === 0;
       return { moved: false, effectiveSpeed: 0, forceUpsert: !alreadyCorrected };
     }
     return { moved: false, effectiveSpeed: v.speed, forceUpsert: false };
   }
   return { moved: isSignificantMove(v, prev, tier, nowMs), effectiveSpeed: v.speed, forceUpsert: false };
+}
+
+// A moved vessel no longer writes a vessels row on every emit — its position goes to the
+// `positions` table and the movement reference is read back from there (loadVesselStates).
+// We still write the vessels row when METADATA changed or a heartbeat is due, so
+// last_seen / of_interest / max_extent / direct_entry_count stay current and the vessel
+// keeps its TTL on /current. A steady mover with stable metadata writes positions only —
+// that's the write saving (decoupling the per-move vessels upsert).
+function vesselRowNeedsWrite(prev: VesselState | undefined, of_interest: number, max_extent: MaxExtent, firstDirect: number | null, direct_entry_count: number, nowMs: number): boolean {
+  if (prev === undefined) return true;
+  if (of_interest !== prev.of_interest) return true;
+  if (max_extent !== prev.max_extent) return true;
+  if (firstDirect !== null) return true;
+  if (direct_entry_count !== prev.direct_entry_count) return true;
+  return (nowMs - prev.last_seen) >= heartbeatIntervalMs(prev, nowMs);
 }
 
 function tierOf(lat: number, lon: number): Tier {
@@ -156,33 +174,13 @@ export async function runDirectScan(env: Env): Promise<void> {
   for (const v of vessels) {
     const prev = existing.get(v.mmsi);
     const { moved, effectiveSpeed, forceUpsert } = assessMovement(v, prev, 'direct', nowMs);
-    const heartbeat = !moved && !forceUpsert && (prev === undefined || nowMs - prev.last_seen >= heartbeatIntervalMs(prev, nowMs));
-
-    if (!moved && !heartbeat && !forceUpsert) { nSkipped++; continue; }
 
     const firstDirect = (prev === undefined || prev.of_interest === 0) ? nowMs : null;
     const direct_entry_count = computeDirectEntryCount(prev, 'direct');
     const max_extent: MaxExtent = prev?.max_extent ?? initialExtent(v);
+    const writeVessel = forceUpsert || vesselRowNeedsWrite(prev, 1, max_extent, firstDirect, direct_entry_count, nowMs);
 
-    upserts.push({
-      mmsi: v.mmsi,
-      name: v.name,
-      vessel_type: v.vesselType,
-      length: v.length,
-      destination: v.destination,
-      lat: v.lat,
-      lon: v.lon,
-      speed: effectiveSpeed,
-      heading: v.heading,
-      ts: nowMs,
-      of_interest: 1,
-      max_extent,
-      first_direct_at: firstDirect,
-      direct_entry_count,
-      moved,
-      heartbeat,
-      forceUpsert,
-    });
+    if (!moved && !writeVessel) { nSkipped++; continue; }
 
     if (moved) {
       nMoved++;
@@ -192,6 +190,15 @@ export async function runDirectScan(env: Env): Promise<void> {
       console.log(`[ingest] phantom speed: mmsi=${v.mmsi} reported=${v.speed}kn, pos stale ${Math.round((nowMs - (prev!.last_pos_ts ?? 0)) / 60000)}min`);
     } else {
       nHeartbeat++;
+    }
+
+    if (writeVessel) {
+      upserts.push({
+        mmsi: v.mmsi, name: v.name, vessel_type: v.vesselType, length: v.length, destination: v.destination,
+        lat: v.lat, lon: v.lon, speed: effectiveSpeed, heading: v.heading, ts: nowMs,
+        of_interest: 1, max_extent, first_direct_at: firstDirect, direct_entry_count,
+        moved, heartbeat: !moved && !forceUpsert, forceUpsert,
+      });
     }
   }
 
@@ -250,31 +257,10 @@ export async function runLocalScan(env: Env): Promise<void> {
 
     const tier: Tier = inDirect ? 'direct' : 'local';
     const { moved, effectiveSpeed, forceUpsert } = assessMovement(v, prev, tier, nowMs);
-    const heartbeat = !moved && !forceUpsert && (prev === undefined || nowMs - prev.last_seen >= heartbeatIntervalMs(prev, nowMs));
-
-    if (!moved && !heartbeat && !forceUpsert) { nSkipped++; continue; }
-
     const direct_entry_count = computeDirectEntryCount(prev, tier);
+    const writeVessel = forceUpsert || vesselRowNeedsWrite(prev, of_interest, max_extent, firstDirect, direct_entry_count, nowMs);
 
-    upserts.push({
-      mmsi: v.mmsi,
-      name: v.name,
-      vessel_type: v.vesselType,
-      length: v.length,
-      destination: v.destination,
-      lat: v.lat,
-      lon: v.lon,
-      speed: effectiveSpeed,
-      heading: v.heading,
-      ts: nowMs,
-      of_interest,
-      max_extent,
-      first_direct_at: firstDirect,
-      direct_entry_count,
-      moved,
-      heartbeat,
-      forceUpsert,
-    });
+    if (!moved && !writeVessel) { nSkipped++; continue; }
 
     if (moved) {
       nMoved++;
@@ -284,6 +270,15 @@ export async function runLocalScan(env: Env): Promise<void> {
       console.log(`[ingest] phantom speed: mmsi=${v.mmsi} reported=${v.speed}kn, pos stale ${Math.round((nowMs - (prev!.last_pos_ts ?? 0)) / 60000)}min`);
     } else {
       nHeartbeat++;
+    }
+
+    if (writeVessel) {
+      upserts.push({
+        mmsi: v.mmsi, name: v.name, vessel_type: v.vesselType, length: v.length, destination: v.destination,
+        lat: v.lat, lon: v.lon, speed: effectiveSpeed, heading: v.heading, ts: nowMs,
+        of_interest, max_extent, first_direct_at: firstDirect, direct_entry_count,
+        moved, heartbeat: !moved && !forceUpsert, forceUpsert,
+      });
     }
   }
 
@@ -351,31 +346,10 @@ export async function runGlobalScan(env: Env): Promise<void> {
     const firstDirect = inDirect && (prev === undefined || prev.of_interest === 0) ? nowMs : null;
 
     const { moved, effectiveSpeed, forceUpsert } = assessMovement(v, prev, tier, nowMs);
-    const heartbeat = !moved && !forceUpsert && (prev === undefined || nowMs - prev.last_seen >= heartbeatIntervalMs(prev, nowMs));
-
-    if (!moved && !heartbeat && !forceUpsert) { nSkipped++; continue; }
-
     const direct_entry_count = computeDirectEntryCount(prev, tier);
+    const writeVessel = forceUpsert || vesselRowNeedsWrite(prev, of_interest, max_extent, firstDirect, direct_entry_count, nowMs);
 
-    upserts.push({
-      mmsi: v.mmsi,
-      name: v.name,
-      vessel_type: v.vesselType,
-      length: v.length,
-      destination: v.destination,
-      lat: v.lat,
-      lon: v.lon,
-      speed: effectiveSpeed,
-      heading: v.heading,
-      ts: nowMs,
-      of_interest,
-      max_extent,
-      first_direct_at: firstDirect,
-      direct_entry_count,
-      moved,
-      heartbeat,
-      forceUpsert,
-    });
+    if (!moved && !writeVessel) { nSkipped++; continue; }
 
     if (moved) {
       nMoved++;
@@ -385,6 +359,15 @@ export async function runGlobalScan(env: Env): Promise<void> {
       console.log(`[ingest] phantom speed: mmsi=${v.mmsi} reported=${v.speed}kn, pos stale ${Math.round((nowMs - (prev!.last_pos_ts ?? 0)) / 60000)}min`);
     } else {
       nHeartbeat++;
+    }
+
+    if (writeVessel) {
+      upserts.push({
+        mmsi: v.mmsi, name: v.name, vessel_type: v.vesselType, length: v.length, destination: v.destination,
+        lat: v.lat, lon: v.lon, speed: effectiveSpeed, heading: v.heading, ts: nowMs,
+        of_interest, max_extent, first_direct_at: firstDirect, direct_entry_count,
+        moved, heartbeat: !moved && !forceUpsert, forceUpsert,
+      });
     }
   }
 

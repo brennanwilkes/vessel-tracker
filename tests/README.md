@@ -9,8 +9,22 @@ router and the spline when something looks wrong on the map.
 ## Running
 
 ```
-node tests/trail.test.mjs          # regression over tests/fixtures/*.json
+node tests/trail.test.mjs            # spline water-tightness over real fixtures (tests/fixtures/*.json)
+node tests/trail-precompute.test.mjs # server precompute: harvested fakes reproduce the curve, minimal, deterministic
+node tests/coverage.test.mjs         # coastline COVERAGE guard — known landmasses read as land (no silent island/coast drops)
+node tests/scenario.test.mjs         # multi-leg corridor: Fraser→Tacoma→Columbia/Portland approach→SF→LA routes water-tight
+node tests/harbour-route.test.mjs    # routeWater coastal legs go around land
+node tests/coarse-global.test.mjs    # worldwide coarse classification (home preserved, foreign land avoided)
+node tests/regions.test.mjs          # all lazy coast/<id>.js regions valid
+node tests/compress.test.mjs         # worker movement-compression unit checks
 ```
+
+`coverage.test.mjs` exists because a landmass missing from `coastline.js` reads as open water, so a
+trail crosses it and neither the router nor `trail.test` notices (they share the data) — it asserts a
+fixed set of known land/water points so a coastline **regeneration** can't silently drop coverage.
+`scenario.test.mjs` documents the canonical long-voyage test: each inter-port leg is a gap the
+precompute must route AROUND the coast. `trail-precompute.test.mjs` guards the server-side harvest
+(`harvestInferredSegments`) that the GH-Actions cron stores in D1.
 
 Asserts, per fixture: **no spline sample on land** (beyond a 60 m penetration tolerance, ignoring
 clips that hug a real on/near-land fix); **bounded overshoot** from the control polyline

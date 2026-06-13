@@ -335,7 +335,11 @@ async function scheduleTrails(visibleVessels, token) {
     if (!liveSet.has(mmsi)) trailGeom.delete(mmsi);
   }
 
-  const TRAIL_TIERS = ['direct', 'local'];
+  // Fetch ALL tiers so a far-ranging vessel's full journey renders as one
+  // continuous routed path (the long coastal/global legs are A*-routed by the
+  // precompute and dashed). Without global, the client would bridge straight
+  // from the last local fix to a distant current position — cutting across land.
+  const TRAIL_TIERS = ['direct', 'local', 'global'];
 
   for (const vessel of visibleVessels) {
     if (token !== trailReqToken) break;
@@ -507,9 +511,12 @@ export function mount(root) {
   // along with markers and polylines automatically. Drawing uses layer coordinates
   // (latLngToLayerPoint) so the canvas origin stays anchored to the map, not the
   // viewport — then we position the canvas element itself to cover the viewport.
-  const obstCanvas = L.DomUtil.create('canvas', '');
+  const obstCanvas = L.DomUtil.create('canvas', 'leaflet-zoom-animated');
   obstCanvas.style.cssText = 'position:absolute;pointer-events:none';
   map.getPanes().overlayPane.appendChild(obstCanvas);
+
+  // State stored at draw time — used by zoomanim to replicate L.Renderer._updateTransform.
+  let _drawnZoom = null, _drawnCenter = null, _drawnTopLeft = null;
 
   function drawObstructions() {
     const size = map.getSize();
@@ -520,6 +527,10 @@ export function mount(root) {
     obstCanvas.height = size.y;
     const ctx = obstCanvas.getContext('2d');
     if (!ctx) return;
+
+    _drawnZoom   = map.getZoom();
+    _drawnCenter = map.getCenter();
+    _drawnTopLeft = topLeft;
 
     // Layer coords are stable during CSS pan/zoom animations; subtract topLeft
     // to get canvas-local pixel coordinates.
@@ -580,15 +591,20 @@ export function mount(root) {
   }
 
   // Leaflet only CSS-scales tilePane during zoom animation — overlayPane does
-  // NOT scale automatically. Apply a matching CSS transform on every zoomanim
-  // frame so our canvas stays in sync with the tiles (same pattern as L.Renderer).
-  // Formula: scale around the animation's target center, corrected for any
-  // current mapPane CSS translate offset.
+  // NOT scale automatically. Mirror L.Renderer._updateTransform exactly: scale
+  // relative to the zoom at last draw, then shift for any center change.
+  // Exact mirror of L.Renderer._updateTransform (no padding). zoomanim fires once
+  // at animation start; leaflet-zoom-animated CSS class makes the transform change
+  // transition smoothly (0.25s) in sync with the tile pane — same as SVG trails.
   map.on('zoomanim', e => {
-    const scale       = map.getZoomScale(e.zoom);
-    const centerPx    = map.latLngToContainerPoint(e.center).subtract(map.getSize().divideBy(2));
-    const mapPanePos  = L.DomUtil.getPosition(map.getPanes().mapPane) || L.point(0, 0);
-    L.DomUtil.setTransform(obstCanvas, centerPx.multiplyBy(-scale).subtract(mapPanePos), scale);
+    if (_drawnZoom === null) return;
+    const scale              = map.getZoomScale(e.zoom, _drawnZoom);
+    const viewHalf           = map.getSize().multiplyBy(0.5);
+    const currentCenterPoint = map.project(_drawnCenter, e.zoom);
+    const topLeftOffset      = viewHalf.multiplyBy(-scale)
+      .add(currentCenterPoint)
+      .subtract(map._getNewPixelOrigin(e.center, e.zoom));
+    L.DomUtil.setTransform(obstCanvas, topLeftOffset, scale);
   });
   // After zoom/pan settles, reset the animated transform and redraw at correct coords.
   map.on('moveend', drawObstructions);

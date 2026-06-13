@@ -8,11 +8,17 @@ export function widenExtent(current: MaxExtent, candidate: MaxExtent): MaxExtent
 
 export interface VesselState {
   mmsi: number;
+  // last_lat/lon/speed/heading/pos_ts are the LAST EMITTED fix — sourced from the most
+  // recent `positions` row, NOT vessels.last_* (which we no longer write on every move).
   last_lat: number | null;
   last_lon: number | null;
   last_speed: number | null;
   last_heading: number | null;
   last_pos_ts: number | null;
+  // vessels.last_speed — kept only as the phantom "already-corrected to 0" flag
+  // (a phantom forceUpsert writes 0 there; the positions-sourced last_speed above is the
+  // real last emitted speed, so the two must be read from different columns).
+  vessel_last_speed: number | null;
   last_seen: number;
   of_interest: number;
   max_extent: MaxExtent;
@@ -59,10 +65,23 @@ export async function loadVesselStates(env: Env, mmsis: number[]): Promise<Map<n
     chunks.push(mmsis.slice(i, i + MMSI_CHUNK));
   }
 
+  // The movement reference (last emitted lat/lon/speed/heading/ts) comes from the most
+  // recent `positions` row — because a plain move no longer writes vessels.last_* (see
+  // commitScan callers). vessels still owns last_seen/of_interest/max_extent/etc., and
+  // vessel_last_speed (the phantom flag). Vessels with no positions row → null reference
+  // → treated as new by assessMovement, which self-corrects on the next emit.
   const stmts = chunks.map(chunk => {
     const placeholders = chunk.map((_, i) => `?${i + 1}`).join(',');
     return env.VESSELS_DB
-      .prepare(`SELECT mmsi,last_lat,last_lon,last_speed,last_heading,last_pos_ts,last_seen,of_interest,max_extent,direct_entry_count FROM vessels WHERE mmsi IN (${placeholders})`)
+      .prepare(
+        `SELECT v.mmsi,
+                p.lat AS last_lat, p.lon AS last_lon, p.speed AS last_speed, p.heading AS last_heading, p.ts AS last_pos_ts,
+                v.last_speed AS vessel_last_speed,
+                v.last_seen, v.of_interest, v.max_extent, v.direct_entry_count
+         FROM vessels v
+         LEFT JOIN positions p ON p.id = (SELECT id FROM positions WHERE mmsi = v.mmsi ORDER BY ts DESC LIMIT 1)
+         WHERE v.mmsi IN (${placeholders})`
+      )
       .bind(...chunk);
   });
 
@@ -243,19 +262,29 @@ export async function getCurrentVessels(env: Env, directTtlMs: number, localTtlM
   const directCutoff = now - directTtlMs;
   const localCutoff = now - localTtlMs;
   const globalCutoff = now - globalTtlMs;
+  // The live dot's position comes from the most recent `positions` row (the last emitted
+  // fix) since vessels.last_* is no longer written on every move; COALESCE falls back to
+  // the denormalized columns for any vessel with no positions row. Liveness/TTL still use
+  // vessels.last_seen, which active vessels still bump at least every heartbeat interval.
   const result = await env.VESSELS_DB
     .prepare(
-      `SELECT mmsi,name,vessel_type,length,destination,
-              last_lat AS lat,last_lon AS lon,last_speed AS speed,last_heading AS heading,
-              last_pos_ts,last_seen,max_extent,
-              first_direct_at,direct_entry_count
-       FROM vessels WHERE of_interest = 1 AND first_direct_at IS NOT NULL
+      `SELECT v.mmsi,v.name,v.vessel_type,v.length,v.destination,
+              COALESCE(p.lat, v.last_lat)         AS lat,
+              COALESCE(p.lon, v.last_lon)         AS lon,
+              COALESCE(p.speed, v.last_speed)     AS speed,
+              COALESCE(p.heading, v.last_heading) AS heading,
+              COALESCE(p.ts, v.last_pos_ts)       AS last_pos_ts,
+              v.last_seen,v.max_extent,
+              v.first_direct_at,v.direct_entry_count
+       FROM vessels v
+       LEFT JOIN positions p ON p.id = (SELECT id FROM positions WHERE mmsi = v.mmsi ORDER BY ts DESC LIMIT 1)
+       WHERE v.of_interest = 1 AND v.first_direct_at IS NOT NULL
          AND (
-           (max_extent = 'direct' AND last_seen >= ?1)
-           OR (max_extent = 'local' AND last_seen >= ?3)
-           OR (max_extent = 'global' AND last_seen >= ?3)
+           (v.max_extent = 'direct' AND v.last_seen >= ?1)
+           OR (v.max_extent = 'local' AND v.last_seen >= ?3)
+           OR (v.max_extent = 'global' AND v.last_seen >= ?3)
          )
-       ORDER BY last_seen DESC`
+       ORDER BY v.last_seen DESC`
     )
     .bind(directCutoff, localCutoff, globalCutoff)
     .all<VesselRow>();

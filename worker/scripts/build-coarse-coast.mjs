@@ -23,9 +23,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// Fine OSM home bbox (Salish Sea) — coarse must NOT cover it (it would close the
-// channels coastline.js/water.js keep open). Matches the fine clip in build-coastline.mjs.
-const HOME = { minLat: 46.9, maxLat: 51.3, minLon: -128.8, maxLon: -121.9 };
+// Fine OSM clip — coarse must NOT cover it (it would close the channels
+// coastline.js/water.js keep open, and its 2 km outline would bulge into the
+// routing corridor). MUST stay in sync with `BB` in build-coastline.mjs: it now
+// spans the whole NA-Pacific routing corridor (SoCal → SE-Alaska reach), not just
+// the Salish Sea, so coarse only fills Baja (<32°), north Alaska (>54.6°), the
+// far-west ocean, and the inland interior — the coast vessels hug is all fine.
+const HOME = { minLat: 32.0, maxLat: 51.3, minLon: -130.0, maxLon: -116.0 };
 // The NA-Pacific coast our home vessels actually hug (Baja → SE Alaska): kept at the
 // finer NEAR_KM so the shipped Vancouver↔California/Alaska routing is unchanged. It
 // contains HOME, carved out below.
