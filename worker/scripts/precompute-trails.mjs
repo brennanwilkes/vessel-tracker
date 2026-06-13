@@ -38,7 +38,8 @@ const GENERATOR_VERSION = 1;
 const DB_NAME = 'vessel-tracker';
 const API_BASE = 'https://api.cloudflare.com/client/v4';
 const READ_CHUNK = 60;   // mmsis per IN(...) read
-const WRITE_CHUNK = 50;  // statements per batched write
+const WRITE_CHUNK = 50;  // statements per batched HTTP write
+const FLUSH_EVERY = 400; // flush accumulated writes mid-run past this many statements
 
 const argv = process.argv.slice(2);
 const has = (f) => argv.includes(f);
@@ -60,17 +61,51 @@ function mustEnv(name) {
   return v;
 }
 
+const RETRY_MAX = 5;       // attempts per request
+const RETRY_BASE_MS = 500; // exponential backoff base
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+// A transient network drop (EPIPE/ECONNRESET from undici reusing a keep-alive
+// socket the edge already closed, or a DNS/connect blip) surfaces as a
+// `TypeError: fetch failed` whose `.cause.code` names the syscall error. These,
+// plus 429/5xx, are safe to retry — our writes are INSERT OR REPLACE / DELETE,
+// idempotent by design — so a fresh connection on retry recovers without losing
+// the run's A* work.
+function isTransient(err) {
+  const code = err?.cause?.code ?? err?.code;
+  return code === 'EPIPE' || code === 'ECONNRESET' || code === 'ETIMEDOUT' ||
+    code === 'ECONNREFUSED' || code === 'EAI_AGAIN' || code === 'UND_ERR_SOCKET' ||
+    err?.message === 'fetch failed';
+}
+
 async function cfFetch(url, init = {}) {
   const token = mustEnv('CLOUDFLARE_API_TOKEN');
-  const res = await fetch(url, {
-    ...init,
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(init.headers ?? {}) },
-  });
-  const data = await res.json().catch(() => null);
-  if (!res.ok || !data?.success) {
-    throw new Error(`Cloudflare API error (${res.status}): ${data?.errors?.[0]?.message ?? res.statusText}`);
+  let lastErr;
+  for (let attempt = 1; attempt <= RETRY_MAX; attempt++) {
+    try {
+      const res = await fetch(url, {
+        ...init,
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(init.headers ?? {}) },
+      });
+      if (res.status === 429 || res.status >= 500) {
+        throw new Error(`Cloudflare API ${res.status} ${res.statusText} (retryable)`);
+      }
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        throw new Error(`Cloudflare API error (${res.status}): ${data?.errors?.[0]?.message ?? res.statusText}`);
+      }
+      return data;
+    } catch (err) {
+      lastErr = err;
+      const retryable = isTransient(err) || /retryable/.test(err.message);
+      if (!retryable || attempt === RETRY_MAX) throw err;
+      const wait = RETRY_BASE_MS * 2 ** (attempt - 1);
+      console.warn(`[precompute] request failed (attempt ${attempt}/${RETRY_MAX}): ${err.message} — retrying in ${wait}ms`);
+      await sleep(wait);
+    }
   }
-  return data;
+  throw lastErr;
 }
 
 let DB_ID = null;
@@ -191,12 +226,25 @@ async function main() {
 
   const writes = [];
   const now = Date.now();
-  let examined = 0, skippedConverged = 0, segmentsWritten = 0, pointsWritten = 0, segmentsDeleted = 0;
+  let examined = 0, skippedConverged = 0, segmentsWritten = 0, pointsWritten = 0, segmentsDeleted = 0, flushedStatements = 0;
+
+  // Flush completed-vessel writes mid-run so memory stays bounded as coverage
+  // grows and a late transient failure can't discard the whole run's A* work.
+  // Safe at the top of the loop because every vessel's last pushed statement is
+  // its precompute_state upsert — so the buffer always ends on a vessel boundary
+  // (state is committed only after that vessel's segment writes). Local batches
+  // once at the end (one wrangler --file; no keep-alive race, avoids N spawns).
+  async function maybeFlush() {
+    if (LOCAL || writes.length < FLUSH_EVERY) return;
+    flushedStatements += writes.length;
+    await writeBatch(writes.splice(0));
+  }
 
   console.log(`[precompute] ${candidates.length} candidate(s) to examine (${skippedHeuristic} skipped by heuristic)…`);
   for (const v of candidates) {
     examined++;
     if (examined % 25 === 0) console.log(`[precompute] …examined ${examined}/${candidates.length} (routed ${segmentsWritten} segments so far)`);
+    await maybeFlush();
     const points = posByMmsi.get(v.mmsi) ?? [];
     if (points.length < 2) { writes.push(stateUpsertSql(v.mmsi, v.last_pos_ts, now)); continue; }
 
@@ -243,13 +291,14 @@ async function main() {
     writes.push(stateUpsertSql(v.mmsi, v.last_pos_ts, now));
   }
 
+  flushedStatements += writes.length;
   await writeBatch(writes);
 
   console.log(
     `[precompute] candidates=${candidates.length} examined=${examined} ` +
     `skipped_heuristic=${skippedHeuristic} skipped_converged=${skippedConverged} ` +
     `segments_written=${segmentsWritten} segments_deleted=${segmentsDeleted} points_written=${pointsWritten} ` +
-    `write_statements=${writes.length}` + (DRY ? '  (DRY RUN — no writes)' : '')
+    `write_statements=${flushedStatements}` + (DRY ? '  (DRY RUN — no writes)' : '')
   );
 }
 
