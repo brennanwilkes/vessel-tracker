@@ -58,9 +58,14 @@ export const LIVE_TTL_LOCAL_MS  = 6 * 60 * 60 * 1000;
 export const LIVE_TTL_GLOBAL_MS = 72 * 60 * 60 * 1000;
 
 // Drain windows per tier (ms). Direct cron is every 1 min — leave headroom.
+// Drains are capped so each fits inside its 1-minute cron slot (see the cron schedule
+// below): direct/local/foreign must finish (≤~50 s) before the next minute's scan fires,
+// leaving a ~10 s guard. This is what makes the minute-partition collision-free — combined
+// with the AIS lock (whose waits exceed one drain) so any residual jitter-overlap is a
+// SOFT wait, never a hard skip. (Local was 90 s; shortened to fit its slot — accepted cut.)
 export const DIRECT_DRAIN_MS  = 45_000;
-export const LOCAL_DRAIN_MS   = 90_000;
-export const GLOBAL_DRAIN_MS  = 30_000;
+export const LOCAL_DRAIN_MS   = 50_000;
+export const GLOBAL_DRAIN_MS  = 30_000;  // global runs in its reserved :50–:59 block, chaining many of these
 
 // ── AIS connection lock ──────────────────────────────────────────────────────
 // aisstream throttles CONCURRENT connections per API key — a second connection on the
@@ -81,24 +86,28 @@ export const GLOBAL_DRAIN_MS  = 30_000;
 // 120 s) or a direct run's lock would still be held when the next fires: drain 45 s + 10 s
 // = 55 s ≪ 120 s. ✓
 export const AIS_LOCK_TTL_BUFFER_MS   = 10_000;  // lock lifetime = drainMs + this (crash safety + self-expiry for non-releasing scans)
-// Lock wait = how long a scan waits for the socket before yielding (skipping its drain).
-// PRIORITY BY INFREQUENCY: a rare scan's data is more valuable per run (missing one foreign
-// cycle wastes 15 min; missing one direct cycle wastes 2). So the frequent/skippable scans
-// (direct/local) wait briefly and yield, while the rare/important ones (foreign/global) wait
-// long enough to OUTLAST the longest frequent holder — local holds the lock up to
-// LOCAL_DRAIN_MS + buffer = 100 s — so they don't get starved by a local scan that simply
-// grabbed the socket first. (This "persistence = priority": the rare scan keeps polling
-// across the whole window and wins a slot the moment the holder's drain ends.)
-export const AIS_LOCK_WAIT_DIRECT_MS  = 20_000;
-export const AIS_LOCK_WAIT_LOCAL_MS   = 25_000;
-export const AIS_LOCK_WAIT_FOREIGN_MS = 150_000;  // > local's 100 s hold (+ margin) so foreign is never starved by local
-export const AIS_LOCK_WAIT_GLOBAL_MS  = 120_000;  // per-drain; outlasts a local hold (its 14-min budget caps total)
+// Lock wait = how long a scan waits for the socket before giving up (skipping its drain =
+// a HARD collision / lost data). With the minute-partition (see cron schedule below) scans
+// no longer collide nominally — each owns its own minute and its drain finishes inside it.
+// The ONLY residual overlap source is cron JITTER (Cloudflare can fire a slot seconds, rarely
+// up to ~a minute, late). So every wait is set ABOVE one full drain+buffer (~60 s) → a
+// jittered neighbor still draining when the next slot fires is simply WAITED OUT (a brief
+// SOFT collision), never timed out (HARD). 75 s covers a drain (≤50 s) + its 10 s lock-TTL
+// + jitter margin. Nominal contention is ~zero, so these waits are almost never reached.
+export const AIS_LOCK_WAIT_DIRECT_MS  = 75_000;
+export const AIS_LOCK_WAIT_LOCAL_MS   = 75_000;
+export const AIS_LOCK_WAIT_FOREIGN_MS = 75_000;
+export const AIS_LOCK_WAIT_GLOBAL_MS  = 75_000;
 
 // Global scans target many specific MMSIs. Query in batches and retry misses so
-// one quiet drain window doesn't decide the day's global data.
+// one quiet drain window doesn't decide the day's global data. It runs as ONE hourly
+// invocation that chains ~15 drains; it owns the reserved :50–:59 cron block (nothing
+// else fires then), so its budget is capped to FIT that block — it must finish before
+// :00 or it would bleed into the next hour's direct/local/foreign slots. 15 drains ×
+// ~32 s ≈ 8 min; 9 min leaves margin and ends by ~:59.
 export const GLOBAL_MMSI_CHUNK_SIZE = 75;
 export const GLOBAL_SCAN_ATTEMPTS   = 3;
-export const GLOBAL_SCAN_BUDGET_MS  = 14 * 60 * 1000;
+export const GLOBAL_SCAN_BUDGET_MS  = 9 * 60 * 1000;
 
 // ── Rotating foreign scan ────────────────────────────────────────────────────
 // The worldwide global scan above rarely hears its MMSI-filtered targets (a 30 s
@@ -114,17 +123,25 @@ export const GLOBAL_SCAN_BUDGET_MS  = 14 * 60 * 1000;
 //   2. LOW RESOLUTION — a relevant vessel gets one zone_visit (saturating/throttled)
 //      and a single anchor position on first entry to a port, NOT a position track.
 //      Full-resolution tracking only begins if it actually reaches the home box.
-// ── Cron schedules ───────────────────────────────────────────────────────────
+// ── Cron schedules — COLLISION-FREE MINUTE PARTITION ─────────────────────────
 // MUST stay in sync with wrangler.toml [triggers] `crons` AND with the `event.cron`
 // branches in index.ts `scheduled` — the trigger string, this constant, and the handler
 // match are three copies of the same string; a mismatch silently drops the scan
-// ("unrecognised cron" warning). Direct is */2 (not */1) and global is staggered to :03 —
-// see "AIS connection lock" / the cron-collision analysis in worker/CLAUDE.md.
-export const DIRECT_SCAN_CRON       = '*/2 * * * *';
-export const LOCAL_SCAN_CRON        = '*/5 * * * *';
-export const GLOBAL_SCAN_CRON       = '3 * * * *';
-export const FOREIGN_SCAN_CRON      = '*/15 * * * *';
-export const FOREIGN_DRAIN_MS       = 60_000;
+// ("unrecognised cron" warning — exactly what bit us when */2 wasn't matched).
+//
+// Every minute of the hour belongs to EXACTLY ONE scan, and each drain fits inside its
+// minute (≤50 s), so scans never share the aisstream socket — no hard collisions, and
+// only brief soft waits under cron jitter (the AIS lock absorbs those). Partition:
+//   :00–:49  evens → direct (every 2 min); odds split by mod 4 → local / foreign
+//   :50–:59  reserved block → global (one hourly run chaining ~15 drains; nothing else
+//            fires then, so it has the socket to itself). Trade-off of the block: the live
+//            direct view pauses from ~:48 to :00 (~10–12 min/hr) — accepted vs the global
+//            spread-refactor. Counts: direct 25, local 13, foreign 12, global block.
+export const DIRECT_SCAN_CRON       = '0-48/2 * * * *';   // 0,2,…,48
+export const LOCAL_SCAN_CRON        = '1-49/4 * * * *';   // 1,5,…,49  (≡1 mod 4)
+export const FOREIGN_SCAN_CRON      = '3-49/4 * * * *';   // 3,7,…,47  (≡3 mod 4)
+export const GLOBAL_SCAN_CRON       = '50 * * * *';       // owns :50–:59
+export const FOREIGN_DRAIN_MS       = 50_000;             // fits its 1-min slot (was 60 s)
 export const FOREIGN_SCAN_BOX_BATCH = 12;                     // boxes per connection. ceil(41/12)=4 ticks → each zone drained ~every 60 min (was 6 → ~105 min)
 export const FOREIGN_REFRESH_MS     = 6 * 60 * 60 * 1000;     // re-upsert a parked foreign vessel at most this often
 export const FOREIGN_MAX_NEW_PER_SCAN = 200;                  // cap initial rows/scan so a first run can't exhaust the write cap

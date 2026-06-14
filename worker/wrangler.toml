@@ -8,7 +8,7 @@ minify = true
 ALLOWED_ORIGIN = "*"
 
 [triggers]
-crons = ["*/2 * * * *", "*/5 * * * *", "3 * * * *", "*/15 * * * *"]
+crons = ["0-48/2 * * * *", "1-49/4 * * * *", "50 * * * *", "3-49/4 * * * *"]
 
 [[d1_databases]]
 binding = "VESSELS_DB"
