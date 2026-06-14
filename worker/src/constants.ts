@@ -85,12 +85,19 @@ export const GLOBAL_SCAN_BUDGET_MS  = 14 * 60 * 1000;
 // Cron is FOREIGN_SCAN_CRON (also add it to wrangler.toml [triggers]).
 export const FOREIGN_SCAN_CRON      = '*/15 * * * *';
 export const FOREIGN_DRAIN_MS       = 60_000;
-export const FOREIGN_SCAN_BOX_BATCH = 6;                      // boxes per connection (aisstream cap unknown → conservative)
+export const FOREIGN_SCAN_BOX_BATCH = 12;                     // boxes per connection. ceil(41/12)=4 ticks → each zone drained ~every 60 min (was 6 → ~105 min)
 export const FOREIGN_REFRESH_MS     = 6 * 60 * 60 * 1000;     // re-upsert a parked foreign vessel at most this often
 export const FOREIGN_MAX_NEW_PER_SCAN = 200;                  // cap initial rows/scan so a first run can't exhaust the write cap
+// Foreign port-dwell track: a relevant vessel gets a position on first zone entry, then
+// at most one more per throttle while it stays in the zone (a sparse track, not a single
+// anchor). last_pos_ts derives from the latest positions row, so each write self-advances
+// the throttle. The per-scan cap is the hard ceiling: 96 scans/day × cap bounds the daily
+// foreign position writes (cap 25 → ≤~2,400/day) so a busy world port can't run away.
+export const FOREIGN_POSITION_THROTTLE_MS  = 30 * 60 * 1000;
+export const FOREIGN_MAX_POSITIONS_PER_SCAN = 25;
 export const FOREIGN_RELEVANCE = {
-  bigLenM: 150,   // any ≥150 m vessel at a Pacific-rim port is plausibly trans-Pacific → track
-  midLenM: 100,   // 100–150 m only when its destination is a NA-Pacific-NW port
+  bigLenM: 100,   // any ≥100 m vessel at a Pacific-rim port is plausibly trans-Pacific → track
+  midLenM: 70,    // 70–100 m only when its destination is a NA-Pacific-NW port
   // AIS destination tokens (UPPERCASE substrings) for ports in/inbound to the viewshed.
   // Free-text + UN/LOCODE; deliberately PNW-weighted. Tune after measuring real writes.
   destPatterns: [

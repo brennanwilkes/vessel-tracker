@@ -7,6 +7,7 @@ import {
   GLOBAL_MMSI_CHUNK_SIZE, GLOBAL_SCAN_ATTEMPTS, GLOBAL_SCAN_BUDGET_MS,
   LIVE_TTL_LOCAL_MS, ZONE_VISIT_THROTTLE_MS,
   FOREIGN_DRAIN_MS, FOREIGN_SCAN_BOX_BATCH, FOREIGN_REFRESH_MS, FOREIGN_MAX_NEW_PER_SCAN, FOREIGN_RELEVANCE,
+  FOREIGN_POSITION_THROTTLE_MS, FOREIGN_MAX_POSITIONS_PER_SCAN,
 } from './constants';
 import { isSignificantMove } from './compress';
 import { drainAisStream } from './aisstream';
@@ -441,7 +442,7 @@ export async function runForeignScan(env: Env): Promise<void> {
   const positions: PositionInsert[] = [];
   const zoneObs: ZoneObservation[] = [];
   const heardByPort: Record<string, number> = {};
-  let nRelevant = 0, nInitial = 0, nFilteredSmall = 0, nSkipped = 0, nAnchors = 0;
+  let nRelevant = 0, nInitial = 0, nFilteredSmall = 0, nSkipped = 0, nPositions = 0;
 
   for (const v of vessels) {
     const zid = zoneOf(v.lat, v.lon);
@@ -463,7 +464,14 @@ export async function runForeignScan(env: Env): Promise<void> {
       const newZone = !visitKeys.has(`${v.mmsi}|${zid}`);
       const refresh = isNew || (nowMs - fs!.last_seen) >= FOREIGN_REFRESH_MS;
 
-      if (refresh || newZone) {
+      // Sparse port-dwell track: a position on first zone entry, then at most one per
+      // FOREIGN_POSITION_THROTTLE_MS while the vessel stays in the zone. last_pos_ts comes
+      // from the latest positions row, so each write self-advances the throttle. The
+      // per-scan cap is the hard ceiling on daily foreign writes (96 scans × cap).
+      const posStale = !isNew && fs!.last_pos_ts !== null && (nowMs - fs!.last_pos_ts) >= FOREIGN_POSITION_THROTTLE_MS;
+      const writePos = (newZone || posStale) && nPositions < FOREIGN_MAX_POSITIONS_PER_SCAN;
+
+      if (refresh || writePos) {
         upserts.push({
           mmsi: v.mmsi, name: v.name, vessel_type: v.vesselType, length: v.length, destination: v.destination,
           lat: v.lat, lon: v.lon, speed: v.speed, heading: v.heading, ts: nowMs,
@@ -471,11 +479,9 @@ export async function runForeignScan(env: Env): Promise<void> {
           moved: false, heartbeat: true, forceUpsert: false,
         });
       }
-      // One anchor position per port (first entry) so the precompute can draw the
-      // inferred ocean crossing — never a full track.
-      if (newZone) {
+      if (writePos) {
         positions.push({ mmsi: v.mmsi, lat: v.lat, lon: v.lon, speed: v.speed, heading: v.heading, ts: nowMs, tier: 'global' });
-        nAnchors++;
+        nPositions++;
       }
     } else if (isNew && nInitial < FOREIGN_MAX_NEW_PER_SCAN) {
       // Unknown type/length (not confirmed small, not yet relevant): one initial row so a
@@ -499,7 +505,7 @@ export async function runForeignScan(env: Env): Promise<void> {
   console.log(
     `[ingest] FOREIGN_SCAN_SUMMARY heard=${vessels.length} ports=${slice.length}` +
     ` | relevant=${nRelevant} initial_rows=${nInitial} small_filtered=${nFilteredSmall} skipped=${nSkipped}` +
-    ` | vessel_writes=${upserts.length} anchor_positions=${nAnchors} zone_obs=${zoneObs.length}` +
+    ` | vessel_writes=${upserts.length} positions=${nPositions} zone_obs=${zoneObs.length}` +
     ` | by_port: ${portBreakdown} | duration_ms=${Date.now() - start}`
   );
 }

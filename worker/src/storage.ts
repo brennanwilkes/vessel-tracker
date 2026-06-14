@@ -380,6 +380,10 @@ export interface ForeignVesselState {
   length: number | null;
   of_interest: number;
   last_seen: number;
+  // ts of the vessel's most recent positions row — drives the foreign position-track
+  // throttle. Read from positions (not vessels.last_pos_ts, which the heartbeat upsert
+  // path leaves stale), so each anchor/track write self-advances it for the next scan.
+  last_pos_ts: number | null;
 }
 
 export async function loadForeignStates(env: Env, mmsis: number[]): Promise<Map<number, ForeignVesselState>> {
@@ -390,7 +394,9 @@ export async function loadForeignStates(env: Env, mmsis: number[]): Promise<Map<
     const placeholders = chunk.map((_, k) => `?${k + 1}`).join(',');
     stmts.push(
       env.VESSELS_DB
-        .prepare(`SELECT mmsi,vessel_type,length,of_interest,last_seen FROM vessels WHERE mmsi IN (${placeholders})`)
+        .prepare(`SELECT v.mmsi,v.vessel_type,v.length,v.of_interest,v.last_seen,
+                         (SELECT ts FROM positions WHERE mmsi = v.mmsi ORDER BY ts DESC LIMIT 1) AS last_pos_ts
+                  FROM vessels v WHERE v.mmsi IN (${placeholders})`)
         .bind(...chunk)
     );
   }

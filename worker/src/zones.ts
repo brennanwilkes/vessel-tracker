@@ -59,7 +59,7 @@ export const ZONES: Zone[] = [
   { id: 'portland',          name: 'Portland (Columbia/Willamette)', kind: 'river', reach: 'foreign', box: [[45.50, -122.78], [45.65, -122.58]] },
   { id: 'coos-bay',          name: 'Coos Bay',                  kind: 'port',   reach: 'foreign', box: [[43.34, -124.26], [43.44, -124.14]] },
   { id: 'sf-bay-oakland',    name: 'Oakland / SF Bay',          kind: 'port',   reach: 'foreign', box: [[37.72, -122.38], [37.84, -122.22]] },
-  { id: 'la-long-beach',     name: 'LA / Long Beach',           kind: 'port',   reach: 'foreign', box: [[33.70, -118.30], [33.79, -118.13]] },
+  { id: 'la-long-beach',     name: 'LA / Long Beach',           kind: 'port',   reach: 'foreign', box: [[33.60, -118.33], [33.80, -118.10]] }, // widened S to San Pedro Bay anchorage (waiting ships)
   { id: 'san-diego',         name: 'San Diego',                 kind: 'port',   reach: 'foreign', box: [[32.66, -117.26], [32.75, -117.12]] },
 
   // Mexico / Central America
@@ -90,7 +90,7 @@ export const ZONES: Zone[] = [
   { id: 'keelung',           name: 'Keelung (Taipei)',          kind: 'port',   reach: 'foreign', box: [[25.09, 121.70], [25.18, 121.79]] },
 
   // SE Asia / Oceania
-  { id: 'singapore',         name: 'Singapore',                 kind: 'port',   reach: 'foreign', box: [[1.18, 103.62], [1.34, 103.92]] },
+  { id: 'singapore',         name: 'Singapore',                 kind: 'port',   reach: 'foreign', box: [[1.08, 103.55], [1.36, 104.08]] }, // widened S/E to the Strait + eastern/western anchorages
   { id: 'port-klang',        name: 'Port Klang',                kind: 'port',   reach: 'foreign', box: [[2.94, 101.28], [3.06, 101.46]] },
   { id: 'manila',            name: 'Manila',                    kind: 'port',   reach: 'foreign', box: [[14.54, 120.84], [14.66, 121.00]] },
   { id: 'sydney',            name: 'Sydney',                    kind: 'port',   reach: 'foreign', box: [[-33.92, 151.14], [-33.82, 151.30]] },
