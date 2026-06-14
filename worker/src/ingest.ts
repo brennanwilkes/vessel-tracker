@@ -8,6 +8,7 @@ import {
   LIVE_TTL_LOCAL_MS, ZONE_VISIT_THROTTLE_MS,
   FOREIGN_DRAIN_MS, FOREIGN_SCAN_BOX_BATCH, FOREIGN_REFRESH_MS, FOREIGN_MAX_NEW_PER_SCAN, FOREIGN_RELEVANCE,
   FOREIGN_POSITION_THROTTLE_MS, FOREIGN_MAX_POSITIONS_PER_SCAN,
+  AIS_LOCK_WAIT_DIRECT_MS, AIS_LOCK_WAIT_LOCAL_MS, AIS_LOCK_WAIT_FOREIGN_MS, AIS_LOCK_WAIT_GLOBAL_MS,
 } from './constants';
 import { isSignificantMove } from './compress';
 import { drainAisStream } from './aisstream';
@@ -123,6 +124,7 @@ async function drainGlobalMmsis(env: Env, mmsis: number[], startedAt: number): P
         boundingBox: GLOBAL_BOUNDING_BOX,
         mmsis: chunk,
         drainMs: GLOBAL_DRAIN_MS,
+        lock: { env, holder: 'global', maxWaitMs: AIS_LOCK_WAIT_GLOBAL_MS },
       });
 
       for (const v of result.vessels) {
@@ -132,6 +134,9 @@ async function drainGlobalMmsis(env: Env, mmsis: number[], startedAt: number): P
       for (const update of result.staticOnly) {
         staticUpdates.set(update.mmsi, update);
       }
+      // Yield the connection briefly between drains so a waiting direct/local/foreign scan
+      // can take a slot — otherwise global would re-acquire instantly and starve them.
+      await new Promise(r => setTimeout(r, 2000));
     }
 
     pending = pending.filter(mmsi => !heard.has(mmsi));
@@ -149,6 +154,7 @@ export async function runDirectScan(env: Env): Promise<void> {
     apiKey: env.AISSTREAM_API_KEY,
     boundingBox: DIRECT_BOUNDING_BOX,
     drainMs: DIRECT_DRAIN_MS,
+    lock: { env, holder: 'direct', maxWaitMs: AIS_LOCK_WAIT_DIRECT_MS, release: false },
   });
 
   if (vessels.length === 0) {
@@ -218,6 +224,7 @@ export async function runLocalScan(env: Env): Promise<void> {
     apiKey: env.AISSTREAM_API_KEY,
     boundingBox: LOCAL_BOUNDING_BOX,
     drainMs: LOCAL_DRAIN_MS,
+    lock: { env, holder: 'local', maxWaitMs: AIS_LOCK_WAIT_LOCAL_MS, release: false },
   });
 
   if (vessels.length === 0) {
@@ -423,6 +430,7 @@ export async function runForeignScan(env: Env): Promise<void> {
     apiKey: env.AISSTREAM_API_KEY,
     boundingBoxes: slice.map(z => z.box),
     drainMs: FOREIGN_DRAIN_MS,
+    lock: { env, holder: 'foreign', maxWaitMs: AIS_LOCK_WAIT_FOREIGN_MS, release: false },
   });
 
   // Advance the cursor regardless of yield so a quiet port can't stall the rotation.

@@ -62,6 +62,30 @@ export const DIRECT_DRAIN_MS  = 45_000;
 export const LOCAL_DRAIN_MS   = 90_000;
 export const GLOBAL_DRAIN_MS  = 30_000;
 
+// ── AIS connection lock ──────────────────────────────────────────────────────
+// aisstream throttles CONCURRENT connections per API key — a second connection on the
+// same key kills/rejects the other (close code 1006). The four scans run on independent
+// cron triggers that collide at shared minutes (all four at :00), so the every-minute
+// direct scan (45 s of every 60 s) was starving the hourly global scan: its early drains
+// got 0 (verified empirically — global catches landed only at minute :04–:08, never
+// :00–:02). Fix: a single-key advisory lock in scan_meta. Each DRAIN (not each scan run)
+// acquires → drains → releases, so direct's 45 s and global's 30 s drains interleave on
+// one connection instead of colliding. Lock auto-expires (drainMs + buffer) so a crashed
+// scan can't deadlock. Each scan waits a bounded time for the socket, then yields (skips
+// this drain) rather than forcing a collision — direct yields soonest (it re-runs next
+// cycle); global waits per-drain but its 3-round / 14-min budget gives it many retries.
+// The single-drain scans (direct/local/foreign) do NOT write a release — they hold the
+// lock once and let it EXPIRE (nothing follows them in the same run), which halves lock
+// writes. Only global explicitly releases (it chains ~13 back-to-back drains and must free
+// the lock between them). So the buffer must stay below the direct CADENCE (every 2 min →
+// 120 s) or a direct run's lock would still be held when the next fires: drain 45 s + 10 s
+// = 55 s ≪ 120 s. ✓
+export const AIS_LOCK_TTL_BUFFER_MS   = 10_000;  // lock lifetime = drainMs + this (crash safety + self-expiry for non-releasing scans)
+export const AIS_LOCK_WAIT_DIRECT_MS  = 20_000;
+export const AIS_LOCK_WAIT_LOCAL_MS   = 30_000;
+export const AIS_LOCK_WAIT_FOREIGN_MS = 30_000;
+export const AIS_LOCK_WAIT_GLOBAL_MS  = 30_000;
+
 // Global scans target many specific MMSIs. Query in batches and retry misses so
 // one quiet drain window doesn't decide the day's global data.
 export const GLOBAL_MMSI_CHUNK_SIZE = 75;

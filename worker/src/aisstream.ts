@@ -1,5 +1,7 @@
-import type { Vessel, StaticUpdate } from './types';
+import type { Vessel, StaticUpdate, Env } from './types';
 import { parsePositionReport, parseShipStaticData, toCompleteVessels, toStaticOnlyUpdates, type AisMessage } from './ais';
+import { acquireAisLock, releaseAisLock } from './storage';
+import { AIS_LOCK_TTL_BUFFER_MS } from './constants';
 
 export type BoundingBox = [[number, number], [number, number]];
 
@@ -14,6 +16,13 @@ export interface DrainOptions {
   mmsis?: number[];
   /** Wall-clock time to collect messages before closing (ms). */
   drainMs: number;
+  /** When set, acquire the single-key AIS connection lock before opening the socket and
+   *  release it after (so concurrent scans interleave instead of colliding — see
+   *  constants.ts "AIS connection lock"). If the lock can't be had within `maxWaitMs`,
+   *  this drain is SKIPPED and an empty result returned.
+   *  `release` defaults to true; set false for a single-drain scan to skip the release
+   *  write and let the lock expire via TTL (halves lock writes — see constants.ts). */
+  lock?: { env: Env; holder: string; maxWaitMs: number; release?: boolean };
 }
 
 export interface DrainResult {
@@ -34,8 +43,16 @@ export async function drainAisStream(opts: DrainOptions): Promise<DrainResult> {
 
   const boxes = opts.boundingBoxes ?? (opts.boundingBox ? [opts.boundingBox] : []);
   if (boxes.length === 0) throw new Error('drainAisStream: no bounding box(es) given');
+
+  let lockToken: number | null = null;
+  if (opts.lock) {
+    lockToken = await acquireAisLock(opts.lock.env, opts.drainMs + AIS_LOCK_TTL_BUFFER_MS, opts.lock.maxWaitMs, opts.lock.holder);
+    if (lockToken === null) return { vessels: [], staticOnly: [] }; // socket busy → skip this drain
+  }
+
   console.log(`[aisstream] connecting — ${boxes.length} box(es), drain ${opts.drainMs}ms, mmsis: ${opts.mmsis?.length ?? 'all'}`);
 
+  try {
   await new Promise<void>((resolve, reject) => {
     const ws = new WebSocket('wss://stream.aisstream.io/v0/stream');
 
@@ -102,4 +119,7 @@ export async function drainAisStream(opts: DrainOptions): Promise<DrainResult> {
     ` | ${partials.size} unique MMSIs, ${vessels.length} with position, ${staticOnly.length} static-only`
   );
   return { vessels, staticOnly };
+  } finally {
+    if (lockToken !== null && opts.lock && opts.lock.release !== false) await releaseAisLock(opts.lock.env, lockToken);
+  }
 }

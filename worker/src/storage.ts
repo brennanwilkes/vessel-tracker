@@ -423,6 +423,44 @@ export async function setScanCursor(env: Env, key: string, value: number): Promi
     .run();
 }
 
+// ── AIS connection lock ──────────────────────────────────────────────────────
+// Single-key advisory lock (see constants.ts "AIS connection lock"). Stored in scan_meta
+// as the lock's EXPIRY epoch-ms; "free" means value < now (an expired/released lock). The
+// acquiring UPDATE is conditional on that, so SQLite's single-writer serialization makes
+// check-and-set atomic — two concurrent acquirers can't both win. Release is conditional
+// on the token we wrote, so a drain that overran its TTL (and was re-acquired by another
+// scan) can't free the new holder's lock.
+const AIS_LOCK_KEY = 'ais_conn_lock';
+const AIS_LOCK_POLL_MS = 1000;
+const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
+
+// Returns the expiry token to pass to releaseAisLock, or null if it gave up after maxWaitMs.
+export async function acquireAisLock(env: Env, ttlMs: number, maxWaitMs: number, holder: string): Promise<number | null> {
+  await env.VESSELS_DB.prepare(`INSERT OR IGNORE INTO scan_meta (key,value) VALUES (?1, 0)`).bind(AIS_LOCK_KEY).run();
+  const deadline = Date.now() + maxWaitMs;
+  for (;;) {
+    const now = Date.now();
+    const token = now + ttlMs;
+    const res = await env.VESSELS_DB
+      .prepare(`UPDATE scan_meta SET value = ?2 WHERE key = ?1 AND value < ?3`)
+      .bind(AIS_LOCK_KEY, token, now)
+      .run();
+    if (res.meta.changes === 1) return token;
+    if (Date.now() >= deadline) {
+      console.log(`[aisstream] lock BUSY — ${holder} yielded after ${maxWaitMs}ms`);
+      return null;
+    }
+    await sleep(AIS_LOCK_POLL_MS);
+  }
+}
+
+export async function releaseAisLock(env: Env, token: number): Promise<void> {
+  await env.VESSELS_DB
+    .prepare(`UPDATE scan_meta SET value = 0 WHERE key = ?1 AND value = ?2`)
+    .bind(AIS_LOCK_KEY, token)
+    .run();
+}
+
 // Which (mmsi, zone_id) pairs already have a zone_visits row, for the heard MMSIs.
 // The foreign scan drops a single anchor position only on a vessel's FIRST entry to a
 // zone (so the precompute can draw the ocean crossing) — not on every rotation.
