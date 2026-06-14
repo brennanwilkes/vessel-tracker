@@ -4,7 +4,7 @@ import { json, errorJson } from './http';
 import { getCurrentVessels, getTrack, getInferredTrack, getZoneVisits } from './storage';
 import { zoneMeta } from './zones';
 import { runDirectScan, runLocalScan, runGlobalScan, runForeignScan } from './ingest';
-import { LIVE_TTL_DIRECT_MS, LIVE_TTL_LOCAL_MS, LIVE_TTL_GLOBAL_MS, GITHUB_REPO, PRECOMPUTE_WORKFLOW_FILE, FOREIGN_SCAN_CRON } from './constants';
+import { LIVE_TTL_DIRECT_MS, LIVE_TTL_LOCAL_MS, LIVE_TTL_GLOBAL_MS, GITHUB_REPO, PRECOMPUTE_WORKFLOW_FILE, DIRECT_SCAN_CRON, LOCAL_SCAN_CRON, GLOBAL_SCAN_CRON, FOREIGN_SCAN_CRON } from './constants';
 
 const TRACK_LIMIT = 500;
 const VALID_TIERS = new Set<Tier>(['direct', 'local', 'global']);
@@ -68,15 +68,15 @@ export default {
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
     console.log(`[scheduled] cron fired: ${event.cron}`);
 
-    if (event.cron === '* * * * *') {
+    if (event.cron === DIRECT_SCAN_CRON) {
       ctx.waitUntil(
         runDirectScan(env).catch(err => console.error('[scheduled] direct scan failed:', err))
       );
-    } else if (event.cron === '*/5 * * * *') {
+    } else if (event.cron === LOCAL_SCAN_CRON) {
       ctx.waitUntil(
         runLocalScan(env).catch(err => console.error('[scheduled] local scan failed:', err))
       );
-    } else if (event.cron === '0 * * * *') {
+    } else if (event.cron === GLOBAL_SCAN_CRON) {
       ctx.waitUntil(
         runGlobalScan(env)
           .catch(err => console.error('[scheduled] global scan failed:', err))

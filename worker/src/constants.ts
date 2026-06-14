@@ -81,10 +81,18 @@ export const GLOBAL_DRAIN_MS  = 30_000;
 // 120 s) or a direct run's lock would still be held when the next fires: drain 45 s + 10 s
 // = 55 s ≪ 120 s. ✓
 export const AIS_LOCK_TTL_BUFFER_MS   = 10_000;  // lock lifetime = drainMs + this (crash safety + self-expiry for non-releasing scans)
+// Lock wait = how long a scan waits for the socket before yielding (skipping its drain).
+// PRIORITY BY INFREQUENCY: a rare scan's data is more valuable per run (missing one foreign
+// cycle wastes 15 min; missing one direct cycle wastes 2). So the frequent/skippable scans
+// (direct/local) wait briefly and yield, while the rare/important ones (foreign/global) wait
+// long enough to OUTLAST the longest frequent holder — local holds the lock up to
+// LOCAL_DRAIN_MS + buffer = 100 s — so they don't get starved by a local scan that simply
+// grabbed the socket first. (This "persistence = priority": the rare scan keeps polling
+// across the whole window and wins a slot the moment the holder's drain ends.)
 export const AIS_LOCK_WAIT_DIRECT_MS  = 20_000;
-export const AIS_LOCK_WAIT_LOCAL_MS   = 30_000;
-export const AIS_LOCK_WAIT_FOREIGN_MS = 30_000;
-export const AIS_LOCK_WAIT_GLOBAL_MS  = 30_000;
+export const AIS_LOCK_WAIT_LOCAL_MS   = 25_000;
+export const AIS_LOCK_WAIT_FOREIGN_MS = 150_000;  // > local's 100 s hold (+ margin) so foreign is never starved by local
+export const AIS_LOCK_WAIT_GLOBAL_MS  = 120_000;  // per-drain; outlasts a local hold (its 14-min budget caps total)
 
 // Global scans target many specific MMSIs. Query in batches and retry misses so
 // one quiet drain window doesn't decide the day's global data.
@@ -106,7 +114,15 @@ export const GLOBAL_SCAN_BUDGET_MS  = 14 * 60 * 1000;
 //   2. LOW RESOLUTION — a relevant vessel gets one zone_visit (saturating/throttled)
 //      and a single anchor position on first entry to a port, NOT a position track.
 //      Full-resolution tracking only begins if it actually reaches the home box.
-// Cron is FOREIGN_SCAN_CRON (also add it to wrangler.toml [triggers]).
+// ── Cron schedules ───────────────────────────────────────────────────────────
+// MUST stay in sync with wrangler.toml [triggers] `crons` AND with the `event.cron`
+// branches in index.ts `scheduled` — the trigger string, this constant, and the handler
+// match are three copies of the same string; a mismatch silently drops the scan
+// ("unrecognised cron" warning). Direct is */2 (not */1) and global is staggered to :03 —
+// see "AIS connection lock" / the cron-collision analysis in worker/CLAUDE.md.
+export const DIRECT_SCAN_CRON       = '*/2 * * * *';
+export const LOCAL_SCAN_CRON        = '*/5 * * * *';
+export const GLOBAL_SCAN_CRON       = '3 * * * *';
 export const FOREIGN_SCAN_CRON      = '*/15 * * * *';
 export const FOREIGN_DRAIN_MS       = 60_000;
 export const FOREIGN_SCAN_BOX_BATCH = 12;                     // boxes per connection. ceil(41/12)=4 ticks → each zone drained ~every 60 min (was 6 → ~105 min)
