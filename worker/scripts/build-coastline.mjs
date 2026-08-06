@@ -37,6 +37,12 @@ const FINE_ZONES = [
   { minLat: 49.00, maxLat: 49.40, minLon: -123.30, maxLon: -122.70 }, // Vancouver harbour, Burrard Inlet, lower Fraser River
   { minLat: 48.40, maxLat: 48.80, minLon: -123.20, maxLon: -122.50 }, // Bellingham / north Puget approaches
   { minLat: 47.40, maxLat: 48.10, minLon: -122.65, maxLon: -122.20 }, // Puget Sound: Seattle/Elliott Bay, Bremerton, Tacoma
+  // SF Bay + Oakland Estuary. At ~1180 km from home this fell in the 0.30 km tier,
+  // which merged Alameda into the mainland and filled the estuary — the Oakland
+  // container berths (MAUNAWILI's USOAK destination) read as LAND, so the router
+  // could not reach them and the spline zigzagged offshore. The bay proper, the
+  // Golden Gate and San Pablo Bay were always open; only the estuary closed.
+  { minLat: 37.40, maxLat: 38.20, minLon: -122.60, maxLon: -121.95 },
 ];
 const FINE = { simplifyKm: 0.025, dropIslandKm: 0.05 };
 

@@ -116,6 +116,18 @@ continuously. The pipeline (`map_page.js`, all functions exported for testing):
    pass with the fewest land samples and never returns worse (repair can diverge
    in very tight harbours like Victoria's). This one mechanism handles Gulf
    Island crossings and dense-tracking bulges without routing every segment.
+4b. `cleanControls` — post-splice cleanup, run at the END of **both**
+   `buildControlPoints` **and** `repairOffLand`. Splicing a routed path in beside
+   existing controls leaves two artifacts: **near-duplicates** (centripetal
+   Catmull-Rom divides by ~0 → spike) and **reversals** where consecutive routed
+   segments join — 10–40 m steps with ~170° hairpins. Only SYNTHETIC points are
+   dropped (a real fix is ground truth) and a reversal only when the bypass chord
+   is itself clear of land, so it can never cut a corner across a headland.
+   **The `repairOffLand` call site is the load-bearing one:** `buildControlPoints`
+   always collapsed near-duplicates, but `repairOffLand` runs AFTER it and splices
+   its own mids in without re-cleaning — that gap was the source of every observed
+   harbour hairpin (maunawili went 12 kinks → 5, and its land defects → 0).
+   Config: `ROUTE_SMOOTHING.backtrackDeg` (100°) / `backtrackPasses`.
 5. `catmullRom` — ONE centripetal Catmull-Rom (α=0.5) over the whole journey's
    control points. One spline ⇒ continuous derivative everywhere, including
    real→inferred transitions. No pre-smoothing here (control points are already
@@ -193,6 +205,45 @@ snap-to-water net.
   Regression: `tests/region-trails.test.mjs` (real long-gap vessels through the Columbia
   and the BC Inside Passage, water-tight, region-aware).
 
+### `routeOceanGap` (ocean-scale gaps, `trail_geometry.js`)
+
+Gaps longer than `LAND_AVOIDANCE.routeMaxKm` (800 km) do NOT use a single A\*
+grid. One grid over a trans-Pacific gap is the wrong tool twice: it spans a third
+of the planet (millions of cells, each a full `isLand` polygon scan — this is
+what put the precompute cron at 1–2.5 h/run) and spends all of it on open water
+where there is nothing to route around. A plain bridge is wrong too — it cuts
+through whatever island or peninsula lies between.
+
+So the gap is **bi-segmented**: a great-circle spine (`geo.greatCirclePoints`,
+`spineStepKm` 100 km — a ship's real course, and it curves) is classified span by
+span, and only the **land-crossing** spans go to A\*. The coastal ends of a long
+gap fall out for free: they are the spans that hit land, so they get fine
+treatment while the ocean middle stays a clean curve.
+
+Resolution follows the data AND the scale of the detour:
+- Short bracket (≤`fineBracketMaxKm` 150 km) inside fine coverage
+  (`region_coast.hasFineLand`) → the defaults. Identical to a short coastal gap.
+- Everything else → wide margin (`oceanMarginMinKm` 400 km, or the bracket
+  length) with the cell COUNT capped (`oceanMaxCellsPerSide` 800) and a
+  `coarseCellKm` (2 km) floor. The default 90 km margin **strands** a
+  peninsula detour — A\* finds nothing and the spine is left driving straight
+  over Kamchatka, which is worse than a coarse route. Heading bias reaches
+  `oceanHeadingCells` (6) cells, since the 4 km default is sub-cell on a coarse grid.
+
+Two traps, both found by regression:
+- **Never `smoothRoute` an ocean spine.** It densifies to ~uniform spacing then
+  land-checks every 100 m — over an 8,000 km crossing it never returns.
+  `buildControlPoints` uses `ocean ? raw : smoothRoute(raw)`; the short detours
+  are smoothed inside `routeOceanGap`.
+- **Widening a blocked run can swallow the next.** Backing `to` out of a long
+  landmass advances the cursor past a later obstacle; routing that covered run
+  emits points going BACKWARDS along the spine → a hairpin. Guarded by
+  `if (to <= from) continue`.
+
+`routeMaxKm` is deliberately set above the longest gap any fixture depends on
+(623 km chasing-daylight, 553 km bc-inside-passage) so every proven coastal case
+keeps the single-grid path. Regression: `node tests/ocean-trails.test.mjs`.
+
 ### Performance: A* is server-side; the client only splines
 
 A* no longer runs in the browser. The land-crossing gaps are routed by the
@@ -202,6 +253,29 @@ real+inferred stream with the PURE pipeline (`clientRuns` → `trail_spline`): n
 A*, no `repairOffLand`, no coastline data loaded in the browser at all. So a
 reload is instant and there's no jank to hide. See `worker/CLAUDE.md` →
 "Server-side inferred-positions precompute — IMPLEMENTED".
+
+**Render load is bounded by layer COUNT, not point count.** The map is
+`preferCanvas: true`, and the canvas renderer re-strokes every polyline on each
+pan/zoom — so what matters is how many `L.polyline` layers exist.
+`makeFadePolylines` used to emit one per 8 spline samples (~750 layers for one
+long trail, ~75k across a busy map: the source of the client lag). Three bounds
+now apply, all in `map_page.js`:
+- **`FADE_STEPS` (14)** — the fade is quantized into that many opacity bands and
+  consecutive samples of equal band share one polyline, so a trail costs ~14
+  layers regardless of length. (The fade still can't be one CanvasGradient — that
+  bands visibly on a curved trail.)
+- **`MIN_SAMPLE_PX` (2)** — `decimateForZoom` drops samples closer than that on
+  screen via `map.project`. Screen space, not distance: an ocean trail collapses
+  at zoom 8, a harbour trail keeps every point at zoom 14.
+- **`runInView`** — per-run viewport culling against a padded box. A trail can
+  span an ocean while a few hundred km is visible. Tests the run one turn either
+  side of the viewport, because trail lons are unwrapped (may exceed ±180).
+
+Measured across all fixtures: layers 3069→304 at zoom 8 (10.1×), →377 at zoom 14
+(8.1×) with 1.0× point loss, i.e. zoomed-in detail untouched. Because all three
+depend on the view, `redrawTrailsForView` rebuilds layers on `zoomend` (always)
+and `moveend` (only once the view leaves the box it was culled against),
+debounced 150 ms — from cached geometry, so it never re-splines.
 
 The pure spline still depends only on the points (not highlight/fade), so it's
 cached per vessel in `trailGeom` keyed on the trail signature
@@ -254,10 +328,28 @@ km excursions; real sharp turns and wide sparse-gap curve-bulges are fine); and
 **no inferred kink** — a spline turn >60° more than 2 km from any real fix (the
 old sparse-string-pull mid-channel dogleg, 68–168° — a turn no boat could make).
 Genuine sharp turns sit AT a real fix (dock wiggle, a lone fix between long gaps)
-or where the channel forces them, and are exempt. `KNOWN_DATA_LIMITED` is now empty
-— glovis-star (upper Fraser) graduated to PASS once the water layer landed. Run:
+or where the channel forces them, and are exempt. Run:
 `node tests/trail.test.mjs`. See `tests/README.md` for the A* troubleshooting
 techniques and `docs/fraser-river-test-cases.md` for the river coverage criteria.
+
+#### Berth endpoints on land (`KNOWN_DATA_LIMITED`: maunawili)
+
+glovis-star (upper Fraser) graduated to PASS once the water layer landed; **maunawili**
+replaced it for a different, non-fixable reason. A vessel BERTHED at a container terminal
+reports from alongside the wharf, and a wharf is land at 25 m coastline resolution — its
+three moored fixes at `37.7935,−122.2982` are inside the mainland polygon, with water
+resuming only 165 m south. **No water route to that endpoint exists**, so `routeWater`'s
+`snapToWater` lands the goal in a channel that may be the wrong side of a pier, and
+`repairOffLand` oscillates across the SF waterfront (~5 residual hairpins between the
+Golden Gate and the estuary). Accepted behaviour: draw by water for as long as water
+exists, then degrade at the berth — land-tightness is unaffected (`landDefects=0`).
+
+Two things this is NOT, both tested and ruled out: it is not coastline resolution (a
+25 m SF Bay `FINE_ZONE` was added and did not help), and it is not a reversal inside a
+routed path (instrumenting found zero >100° turns within any A* output — they only appear
+at splice joints, which is what `cleanControls` addresses). A real fix needs land-locked
+endpoint handling: terminate the route at the nearest water point and run the final leg
+straight to the berth, rather than trying to route all the way in.
 
 ## Future work (perf + data coverage)
 

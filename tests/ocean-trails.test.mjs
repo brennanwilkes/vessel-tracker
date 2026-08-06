@@ -35,7 +35,12 @@ const FIXTURES = ['maunawili', 'cs-anthem', 'cosco-santos'];
 // held to the water-tight standard, and only past a tolerance the ~2 km coarse
 // layer can actually meet. See tests/README.md §1.
 const COARSE_GRAZE_KM = 6;
-const BUDGET_MS = 180_000;
+// Guards the 1–2.5 h regression this suite exists for, so it is deliberately loose
+// — it is an "is it hours again?" alarm, not a perf target. Raised 180s→300s when
+// the SF Bay FINE_ZONE landed: harbour-grade polygons there make every isLand call
+// in the Bay dearer, and maunawili (24 routed segments, the most of any fixture)
+// went 63s→194s. cs-anthem 50s and cosco-santos 37s are unaffected.
+const BUDGET_MS = 300_000;
 
 let failures = 0;
 const ok = (cond, msg) => { console.log((cond ? 'PASS  ' : 'FAIL  ') + msg); if (!cond) failures++; };

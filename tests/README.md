@@ -124,7 +124,26 @@ artifacts out; tangent anchors fix the boundary. If corners return, check `ROUTE
 close on both sides → it can't relax there, which is correct). The regression's `inferredKinks`
 column tracks this.
 
-### 8. Visualize on a map
+### 8. Locate the defect before theorising about it
+
+The regression prints *counts* (`landDefects=1 inferredKinks=12`), never *coordinates* — and a
+count invites guessing. Three consecutive wrong hypotheses on maunawili (SF Bay closed → rebuild
+the `sf-bay` region; berth at the wrong coordinate; reversals inside the A\* output) each cost a
+full A\* run to disprove. What actually solved it in one pass: a throwaway script mirroring the
+test for ONE fixture that **prints every defect and kink with its lat/lon, polygon index and
+turn angle**, plus a second that **dumps the control points with per-point step distance and
+turn**, flagging anything ≥60°. The dump made the failure self-evident — 14 m/38 m steps with
+167°/178° reversals, i.e. near-duplicate control points, in a stretch that `buildControlPoints`
+had already cleaned, which located the bug in `repairOffLand`'s later splice.
+
+Two lessons worth keeping:
+- **Instrument before hypothesising.** A count tells you *that* something is wrong; only
+  coordinates tell you *where*, and "where" usually names the cause outright.
+- **Verify the fix fires.** The first `cleanControls` attempt produced byte-identical output
+  because it was placed on a code path the ocean branch skips. A one-line `console.error` proved
+  it never executed — far cheaper than reasoning about why the numbers hadn't moved.
+
+### 9. Visualize on a map
 Emit GeoJSON (land polygons + real trail + routed waypoints + spline + land-clip points) and open it
 at <https://geojson.io>. Seeing the failure beats reading coordinates.
 

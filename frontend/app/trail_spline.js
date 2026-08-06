@@ -9,7 +9,7 @@
 //
 // plus simplifyForSpline, used by the precompute to store the fewest waypoints
 // whose spline still reproduces a routed segment. See frontend/CLAUDE.md.
-import { haversineKm } from './geo.js';
+import { haversineKm, unwrapLon } from './geo.js';
 import { MOVING_SPEED_KN, TRAIL_GAP_SEVER_MS, TRAIL_SIMPLIFY } from '../config.js';
 
 export const SPLINE_SAMPLES = 12;
@@ -18,12 +18,31 @@ export const SPLINE_SAMPLES = 12;
 // otherwise make centripetal Catmull-Rom divide by ~0 and spike.
 export const DEDUP_KM = 0.02;
 
-export function dedup(points) {
+// Shift each longitude into the previous point's frame so consecutive fixes are
+// never more than 180° apart. Every downstream stage (spline interpolation, the
+// A* grid span, Laplacian smoothing) is linear in longitude and would otherwise
+// take a dateline crossing the long way around the globe — a Japan-bound vessel
+// drawn back across North America and Eurasia. See geo.js "Longitude frames".
+// The frame is anchored on the FIRST point, so an all-local track is untouched.
+export function unwrapTrack(points) {
   if (points.length === 0) return points;
   const out = [points[0]];
   for (let i = 1; i < points.length; i++) {
+    const lon = unwrapLon(out[i - 1].lon, points[i].lon);
+    out.push(lon === points[i].lon ? points[i] : { ...points[i], lon });
+  }
+  return out;
+}
+
+// Entry point of every trail pipeline (client render, server precompute, tests),
+// so it is where the unwrapped frame is established.
+export function dedup(points) {
+  if (points.length === 0) return points;
+  const unwrapped = unwrapTrack(points);
+  const out = [unwrapped[0]];
+  for (let i = 1; i < unwrapped.length; i++) {
     const p = out[out.length - 1];
-    if (haversineKm(p.lat, p.lon, points[i].lat, points[i].lon) > DEDUP_KM) out.push(points[i]);
+    if (haversineKm(p.lat, p.lon, unwrapped[i].lat, unwrapped[i].lon) > DEDUP_KM) out.push(unwrapped[i]);
   }
   return out;
 }

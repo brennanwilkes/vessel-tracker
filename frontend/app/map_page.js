@@ -42,11 +42,43 @@ function hexToRgb(hex) {
   return [(v >> 16) & 255, (v >> 8) & 255, v & 255];
 }
 
-// Gradient-faded polylines: split a run of spline samples into chunks, each
-// with flat opacity keyed off the chunk's timestamp. Older = fainter. Chunking
-// avoids the screen-space banding a single CanvasGradient shows on curved
-// trails. `samples` are {lat,lon,t}; `trailBounds` is the overall {t0,t1} time
-// range (or 'flat' for the highlighted vessel, which doesn't fade).
+// Number of distinct opacity levels along one trail. The fade has to be built
+// from several flat-opacity polylines (a single CanvasGradient bands visibly on
+// a curved trail), and this is what bounds how many. It used to be one polyline
+// per 8 spline samples — ~750 layers for a single long track, ~75k across a
+// busy map, every one of them re-stroked by the canvas renderer on each pan and
+// zoom, which is where the lag came from. Quantizing instead means a trail
+// costs a fixed ~14 layers no matter how long it is, and at this many steps the
+// gradient still reads as smooth.
+const FADE_STEPS = 14;
+
+// Spline samples closer together than this on screen are dropped before
+// drawing: below ~2 px they are literally invisible, but the renderer still
+// pays for every one. A trans-Pacific trail at zoom 11 collapses to a few
+// hundred points; a harbour trail keeps all its detail, because the test is in
+// screen space, not distance. Trails redraw on zoom so detail comes back as you
+// zoom in.
+const MIN_SAMPLE_PX = 2;
+
+function decimateForZoom(samples) {
+  if (map === null || samples.length < 3) return samples;
+  const zoom = map.getZoom();
+  const out = [samples[0]];
+  let prev = map.project([samples[0].lat, samples[0].lon], zoom);
+  for (let i = 1; i < samples.length - 1; i++) {
+    const p = map.project([samples[i].lat, samples[i].lon], zoom);
+    if (Math.abs(p.x - prev.x) + Math.abs(p.y - prev.y) < MIN_SAMPLE_PX) continue;
+    out.push(samples[i]);
+    prev = p;
+  }
+  out.push(samples[samples.length - 1]);
+  return out;
+}
+
+// Gradient-faded polylines: split a run of spline samples into contiguous
+// stretches of equal (quantized) opacity, keyed off timestamp. Older = fainter.
+// `samples` are {lat,lon,t}; `trailBounds` is the overall {t0,t1} time range
+// (or 'flat' for the highlighted vessel, which doesn't fade).
 function makeFadePolylines(samples, color, weight, trailFade, trailBounds, dashArray) {
   const [r, g, b] = hexToRgb(color);
   const range = trailFade * 0.9;
@@ -55,16 +87,19 @@ function makeFadePolylines(samples, color, weight, trailFade, trailBounds, dashA
     if (trailBounds === 'flat' || !(trailBounds.t1 > trailBounds.t0)) return trailFade;
     return base + range * ((t - trailBounds.t0) / (trailBounds.t1 - trailBounds.t0));
   };
+  const stepAt = t => Math.round(fadeAt(t) * FADE_STEPS);
 
+  const pts = decimateForZoom(samples);
   const layers = [];
-  const CHUNK_PTS = 8;
-  for (let i = 0; i < samples.length - 1; i += CHUNK_PTS) {
-    const end = Math.min(i + CHUNK_PTS + 1, samples.length);
-    const chunk = samples.slice(i, end);
+  let start = 0;
+  for (let i = 1; i <= pts.length; i++) {
+    if (i < pts.length && stepAt(pts[i].t) === stepAt(pts[start].t)) continue;
+    // Overlap by one point so consecutive opacity bands join without a gap.
+    const chunk = pts.slice(start, Math.min(i + 1, pts.length));
+    start = i;
     if (chunk.length < 2) continue;
-    const opacity = fadeAt(chunk[(chunk.length - 1) >> 1].t);
     const opts = {
-      color: `rgba(${r},${g},${b},${opacity})`,
+      color: `rgba(${r},${g},${b},${stepAt(chunk[0].t) / FADE_STEPS})`,
       weight,
       className: 'vessel-trail',
       interactive: false,
@@ -232,6 +267,34 @@ function removeTrailLayers(mmsi) {
 
 // Render precomputed runs for a vessel (cheap — styling only). Re-reads current
 // highlight/fade so deferred redraws pick up the latest state.
+// Viewport used for run culling, padded so ordinary panning doesn't invalidate
+// it. Kept as plain numbers; null until the first draw.
+let culledAgainst = null;
+
+// Padded view bounds for culling. A vessel's trail can span an ocean while only
+// a few hundred km of it is on screen — drawing the rest costs the renderer on
+// every frame and shows nothing.
+function cullBox() {
+  const b = map.getBounds().pad(0.6);
+  return { s: b.getSouth(), n: b.getNorth(), w: b.getWest(), e: b.getEast() };
+}
+
+function runInView(run, box) {
+  let s = 90, n = -90, w = Infinity, e = -Infinity;
+  for (const p of run.samples) {
+    if (p.lat < s) s = p.lat; if (p.lat > n) n = p.lat;
+    if (p.lon < w) w = p.lon; if (p.lon > e) e = p.lon;
+  }
+  if (s > box.n || n < box.s) return false;
+  // Longitudes here are the pipeline's unwrapped values, which is also where
+  // Leaflet draws them (an adjacent world copy). The viewport can sit in a
+  // different copy than the run, so test the run one turn either side too.
+  for (let turn = -1; turn <= 1; turn++) {
+    if (w + turn * 360 <= box.e && e + turn * 360 >= box.w) return true;
+  }
+  return false;
+}
+
 function drawRuns(vessel, runs, bounds) {
   const mmsi = vessel.mmsi;
   removeTrailLayers(mmsi);
@@ -240,8 +303,11 @@ function drawRuns(vessel, runs, bounds) {
   const trailFade = isHighlighted ? 1.0 : markerOpacity(vessel);
   const trailBounds = isHighlighted ? 'flat' : bounds;
   const style = isHighlighted ? { opacity: 1.0, weight: 3 } : TIER_STYLE.direct;
+  const box = cullBox();
+  culledAgainst = box;
   const layers = [];
   for (const run of runs) {
+    if (!runInView(run, box)) continue;
     const opacityMul = run.synthetic ? LAND_AVOIDANCE.fadeRatio : 1;
     const runLayers = makeFadePolylines(
       run.samples, color, style.weight, style.opacity * opacityMul * trailFade,
@@ -319,8 +385,35 @@ function drawTrail(vessel, points, token) {
   // pure now (server did the A*), so a miss computes inline without freezing.
   const cached = trailGeom.get(mmsi);
   const runs = (cached !== undefined && cached.sig === sig) ? cached.runs : clientRuns(allPoints);
-  if (cached === undefined || cached.sig !== sig) trailGeom.set(mmsi, { sig, runs });
+  if (cached === undefined || cached.sig !== sig) trailGeom.set(mmsi, { sig, runs, bounds });
+  else cached.bounds = bounds;
   drawRuns(vessel, runs, bounds);
+}
+
+// Re-style every drawn trail from cached geometry. Needed after a view change:
+// the screen-space decimation and the viewport culling both depend on it —
+// zooming in must restore detail that was dropped, panning must bring in runs
+// that were culled. Geometry itself is view-independent, so this never
+// re-splines; it only rebuilds layers. Debounced, and on pan it no-ops while
+// the view is still inside the padded box we last culled against, so ordinary
+// dragging costs nothing.
+let viewRedrawTimer = null;
+function redrawTrailsForView(force) {
+  if (map === null) return;
+  if (!force && culledAgainst !== null) {
+    const b = map.getBounds();
+    const c = culledAgainst;
+    if (b.getSouth() >= c.s && b.getNorth() <= c.n && b.getWest() >= c.w && b.getEast() <= c.e) return;
+  }
+  if (viewRedrawTimer !== null) clearTimeout(viewRedrawTimer);
+  viewRedrawTimer = setTimeout(() => {
+    viewRedrawTimer = null;
+    if (map === null) return;
+    for (const vessel of lastVessels) {
+      const cached = trailGeom.get(vessel.mmsi);
+      if (cached !== undefined && trailLayers.has(vessel.mmsi)) drawRuns(vessel, cached.runs, cached.bounds);
+    }
+  }, 150);
 }
 
 async function scheduleTrails(visibleVessels, token) {
@@ -610,6 +703,8 @@ export function mount(root) {
   map.on('moveend', drawObstructions);
   map.on('zoomend', drawObstructions);
   map.on('resize',  drawObstructions);
+  map.on('zoomend', () => redrawTrailsForView(true));
+  map.on('moveend', () => redrawTrailsForView(false));
   drawObstructions();
 
   unsubscribeVessels = subscribeVessels(onVesselsUpdate);

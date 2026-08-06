@@ -10,8 +10,8 @@
 //
 // See frontend/CLAUDE.md "Trail rendering & land avoidance" for the design and
 // the core "trust the boat" principle.
-import { haversineKm, bearingDeg, routeWater } from './geo.js';
-import { isLand } from './region_coast.js';
+import { haversineKm, bearingDeg, routeWater, greatCirclePoints } from './geo.js';
+import { isLand, hasFineLand } from './region_coast.js';
 import { LAND_AVOIDANCE, ROUTE_SMOOTHING, NARROW_WEIGHT } from '../config.js';
 import { dedup, splitJourneys, catmullRom, runsBySynthetic, simplifyForSpline, SPLINE_SAMPLES, DEDUP_KM } from './trail_spline.js';
 
@@ -29,7 +29,7 @@ const crossesLand = (a, b, stepKm = 1) => {
   for (let s = 0; s <= n; s++) { const f = s / n; if (isLand(a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f)) return true; }
   return false;
 };
-const routeAroundLand = (a, b, narrowWeight, entryBearing, exitBearing) => routeWater(a, b, null, null, { isLand, narrowWeight, entryBearing, exitBearing });
+const routeAroundLand = (a, b, narrowWeight, entryBearing, exitBearing, cellKm) => routeWater(a, b, null, null, { isLand, narrowWeight, entryBearing, exitBearing, cellKm });
 
 // cos-weighted Laplacian denoise of real AIS positions. A point that would move
 // onto land (smoothing toward a neighbor-midpoint near a concave shore) keeps
@@ -63,6 +63,46 @@ function denoise(points, passes = 2, factor = 0.2) {
 // the turn — the inferred curve never shows a turn a boat couldn't make, yet
 // stays water-tight (a move onto land is rejected, the same "trust the water"
 // guard as denoise). Returns [[lat,lon], …] including the pinned endpoints.
+// Post-splice cleanup of an ASSEMBLED control list. Splicing a routed path in
+// beside existing controls leaves two artifacts, and both must be cleared before
+// the spline sees them:
+//   1. NEAR-DUPLICATES — centripetal Catmull-Rom divides by ~0 and spikes.
+//   2. REVERSALS — where consecutive routed segments join, the path can double
+//      back on itself (10–40 m steps with a ~170° hairpin). Seen on approaches to
+//      a berth: a moored vessel's fix sits on the WHARF, which is land at 25 m
+//      coastline resolution, so routeWater's snapToWater can pick the channel on
+//      the wrong side of a pier and the approach overshoots and returns.
+// Only SYNTHETIC points are dropped — a real fix is ground truth and always
+// stays — and a reversal is removed only when the bypass chord is itself clear
+// of land, so this can never cut a corner across a headland. Repeats to a
+// fixpoint: one reversal routinely hides the next.
+function cleanControls(ctrl) {
+  const collapsed = [ctrl[0]];
+  for (let i = 1; i < ctrl.length; i++) {
+    const p = collapsed[collapsed.length - 1];
+    if (haversineKm(p.lat, p.lon, ctrl[i].lat, ctrl[i].lon) > DEDUP_KM) collapsed.push(ctrl[i]);
+  }
+  let cur = collapsed;
+  for (let pass = 0; pass < ROUTE_SMOOTHING.backtrackPasses && cur.length >= 3; pass++) {
+    const next = [cur[0]];
+    let removed = 0;
+    for (let i = 1; i < cur.length - 1; i++) {
+      const c = cur[i];
+      const prev = next[next.length - 1], after = cur[i + 1];
+      let turn = Math.abs(bearingDeg(c.lat, c.lon, after.lat, after.lon)
+                        - bearingDeg(prev.lat, prev.lon, c.lat, c.lon)) % 360;
+      if (turn > 180) turn = 360 - turn;
+      if (c.synthetic && turn > ROUTE_SMOOTHING.backtrackDeg
+          && !crossesLand([prev.lat, prev.lon], [after.lat, after.lon], 0.1)) { removed++; continue; }
+      next.push(c);
+    }
+    next.push(cur[cur.length - 1]);
+    cur = next;
+    if (removed === 0) break;
+  }
+  return cur;
+}
+
 function smoothRoute(wp) {
   if (wp.length < 3) return wp;
   let totalKm = 0;
@@ -97,6 +137,100 @@ function smoothRoute(wp) {
   return cur;
 }
 
+// Ocean-scale gap router — resolution follows the WATER, not the gap length.
+//
+// One A* grid over a trans-Pacific gap is the wrong tool twice over: it spans a
+// third of the planet (millions of cells, each running a full isLand polygon
+// scan — this is what put the precompute cron at 1–2.5 h/run) and it spends all
+// that work on open water where there is nothing to route around. But a plain
+// bridge is wrong too: it cuts straight through whatever island or peninsula
+// happens to lie between.
+//
+// So bi-segment the gap. Lay a great-circle spine (a ship's actual course, and
+// it curves), classify each span of it as water or land, and hand ONLY the
+// land-crossing stretches to A*. Each such stretch is short — a strait, an
+// island, a cape — so `routeWater`'s own cell budget lands it at fine
+// resolution, exactly where fine resolution buys something. The coastal ends of
+// a long gap fall out of this for free: they are the stretches that hit land,
+// so they get the fine treatment while the ocean middle stays a clean curve.
+export function routeOceanGap(a, b, narrowWeight) {
+  const totalKm = haversineKm(a[0], a[1], b[0], b[1]);
+  const spine = greatCirclePoints(a, b, Math.max(2, Math.ceil(totalKm / LAND_AVOIDANCE.spineStepKm)));
+
+  // Land-crossing runs of spine SEGMENTS, widened by one vertex each side so the
+  // routed sub-gap starts and ends in open water (A* needs water endpoints).
+  const blocked = [];
+  for (let i = 1; i < spine.length; i++) {
+    const hits = crossesLand(spine[i - 1], spine[i], LAND_AVOIDANCE.spineStepKm / 20);
+    if (!hits) continue;
+    const last = blocked[blocked.length - 1];
+    if (last && last[1] >= i - 1) last[1] = i;
+    else blocked.push([i - 1, i]);
+  }
+
+  const onLand = (v) => isLand(v[0], v[1]);
+  const out = [spine[0]];
+  let cursor = 0;
+  for (const [s0, s1] of blocked) {
+    // Back the bracket out to open water. A spine vertex can land INSIDE the
+    // obstacle (a 100 km step lands mid-peninsula), and A* needs water endpoints.
+    let from = Math.max(cursor, s0 - 1), to = Math.min(spine.length - 1, s1 + 1);
+    while (from > cursor && onLand(spine[from])) from--;
+    while (to < spine.length - 1 && onLand(spine[to])) to++;
+    // Widening one run can swallow the next: backing `to` out of a long
+    // landmass advances the cursor past a later obstacle. Routing that
+    // already-covered run would emit points going BACKWARDS along the spine,
+    // which splices in as a hairpin (the 156° turns this fixture showed).
+    if (to <= from) continue;
+    if (onLand(spine[from]) || onLand(spine[to])) continue;
+    for (let i = cursor + 1; i <= from; i++) out.push(spine[i]);
+    // Resolution follows BOTH the data and the scale of the detour.
+    //
+    // A short bracket in fine coverage is an ordinary coastal gap — give it the
+    // defaults and its harbour-grade threading. Anything else is a coastal- or
+    // continental-scale swing: rounding the Olympic Peninsula to enter Juan de
+    // Fuca, or clearing Kamchatka. Those need two things the defaults refuse.
+    // First, room: the default margin caps a detour at 90 km, but the real
+    // route here runs hundreds of km offshore, and with too little room A*
+    // finds nothing at all — which is worse than a coarse route, because the
+    // spine is then left driving straight over the peninsula. Second, a cell
+    // size that keeps the resulting wide grid affordable; a vessel 50 km
+    // offshore is not using 200 m detail, and where the data is the ~2 km
+    // coarse layer that detail does not exist in the first place.
+    const subKm = haversineKm(spine[from][0], spine[from][1], spine[to][0], spine[to][1]);
+    const fine = (hasFineLand(spine[from][0], spine[from][1]) || hasFineLand(spine[to][0], spine[to][1]))
+      && subKm <= LAND_AVOIDANCE.fineBracketMaxKm;
+    // Bias A* to leave and rejoin along the spine's own direction — the same
+    // fix, and the same reason, as the COG bias on a coastal gap: without it the
+    // proximity cost can send the route backwards out of the endpoint to reach a
+    // better-looking corridor, which splices into the spine as a hairpin. On a
+    // coarse grid the bias has to act over a proportionally longer distance to
+    // reach past the first cell.
+    const entryBearing = from > 0 ? bearingDeg(spine[from - 1][0], spine[from - 1][1], spine[from][0], spine[from][1]) : undefined;
+    const exitBearing = to < spine.length - 1 ? bearingDeg(spine[to][0], spine[to][1], spine[to + 1][0], spine[to + 1][1]) : undefined;
+    let detour;
+    if (fine) {
+      detour = routeWater(spine[from], spine[to], null, null, { isLand, narrowWeight, entryBearing, exitBearing });
+    } else {
+      const marginKm = Math.max(LAND_AVOIDANCE.oceanMarginMinKm, subKm);
+      const cellKm = Math.max(LAND_AVOIDANCE.coarseCellKm,
+        (subKm + 2 * marginKm) / LAND_AVOIDANCE.oceanMaxCellsPerSide);
+      detour = routeWater(spine[from], spine[to], null, null, {
+        isLand, narrowWeight, marginKm, cellKm, entryBearing, exitBearing,
+        headingKm: Math.max(4, cellKm * LAND_AVOIDANCE.oceanHeadingCells),
+      });
+    }
+    // No route (out of coastline coverage) → keep the spine and let it graze;
+    // the same graceful degradation as a short gap that can't be routed.
+    if (detour && detour.length > 2) for (const p of smoothRoute(detour).slice(1, -1)) out.push(p);
+    else for (let i = from + 1; i < to; i++) out.push(spine[i]);
+    out.push(spine[to]);
+    cursor = to;
+  }
+  for (let i = cursor + 1; i < spine.length; i++) out.push(spine[i]);
+  return out;
+}
+
 // Build the spline control points for one journey: denoised real fixes, with
 // smoothed water-routed waypoints spliced into every land-crossing gap. Each
 // control point carries its time and whether it's an inferred (synthetic) waypoint.
@@ -111,16 +245,26 @@ export function buildControlPoints(journey, route = true, narrowWeight, doDenois
     // makes the spline diverge (Vancouver/Fraser delta). Spline bulges in dense
     // stretches are handled by repairOffLand instead. `route` is false for the
     // instant first-paint pass (no A*).
-    const isGap = (journey[i].t - journey[i - 1].t) > LAND_AVOIDANCE.gapMinMs || haversineKm(a[0], a[1], b[0], b[1]) > LAND_AVOIDANCE.gapMinKm;
-    if (route && isGap && crossesLand(a, b)) {
+    const gapKm = haversineKm(a[0], a[1], b[0], b[1]);
+    const isGap = (journey[i].t - journey[i - 1].t) > LAND_AVOIDANCE.gapMinMs || gapKm > LAND_AVOIDANCE.gapMinKm;
+    // Past routeMaxKm a single A* grid is both unaffordable and pointless (see
+    // routeOceanGap); the ocean router always runs on such a gap — even when it
+    // clears land — because the bridge itself should follow the great circle.
+    const ocean = isGap && gapKm > LAND_AVOIDANCE.routeMaxKm;
+    if (route && isGap && (ocean || crossesLand(a, b))) {
       // Bias A* to leave/arrive along the boat's real course either side of the
       // gap (the COG just outside it) so it doesn't backtrack against the boat's
       // heading — that read as a sharp kink at the real→inferred boundary.
       const entryBearing = i >= 2 ? bearingDeg(real[i - 2][0], real[i - 2][1], a[0], a[1]) : undefined;
       const exitBearing = i + 1 < real.length ? bearingDeg(b[0], b[1], real[i + 1][0], real[i + 1][1]) : undefined;
-      const raw = routeAroundLand(a, b, narrowWeight, entryBearing, exitBearing);
+      const raw = ocean
+        ? routeOceanGap(a, b, narrowWeight)
+        : routeAroundLand(a, b, narrowWeight, entryBearing, exitBearing);
       if (raw && raw.length > 2) {
-        const wp = smoothRoute(raw);
+        // An ocean spine is already smooth and its spans are ~100 km; running
+        // smoothRoute over it would densify then land-check every 100 m of an
+        // ocean crossing. Its short A*-routed detours are smoothed in place.
+        const wp = ocean ? raw : smoothRoute(raw);
         const t0 = journey[i - 1].t, t1 = journey[i].t;
         for (let k = 1; k < wp.length - 1; k++) {
           ctrl.push({ lat: wp[k][0], lon: wp[k][1], t: t0 + (t1 - t0) * (k / (wp.length - 1)), synthetic: true, fake: true });
@@ -129,14 +273,7 @@ export function buildControlPoints(journey, route = true, narrowWeight, doDenois
     }
     ctrl.push({ lat: b[0], lon: b[1], t: journey[i].t, synthetic: false, fake: false });
   }
-  // Splicing in/out routes through a narrow feature can leave near-duplicate
-  // control points; collapse them so the spline doesn't spike.
-  const out = [ctrl[0]];
-  for (let i = 1; i < ctrl.length; i++) {
-    const p = out[out.length - 1];
-    if (haversineKm(p.lat, p.lon, ctrl[i].lat, ctrl[i].lon) > DEDUP_KM) out.push(ctrl[i]);
-  }
-  return out;
+  return cleanControls(ctrl);
 }
 
 // Find the nearest water point to an on-land point, then step a little further
@@ -194,7 +331,10 @@ export function repairOffLand(ctrl, maxPasses = 6, narrowWeight) {
       const segB = Math.min(ctrl.length - 2, Math.floor(b / SPLINE_SAMPLES));
       const c0 = ctrl[segA], c1 = ctrl[segB + 1];
       if (isLand(c0.lat, c0.lon) || isLand(c1.lat, c1.lon)) continue;
-      if (crossesLand([c0.lat, c0.lon], [c1.lat, c1.lon])) {
+      // Same ocean-crossing cap as buildControlPoints: an unrouted trans-ocean
+      // bridge whose spline grazes a far coast must not pull A* back in here.
+      const bracketKm = haversineKm(c0.lat, c0.lon, c1.lat, c1.lon);
+      if (bracketKm <= LAND_AVOIDANCE.routeMaxKm && crossesLand([c0.lat, c0.lon], [c1.lat, c1.lon])) {
         const raw = routeAroundLand([c0.lat, c0.lon], [c1.lat, c1.lon], narrowWeight);
         if (raw && raw.length > 2) {
           const wp = smoothRoute(raw);
@@ -225,7 +365,10 @@ export function repairOffLand(ctrl, maxPasses = 6, narrowWeight) {
     if (land < bestLand) { bestLand = land; best = ctrl.slice(); }
     else break; // a pass that didn't improve → stop and keep the best
   }
-  return best;
+  // repairOffLand splices its OWN mids in after buildControlPoints already
+  // cleaned, so the near-duplicates and reversals have to be cleared again here —
+  // this is where the berth-approach hairpins actually came from.
+  return cleanControls(best);
 }
 
 // Cheap estimate of how much a trail needs routed enrichment: total km of

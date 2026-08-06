@@ -1,6 +1,34 @@
 const R_NM = 3440.065;
 const R_KM = 6371.0;
 
+// ── Longitude frames ────────────────────────────────────────────────────────
+//
+// The whole trail pipeline does LINEAR arithmetic on longitude — spline
+// interpolation, Laplacian smoothing, the A* grid's min/max span. On raw
+// [-180,180] values a Pacific crossing (BC -128° → Japan +140°) interpolates
+// the LONG way: 268° east across North America, the Atlantic and Eurasia
+// instead of 92° west across the Pacific. So the pipeline works in an
+// UNWRAPPED frame — each point's longitude shifted by whole turns to sit
+// within 180° of its predecessor, which may put it outside [-180,180] — and
+// wraps back only at the two boundaries that need real coordinates: polygon
+// containment tests (the land/water data is in [-180,180]) and storage.
+//
+// Leaflet renders unwrapped longitudes as the adjacent world copy, so a
+// dateline-crossing polyline draws continuously — no wrapping before render.
+//
+// haversineKm/bearingDeg are frame-agnostic: they take sin/cos of dLon, which
+// is periodic in 360°, so they were already correct across the dateline.
+
+export function wrapLon(lon) {
+  const w = ((lon + 180) % 360 + 360) % 360 - 180;
+  return w;
+}
+
+// `lon` shifted by whole turns into the frame of `ref` (within ±180° of it).
+export function unwrapLon(ref, lon) {
+  return ref + wrapLon(lon - ref);
+}
+
 export function haversineNm(lat1, lon1, lat2, lon2) {
   const dLat = (lat2 - lat1) * Math.PI / 180;
   const dLon = (lon2 - lon1) * Math.PI / 180;
@@ -25,6 +53,35 @@ export function bearingDeg(lat1, lon1, lat2, lon2) {
   return ((Math.atan2(y, x) * 180 / Math.PI) + 360) % 360;
 }
 
+// Points along the great circle a→b (inclusive, `n` segments). Longitudes come
+// back in a's unwrapped frame, so the result can be interpolated and spliced
+// directly into the trail pipeline. A linear lat/lon bridge is a rhumb line —
+// on an ocean crossing it sags hundreds of km off the path a ship actually
+// steers, and (near the poles) can cut land the great circle clears.
+export function greatCirclePoints(a, b, n) {
+  const rad = Math.PI / 180;
+  const lat1 = a[0] * rad, lon1 = a[1] * rad;
+  const bLon = unwrapLon(a[1], b[1]);
+  const lat2 = b[0] * rad, lon2 = bLon * rad;
+  const d = 2 * Math.asin(Math.sqrt(
+    Math.sin((lat2 - lat1) / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin((lon2 - lon1) / 2) ** 2));
+  if (!(d > 1e-9)) return [[a[0], a[1]], [b[0], bLon]];
+
+  const out = [];
+  let prevLon = a[1];
+  for (let i = 0; i <= n; i++) {
+    const f = i / n;
+    const A = Math.sin((1 - f) * d) / Math.sin(d), B = Math.sin(f * d) / Math.sin(d);
+    const x = A * Math.cos(lat1) * Math.cos(lon1) + B * Math.cos(lat2) * Math.cos(lon2);
+    const y = A * Math.cos(lat1) * Math.sin(lon1) + B * Math.cos(lat2) * Math.sin(lon2);
+    const z = A * Math.sin(lat1) + B * Math.sin(lat2);
+    const lon = unwrapLon(prevLon, Math.atan2(y, x) / rad);
+    prevLon = lon;
+    out.push([Math.atan2(z, Math.hypot(x, y)) / rad, lon]);
+  }
+  return out;
+}
+
 // ── Land geometry ─────────────────────────────────────────────────────────
 
 export function pointInPolygon(pt, polygon) {
@@ -43,7 +100,8 @@ export function pointInPolygon(pt, polygon) {
 // Is [lat,lon] inside a water polygon (river/harbour basin)? Water entries are
 // { o: outer ring [[lat,lon],…], h?: hole rings (mid-water islands → land) }. Holes
 // flip back to not-water. Bbox-prefiltered like land.
-export function pointInWater(lat, lon, waterPolygons, waterBboxes) {
+export function pointInWater(lat, unwrappedLon, waterPolygons, waterBboxes) {
+  const lon = wrapLon(unwrappedLon);
   for (let i = 0; i < waterPolygons.length; i++) {
     const bb = waterBboxes[i];
     if (lat < bb.minLat || lat > bb.maxLat || lon < bb.minLon || lon > bb.maxLon) continue;
@@ -59,7 +117,8 @@ export function pointInWater(lat, lon, waterPolygons, waterBboxes) {
 // polygon (the second layer re-opens rivers/harbours the coastline closed). The
 // water test runs only for the minority of points already on land, and bbox-
 // prefilters, so it's cheap. `waterPolygons` is optional (omit → coastline only).
-export function pointOnLand(lat, lon, polygons, bboxes, waterPolygons, waterBboxes) {
+export function pointOnLand(lat, unwrappedLon, polygons, bboxes, waterPolygons, waterBboxes) {
+  const lon = wrapLon(unwrappedLon);
   let onLand = false;
   for (let i = 0; i < polygons.length; i++) {
     const bb = bboxes[i];
@@ -73,10 +132,11 @@ export function pointOnLand(lat, lon, polygons, bboxes, waterPolygons, waterBbox
 
 // Does the straight line a→b pass over land? Sampled at ~stepKm.
 export function segmentCrossesLand(a, b, polygons, bboxes, stepKm = 1, waterPolygons, waterBboxes) {
+  const bLon = unwrapLon(a[1], b[1]);   // sample the short way, not across the globe
   const n = Math.max(2, Math.ceil(haversineKm(a[0], a[1], b[0], b[1]) / stepKm));
   for (let s = 0; s <= n; s++) {
     const f = s / n;
-    if (pointOnLand(a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, polygons, bboxes, waterPolygons, waterBboxes)) return true;
+    if (pointOnLand(a[0] + (b[0] - a[0]) * f, a[1] + (bLon - a[1]) * f, polygons, bboxes, waterPolygons, waterBboxes)) return true;
   }
   return false;
 }

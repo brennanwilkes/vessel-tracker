@@ -59,7 +59,10 @@ for (const file of readdirSync(new URL('./fixtures/', import.meta.url)).filter(f
 
   // (b) minimality — fakes stored vs synthetic control points in the full set
   const storedFakes = segments.reduce((n, s) => n + s.fakes.length, 0);
-  const fullSynthetic = computeControlPoints(chronological, opts)
+  // Must mirror harvestInferredSegments' OWN call — it passes denoise:false. With
+  // denoising on, the real points (and so the gap structure) differ, so the two
+  // counts describe different pipelines and "reduced" is meaningless.
+  const fullSynthetic = computeControlPoints(chronological, { ...opts, denoise: false })
     .reduce((n, j) => n + j.controls.filter(c => c.fake).length, 0);
 
   // (a) water-tightness of the client reconstruction
@@ -73,7 +76,9 @@ for (const file of readdirSync(new URL('./fixtures/', import.meta.url)).filter(f
       if (landIdx < 0) continue;
       const nearReal = realOnLand.some(r => haversineKm(r.lat, r.lon, s.lat, s.lon) < NEAR_REAL_LAND_KM);
       if (nearReal) continue;
-      const penM = penetrationKm([s.lat, s.lon]) * 1000;
+      // Rounded — see tests/trail.test.mjs: float error reports a graze at exactly
+      // the tolerance as 150.00000000000003 m and trips `> 150`.
+      const penM = Math.round(penetrationKm([s.lat, s.lon]) * 1000);
       maxPenM = Math.max(maxPenM, penM);
       const tol = landIdx >= FINE_COUNT ? COARSE_MAX_PENETRATION_M : MAX_LAND_PENETRATION_M;
       if (penM > tol) defects++;

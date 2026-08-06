@@ -15,6 +15,7 @@ import { LAND_POLYGONS } from './coastline.js';
 import { COARSE_LAND_POLYGONS } from './coast_coarse.js';
 import { WATER_POLYGONS } from './water.js';
 import { REGIONS } from './coast/manifest.js';
+import { wrapLon } from './geo.js';
 
 const ringBbox = ring => {
   let minLat = 90, maxLat = -90, minLon = 180, maxLon = -180;
@@ -62,7 +63,10 @@ const loadedIds = new Set();
 const inBox = (lat, lon, bx) => lat >= bx[0][0] && lat <= bx[1][0] && lon >= bx[0][1] && lon <= bx[1][1];
 
 // Is (lat,lon) navigable water (river/harbour basin)? Home + every loaded region.
-export function isWater(lat, lon) {
+// Callers may pass an UNWRAPPED longitude (the trail pipeline's frame — see
+// geo.js "Longitude frames"); polygon data is [-180,180], so wrap on entry.
+export function isWater(lat, unwrappedLon) {
+  const lon = wrapLon(unwrappedLon);
   if (inWaters(lat, lon, HOME_WATER, HOME_WATER_BB)) return true;
   for (const r of loaded) if (inBox(lat, lon, r.bbox) && inWaters(lat, lon, r.water, r.waterBB)) return true;
   return false;
@@ -70,7 +74,8 @@ export function isWater(lat, lon) {
 
 // Is (lat,lon) on land? Region-aware: a loaded region WITH fine land is authoritative in
 // its bbox (coarse ignored → channels stay open); otherwise home+coarse land minus water.
-export function isLand(lat, lon) {
+export function isLand(lat, unwrappedLon) {
+  const lon = wrapLon(unwrappedLon);
   for (const r of loaded) {
     if (r.hasLand && inBox(lat, lon, r.bbox)) {
       if (!(inRings(lat, lon, r.land, r.landBB) || inRings(lat, lon, HOME_LAND, HOME_LAND_BB))) return false;
@@ -79,6 +84,22 @@ export function isLand(lat, lon) {
   }
   if (!(inRings(lat, lon, HOME_LAND, HOME_LAND_BB) || inRings(lat, lon, COARSE, COARSE_BB))) return false;
   return !isWater(lat, lon);
+}
+
+const HOME_FINE_BB = HOME_LAND_BB.reduce((acc, b) => ({
+  minLat: Math.min(acc.minLat, b.minLat), maxLat: Math.max(acc.maxLat, b.maxLat),
+  minLon: Math.min(acc.minLon, b.minLon), maxLon: Math.max(acc.maxLon, b.maxLon),
+}), { minLat: 90, maxLat: -90, minLon: 180, maxLon: -180 });
+
+// Do we have FINE land data here, or only the ~2 km coarse continental layer?
+// Routing resolution should follow the DATA, not the map: a 0.2 km A* grid over
+// coarse polygons burns 100× the cells tracing a coastline that isn't in the
+// dataset. Callers size their A* grid off this (see trail_geometry.routeOceanGap).
+export function hasFineLand(lat, unwrappedLon) {
+  const lon = wrapLon(unwrappedLon);
+  for (const r of loaded) if (r.hasLand && inBox(lat, lon, r.bbox)) return true;
+  const b = HOME_FINE_BB;
+  return lat >= b.minLat && lat <= b.maxLat && lon >= b.minLon && lon <= b.maxLon;
 }
 
 const boxesOverlap = (a, b) => a[0][0] <= b[1][0] && a[1][0] >= b[0][0] && a[0][1] <= b[1][1] && a[1][1] >= b[0][1];
@@ -102,11 +123,18 @@ export async function ensureRegionsForExtent(extent) {
 }
 
 // Extent of a list of {lat,lon} points (padded), for ensureRegionsForExtent.
+// Points arrive in the pipeline's unwrapped frame, so longitudes are wrapped
+// back to real coordinates to be comparable with region bboxes. A track whose
+// wrapped span exceeds 180° straddles the dateline and has no meaningful
+// min/max in [-180,180] — widen to the whole world so no region is missed
+// (rare, and region loading is bbox-gated anyway).
 export function extentOf(points, padDeg = 0.1) {
   let minLat = 90, maxLat = -90, minLon = 180, maxLon = -180;
   for (const p of points) {
+    const lon = wrapLon(p.lon);
     if (p.lat < minLat) minLat = p.lat; if (p.lat > maxLat) maxLat = p.lat;
-    if (p.lon < minLon) minLon = p.lon; if (p.lon > maxLon) maxLon = p.lon;
+    if (lon < minLon) minLon = lon; if (lon > maxLon) maxLon = lon;
   }
+  if (maxLon - minLon > 180) { minLon = -180; maxLon = 180; padDeg = 0; }
   return [[minLat - padDeg, minLon - padDeg], [maxLat + padDeg, maxLon + padDeg]];
 }

@@ -32,9 +32,14 @@ import { join } from 'node:path';
 import { harvestInferredSegments } from '../../frontend/app/trail_geometry.js';
 import { ensureRegionsForExtent, extentOf, isLand } from '../../frontend/app/region_coast.js';
 import { dedup, splitJourneys, catmullRom } from '../../frontend/app/trail_spline.js';
-import { haversineKm } from '../../frontend/app/geo.js';
+import { haversineKm, wrapLon } from '../../frontend/app/geo.js';
 
-const GENERATOR_VERSION = 1;
+// 2: unwrapped-longitude frame + bi-segmented ocean routing (routeOceanGap). Every
+// segment stored by v1 predates both, so a dateline or long-ocean gap may hold a
+// wrong-way or land-crossing path. Bumping invalidates v1 hashes for any vessel that
+// gets EXAMINED — but the freshness heuristic skips unexamined vessels entirely, so a
+// one-off `--regenerate` dispatch is still required to rebuild the existing backlog.
+const GENERATOR_VERSION = 2;
 const DB_NAME = 'vessel-tracker';
 const API_BASE = 'https://api.cloudflare.com/client/v4';
 const READ_CHUNK = 60;   // mmsis per IN(...) read
@@ -280,7 +285,10 @@ async function main() {
       fakes.forEach((f, seq) => {
         writes.push(
           `INSERT OR REPLACE INTO inferred_positions (mmsi, seg_hash, seq, lat, lon, t, tier, dashed, generator_version)` +
-          ` VALUES (${v.mmsi}, ${sqlStr(h)}, ${seq}, ${f.lat}, ${f.lon}, ${Math.round(f.t)}, ${sqlStr(f.tier)}, ${f.dashed}, ${GENERATOR_VERSION});`);
+          // The pipeline works in an unwrapped longitude frame (geo.js "Longitude
+          // frames"), which can run past ±180 on a dateline crossing. Store real
+          // coordinates; the client re-unwraps when it splines.
+          ` VALUES (${v.mmsi}, ${sqlStr(h)}, ${seq}, ${f.lat}, ${wrapLon(f.lon)}, ${Math.round(f.t)}, ${sqlStr(f.tier)}, ${f.dashed}, ${GENERATOR_VERSION});`);
         pointsWritten++;
       });
       writes.push(

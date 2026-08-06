@@ -70,6 +70,43 @@ export const LAND_AVOIDANCE = {
   // dense tracking, drawn as-is) when either threshold is exceeded.
   gapMinMs: 20 * 60 * 1000, // 20 min
   gapMinKm: 5,
+  // Where single-grid A* stops and the bi-segmenting ocean router takes over
+  // (trail_geometry.routeOceanGap). A single grid is sized by the gap it spans,
+  // so its cost grows quadratically while the useful work — the bit near a
+  // coast — does not: a 1,100 km leg builds a 4000² grid (16M isLand polygon
+  // scans, ~2 min) to route around a single cape. That is what put the
+  // precompute cron at 1–2.5 h/run. Measured on the same legs, the ocean router
+  // is ~100× faster and just as water-tight.
+  // Set above the longest gap any regression fixture depends on (623 km,
+  // chasing-daylight; 553 km, bc-inside-passage) so every proven coastal case
+  // keeps the single-grid path and only genuine ocean legs switch.
+  routeMaxKm: 800,
+  // Great-circle spine resolution for ocean gaps. Each span is classified
+  // water/land and only the land-crossing ones are handed to A*, so this is
+  // also the granularity at which an obstacle is isolated: fine enough to
+  // bracket an island tightly, coarse enough that an 8,000 km crossing is ~80
+  // segments rather than thousands.
+  spineStepKm: 100,
+  // A* cell size for an ocean detour that lies outside all fine coastline data
+  // (region_coast.hasFineLand false) — matched to the ~2 km coarse continental
+  // layer, whose narrowest surviving feature is far wider than this. Using the
+  // 0.2 km default there would build a 100× denser grid to trace detail the
+  // polygons don't carry.
+  coarseCellKm: 2,
+  // Minimum sideways room an ocean detour gets to work with (the default margin
+  // caps at 90 km — enough for an island, not for rounding a peninsula).
+  oceanMarginMinKm: 400,
+  // Grid budget for an ocean detour (vs 4000 for a coastal gap). Ocean detours
+  // are wide-margin by necessity, so the cell COUNT is what has to be capped.
+  oceanMaxCellsPerSide: 800,
+  // Longest ocean-spine detour still routed at full fine resolution. Past this
+  // the detour is a coastal-scale swing (offshore, tens of km from any shore),
+  // where fine cells resolve detail the route never uses — and the wide margin
+  // such a swing needs would make that grid enormous.
+  fineBracketMaxKm: 150,
+  // How far the heading bias reaches on a coarse ocean detour, in grid cells.
+  // The 4 km default is sub-cell there, so the bias would never actually apply.
+  oceanHeadingCells: 6,
   dashArray: '4 4',         // SVG dash pattern for inferred (water-routed) trail portions
   fadeRatio: 0.7,           // opacity multiplier for inferred segments vs the tier's normal opacity
 };
@@ -83,7 +120,12 @@ export const LAND_AVOIDANCE = {
 // sharp ONLY where the channel genuinely forces the turn. See trail_geometry
 // `smoothRoute`. targetPoints caps densification so long continental gaps don't
 // explode the control-point count.
-export const ROUTE_SMOOTHING = { minStepKm: 1, targetPoints: 16, passes: 12, factor: 0.5 };
+// `backtrackDeg`/`backtrackPasses` drive dropBacktracks (trail_geometry.js): A* can
+// hand back a path that doubles back on itself, most often when an endpoint is a BERTH
+// that falls on land (a wharf is land at 25 m coastline resolution) and snapToWater
+// picks a water cell on the far side of a pier. 100° is well past any real ship's turn
+// yet clear of the ~60-75° bends genuine narrow channels force.
+export const ROUTE_SMOOTHING = { minStepKm: 1, targetPoints: 16, passes: 12, factor: 0.5, backtrackDeg: 100, backtrackPasses: 4 };
 
 // Per-vessel narrow-channel routing penalty (routeWater `narrowWeight`). Large
 // ships hold the main channel (e.g. the Fraser) even when slower; small craft are

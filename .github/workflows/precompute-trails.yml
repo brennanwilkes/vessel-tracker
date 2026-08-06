@@ -7,8 +7,21 @@ name: Precompute Trails
 # schedule is a fallback. Converges — vessels with no new crossing are skipped.
 on:
   workflow_dispatch:
+    inputs:
+      regenerate:
+        description: "Rebuild ALL stored waypoints, ignoring the freshness heuristic"
+        type: boolean
+        default: false
+      limit:
+        description: "Max vessels to examine this run (blank = no limit)"
+        type: string
+        default: ""
+  # Fallback only, every 6h. It used to be hourly, which collided with the
+  # Worker's own hourly dispatch: GitHub keeps a single pending run per
+  # concurrency group, so the second trigger of each hour was cancelled while
+  # queued (~22% of all runs showed as `cancelled` — noise, not failures).
   schedule:
-    - cron: "0 * * * *"
+    - cron: "0 */6 * * *"
 
 # Don't pile up overlapping runs; let an in-flight run finish.
 concurrency:
@@ -42,7 +55,14 @@ jobs:
         # bounded by a cell-count budget; a worst-case long gap allocates dense rows*cols
         # typed arrays up to ~270 MB. Pin the heap so the budget is guaranteed, not reliant
         # on Node's RAM auto-sizing.
-        run: node --max-old-space-size=4096 scripts/precompute-trails.mjs
+        # The freshness heuristic skips any vessel whose last_pos_ts hasn't advanced, so
+        # a ROUTER change alone never rebuilds existing waypoints — they stay as the old
+        # generator left them. After changing the router, dispatch once with
+        # regenerate=true (use `limit` to batch it under the 6h job cap).
+        run: |
+          node --max-old-space-size=4096 scripts/precompute-trails.mjs \
+            ${{ inputs.regenerate && '--regenerate' || '' }} \
+            ${{ inputs.limit != '' && format('--limit {0}', inputs.limit) || '' }}
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

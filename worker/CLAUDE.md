@@ -21,7 +21,7 @@ NOTE: this is a single-key stopgap — a second aisstream key (direct on its own
 
 **Failure mode to recognise: "crons fire but nothing is written."** Seen 2026-08-05 13:31 UTC — every scan stopped committing (no positions, no `last_seen` heartbeats, no new vessels) while the Worker stayed up and kept firing its hourly precompute `workflow_dispatch` on time. Because `last_seen` only advances for a vessel that was HEARD, all three stopping together means **nothing is being heard at all**, not that writes are failing. Diagnose with `scripts/db-diagnose`, which separates the two real suspects: (1) aisstream — key revoked/throttled, every drain returns empty; (2) a **stuck AIS lock** — the single-drain scans acquire without releasing and rely on TTL expiry, so a `scan_meta` lock row with a far-future expiry makes every drain skip forever and needs a manual `DELETE`. Useful cross-checks that need no CF access: `/current`'s newest `last_pos_ts` (a single shared millisecond = the last successful commit), and the precompute run log — `candidates=0 … skipped_heuristic=N` for ALL N vessels proves no vessel's `last_pos_ts` has advanced, and the run succeeding at all proves D1 itself is up.
 
-**Resolution of the 2026-08-05 stall — it was the FEED, and the drain was blind to it.** `wrangler tail` settled it: on every cron, `[aisstream] connecting` → `connected, subscribing` → `drain complete — pos:0 static:0` → `closed — code 1006` (our own 45 s timer, **not** a server kill). Identical on all three triggers, including the foreign scan's **12 boxes spanning ports worldwide** — a quiet ocean cannot explain twelve global boxes at once, so this is account-level at aisstream, not geographic. Everything Cloudflare-side was proven healthy: crons fire, the lock is acquired (`acquireAisLock` is the FIRST statement in `drainAisStream`, so a freshly-held lock proves execution reaches the socket), D1 writes pass a live probe, the cursor advances. A 10-minute D1 sampler over 13.7 h showed `MAX(last_pos_ts)` frozen to the millisecond — so **not** a short quota window rolling over.
+**Resolution of the 2026-08-05 stall — it was the FEED, and the drain was blind to it.** `wrangler tail` settled it: on every cron, `[aisstream] connecting` → `connected, subscribing` → `drain complete — pos:0 static:0` → `closed — code 1006` (our own 45 s timer, **not** a server kill). Identical on all three triggers, including the foreign scan's **12 boxes spanning ports worldwide** — a quiet ocean cannot explain twelve global boxes at once. **Final root cause: a SERVICE-WIDE aisstream outage — not our account, not our key, nothing on our side.** Proven by a probe run OFF Cloudflare (`scratchpad/ais-probe.mjs`): real key + whole-world bbox → 0 frames in 45 s; a deliberately INVALID key → rejected `code=1006` in **1.3 s**. That control is the crux — the endpoint is alive and rejects bad keys promptly, so our key is valid and *accepted*, just starved. Corroborated by aisstream GH issue **#257, "Zero messages on global bounding box since 2026-08-05 13:31 UTC"** — our exact timestamp, independent reporter, same invalid-key control (also #259, #255). Recovery is out of our hands; `MAX(last_pos_ts)` sampling is how you spot its return. Everything Cloudflare-side was proven healthy: crons fire, the lock is acquired (`acquireAisLock` is the FIRST statement in `drainAisStream`, so a freshly-held lock proves execution reaches the socket), D1 writes pass a live probe, the cursor advances. A 10-minute D1 sampler over 13.7 h showed `MAX(last_pos_ts)` frozen to the millisecond — so **not** a short quota window rolling over.
 
 **Why it took 12 h to see.** The message handler branched on `PositionReport`/`ShipStaticData` with **no `else`** — and aisstream reports a rejected subscription as an ordinary frame with no `MessageType`. The one frame explaining the outage parsed cleanly and was silently discarded. Compounding it, `apiKey` was passed through unvalidated: aisstream authenticates in the **subscribe frame, not the handshake**, so a missing/blank key still opens a socket that simply never sends anything — indistinguishable from an empty ocean. Both are now fixed in `aisstream.ts`: throw on a blank key, log a safe key fingerprint (`len=N ab…yz`) and the exact subscribe payload (key redacted), log the first frame with time-to-first-frame, count + log non-AIS frames (`other:N`), and `console.error` a `ZERO frames` line when a drain hears literally nothing. Scan errors are visible — `ingest.ts` has no `catch`, and `index.ts` logs every rejection as `[scheduled] … scan failed:`.
 
@@ -165,8 +165,23 @@ Columbia). The corridor coast is medium-res (≈300 m) — routable, not harbour
 
 **Resolution tiers** (`TIERS`, km from HOME=Victoria): ≤60 km → 25 m (viewshed); ≤160 km → 120 m
 (Salish Sea); ≤2600 km → 300 m (NA-Pacific corridor coast); beyond → 600 m. Plus `FINE_ZONES`
-(explicit 25 m boxes: Vancouver/Fraser, Bellingham/Anacortes, Puget Sound). **Hard rule:** simplify
+(explicit 25 m boxes: Vancouver/Fraser, Bellingham/Anacortes, Puget Sound, **SF Bay**). **Hard rule:** simplify
 tol ≤ ⅓ × narrowest channel to keep open.
+
+**SF Bay** (`37.40–38.20 N, −122.60 to −121.95`, added 2026-08-06) sat at ~1180 km from
+home, so it fell in the 300 m tier — which merged Alameda into the mainland and filled the
+Oakland Estuary. Regenerating with the fine zone opens the estuary. Note what it does NOT
+fix: a vessel BERTHED at Oakland reports from the wharf, and a wharf is land at 25 m too
+(MAUNAWILI's moored fixes at `37.7935,−122.2982` are land; water resumes 165 m south). No
+water route to such an endpoint exists — see `frontend/CLAUDE.md` "Berth endpoints on land".
+
+**Regenerating is a full re-fetch** (`worker/scripts/build-coastline.mjs`, tiled by latitude).
+Overpass **silently TRUNCATES** an oversized response — it returns HTTP 200 with a JSON body
+cut off mid-object. Validate every tile with a real `JSON.parse` before building; a `grep` for
+`"elements"` matches a truncated file and feeds the builder garbage. The 46.9–51.3 N band is
+too dense for one call (truncated at 23 MB) and must be split — 46.9–48.6 / 48.5–49.9 /
+49.8–51.3 each fetch cleanly (12/25/28 MB). The builder dedupes ways by OSM id, so overlapping
+tiles are safe.
 
 `build-coarse-coast.mjs`'s `HOME` carve-out **MUST stay in sync with `BB`** (same
 `[32.0,-130.0]→[51.3,-116.0]`): the coarse 2 km layer is carved out of the corridor so its
@@ -365,6 +380,15 @@ it off land. The Worker serves them unioned with live `positions` at `/track`
 (`getInferredTrack` in `storage.ts`); the **browser loads NO coastline** — it
 re-splines the union with the pure pipeline (`frontend/app/trail_spline.js`).
 
+- **A ROUTER CHANGE ALONE NEVER REBUILDS EXISTING WAYPOINTS.** The freshness heuristic
+  skips any vessel whose `last_pos_ts` hasn't advanced, and the skip happens BEFORE any
+  hashing — so bumping `GENERATOR_VERSION` only affects vessels that get *examined*.
+  Deploy a routing fix and the stored backlog keeps rendering the OLD geometry
+  indefinitely (and if ingestion is stalled, `last_pos_ts` never advances for anyone, so
+  NOTHING is re-examined). After changing the router, dispatch the workflow once with
+  **`regenerate: true`** (`workflow_dispatch` inputs `regenerate` + `limit`; use `limit`
+  to batch under the 6 h job cap — there is no default limit, so a bare `--regenerate`
+  examines all ~734 vessels).
 - **What's stored (D1 frugality):** only the inferred (A*-routed / repair) waypoints —
   never real fixes (those live in `positions`). Per land-crossing **segment** (a run
   of fakes bracketed by two real fixes), reduced by `simplifyForSpline` to the minimum

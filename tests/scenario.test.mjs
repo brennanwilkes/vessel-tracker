@@ -12,6 +12,10 @@
 // it) — a real Portland call is dense AIS fixes up the river, drawn as real track, not
 // an inferred gap. So the stops are deep-water approaches; the legs between them are
 // the open-coast routing this test guards.
+//
+// Re-probe the stops after a coastline regeneration that adds a fine zone: Oakland sat
+// at 37.80,-122.33, open water under coarse data, port fill once the sf-bay fine zone
+// landed. `onLandInputs` catches this — it's a stale fixture, not a routing failure.
 import { pointInAnyLand, LAND_POLYGONS } from './lib.mjs';
 import { haversineKm } from '../frontend/app/geo.js';
 import { harvestInferredSegments } from '../frontend/app/trail_geometry.js';
@@ -48,7 +52,7 @@ const TRACK = [
   ['Cape Mendocino off',40.40, -124.70],
   ['SF approach',       37.90, -123.10],
   ['Golden Gate',       37.81, -122.50],   // ← SF Bay visit
-  ['Oakland',           37.80, -122.33],
+  ['Oakland approach',  37.79, -122.35],
   ['SF out',            37.60, -122.90],
   ['Big Sur off',       36.00, -122.30],
   ['Pt Conception off', 34.40, -120.90],
