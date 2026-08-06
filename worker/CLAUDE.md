@@ -386,9 +386,17 @@ re-splines the union with the pure pipeline (`frontend/app/trail_spline.js`).
   Deploy a routing fix and the stored backlog keeps rendering the OLD geometry
   indefinitely (and if ingestion is stalled, `last_pos_ts` never advances for anyone, so
   NOTHING is re-examined). After changing the router, dispatch the workflow once with
-  **`regenerate: true`** (`workflow_dispatch` inputs `regenerate` + `limit`; use `limit`
-  to batch under the 6 h job cap — there is no default limit, so a bare `--regenerate`
-  examines all ~734 vessels).
+  **`regenerate: true`** (`workflow_dispatch` inputs `regenerate` + `limit` + `offset`;
+  there is no default limit, so a bare `--regenerate` examines all ~734 vessels).
+- **`limit` ALONE CANNOT BATCH A REGENERATE — pair it with `offset`.** Regenerate
+  bypasses the freshness heuristic, so `eligible` is the same full list every run and
+  `slice(0, LIMIT)` re-does the identical first N vessels; the tail is never reached.
+  `--offset` walks the (stable, `last_seen DESC`) list, so a full rebuild splits across
+  dispatches as `offset 0`, `offset N`, `offset 2N`, … under the 6 h cap. Measured rate
+  with the current fine-celled A*: **~45 s/vessel** (50 vessels ≈ 40 min), i.e. ~9 h for
+  all 734 — a bare unlimited `--regenerate` WILL hit the cap. Writes flush mid-run
+  (`FLUSH_EVERY`), so a capped run keeps its completed vessels; `last_seen DESC` means
+  those are the ones currently on the map.
 - **What's stored (D1 frugality):** only the inferred (A*-routed / repair) waypoints —
   never real fixes (those live in `positions`). Per land-crossing **segment** (a run
   of fakes bracketed by two real fixes), reduced by `simplifyForSpline` to the minimum

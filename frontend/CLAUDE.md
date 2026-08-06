@@ -240,9 +240,53 @@ Two traps, both found by regression:
   emits points going BACKWARDS along the spine → a hairpin. Guarded by
   `if (to <= from) continue`.
 
+#### Whole-gap fallback — bi-segmentation cannot cross a continent
+
+Bi-segmentation assumes each blocked span is bracketed by water the vessel can
+actually sail **between**. That holds for an island, a cape, a strait. It fails
+completely when the great circle crosses a **continent**, because the spine
+re-emerges in a *different ocean*: Columbia mouth → Panama asked A\* to sail from
+Oregon to the Gulf of Mexico. A\* correctly found nothing — and the "no route →
+keep the spine" degradation then drew a straight line across North America.
+
+This was live in prod: MH BORGA showed **379** land defects marching Oregon →
+Colorado, MIRACULOUS ACE **325** across Mexico — both pegged at the probe's
+depth ceiling, the signature of a straight bridge rather than a bad route.
+
+So any span that fails to route — including the `to <= from` and
+endpoint-on-land skips — sets `unrouted`, and the whole gap is re-routed on ONE
+coarse grid by `routeWholeOceanGap`, which is free to go around the landmass
+entirely. Results: MH BORGA 379 → **0**, MIRACULOUS ACE 325 → **6** (worst
+1.3 km, a Baja graze that is at the limit of ~2 km coarse data). It costs ~5 s
+and fires only on failure, so ordinary ocean crossings keep the fast path. Like
+the spine, its output is **not** smoothed.
+
+**Canal transits stay unroutable.** The Panama isthmus is closed in every land
+layer (verified: zero open meridians across 7–10.5°N), so no Pacific↔Atlantic
+path exists short of Cape Horn. In practice such legs are long port stops, so
+`splitJourneys` severs the journey and nothing is drawn — the right outcome. A
+non-stop canal transit would still bridge straight. The fix is carving canal
+channels into the land data, not changing the router.
+
 `routeMaxKm` is deliberately set above the longest gap any fixture depends on
 (623 km chasing-daylight, 553 km bc-inside-passage) so every proven coastal case
 keeps the single-grid path. Regression: `node tests/ocean-trails.test.mjs`.
+
+### Markers must follow their trail's world copy (`marker._lonTurn`)
+
+The trail pipeline emits **unwrapped** longitudes, and Leaflet draws a value past
+±180 in the adjacent world copy — that is what makes a dateline crossing render
+continuously. The vessel marker, however, was placed at the raw `/current`
+longitude. So a BC→Asia vessel drew its track *west* across the Pacific while its
+icon sat a full 360° *east*: scroll along the line and the boat isn't at the end
+of it (observed on COSCO SANTOS, which appeared in a copy of Asia off the right
+edge of the map).
+
+`drawTrail` derives the turn from its own geometry — `Math.round((tipLon -
+vessel.lon) / 360)` against the newest spline sample — stores it on
+`marker._lonTurn`, and repositions. `syncMarkers` must re-apply it on every poll
+(`vessel.lon + existing._lonTurn * 360`), otherwise the next refresh snaps the
+marker back to the raw value. Markers for vessels with no trail keep turn 0.
 
 ### Performance: A* is server-side; the client only splines
 

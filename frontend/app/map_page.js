@@ -387,6 +387,20 @@ function drawTrail(vessel, points, token) {
   const runs = (cached !== undefined && cached.sig === sig) ? cached.runs : clientRuns(allPoints);
   if (cached === undefined || cached.sig !== sig) trailGeom.set(mmsi, { sig, runs, bounds });
   else cached.bounds = bounds;
+
+  // Move the marker into the same world copy as its trail's newest end, so following
+  // a track west across the Pacific arrives at the boat instead of leaving it behind
+  // in the copy 360° east. See `marker._lonTurn`.
+  const marker = markers.get(mmsi);
+  if (marker !== undefined && runs.length > 0) {
+    const tail = runs[runs.length - 1].samples;
+    const turn = Math.round((tail[tail.length - 1].lon - vessel.lon) / 360);
+    if (turn !== marker._lonTurn) {
+      marker._lonTurn = turn;
+      marker.setLatLng([vessel.lat, vessel.lon + turn * 360]);
+    }
+  }
+
   drawRuns(vessel, runs, bounds);
 }
 
@@ -467,7 +481,7 @@ function render() {
     const existing = markers.get(vessel.mmsi);
 
     if (existing !== undefined) {
-      existing.setLatLng([vessel.lat, vessel.lon]);
+      existing.setLatLng([vessel.lat, vessel.lon + existing._lonTurn * 360]);
       const prev = existing._vessel;
       const posChanged = prev.lat !== vessel.lat || prev.lon !== vessel.lon;
       const effectiveHeading = vessel.heading ?? (
@@ -486,6 +500,11 @@ function render() {
       const marker = L.marker([vessel.lat, vessel.lon], { icon: makeVesselIcon(vessel, vessel.heading, opacity) });
       marker._vessel = vessel;
       marker._effectiveHeading = vessel.heading;
+      // Which world copy this marker is drawn in. The trail pipeline emits UNWRAPPED
+      // longitudes (a BC→Asia track runs west past -180), and Leaflet draws those in
+      // the adjacent copy — so a marker left at the raw ±180 value lands a world away
+      // from the end of its own trail. `drawTrail` sets this once the trail is known.
+      marker._lonTurn = 0;
       marker.on('click', () => openSheet(marker._vessel));
       marker.addTo(map);
       setMarkerOpacity(marker, opacity);

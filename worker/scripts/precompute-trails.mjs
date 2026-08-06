@@ -53,6 +53,12 @@ const DRY = has('--dry-run');
 const LOCAL = has('--local');
 const REGENERATE = has('--regenerate');
 const LIMIT = valOf('--limit') ? parseInt(valOf('--limit'), 10) : Infinity;
+// `--limit` alone CANNOT batch a `--regenerate` rebuild: regenerate bypasses the
+// freshness heuristic, so the candidate list is the same every run and each batch
+// re-does the identical first N vessels. `--offset` walks the (stable,
+// last_seen DESC) list so a full rebuild can be split across several dispatches
+// and stay under the 6h GitHub job cap.
+const OFFSET = valOf('--offset') ? parseInt(valOf('--offset'), 10) : 0;
 const ONLY_MMSI = valOf('--mmsi') ? parseInt(valOf('--mmsi'), 10) : null;
 
 const tmp = LOCAL ? mkdtempSync(join(tmpdir(), 'precompute-')) : null;
@@ -219,7 +225,7 @@ async function main() {
     if (skip) skippedHeuristic++;
     return !skip;
   });
-  const candidates = eligible.slice(0, LIMIT);
+  const candidates = eligible.slice(OFFSET, LIMIT === Infinity ? undefined : OFFSET + LIMIT);
   const mmsis = candidates.map(v => v.mmsi);
 
   const posByMmsi = await readByMmsi(mmsis,
@@ -245,7 +251,8 @@ async function main() {
     await writeBatch(writes.splice(0));
   }
 
-  console.log(`[precompute] ${candidates.length} candidate(s) to examine (${skippedHeuristic} skipped by heuristic)…`);
+  console.log(`[precompute] ${candidates.length} candidate(s) to examine of ${eligible.length} eligible` +
+    ` (offset ${OFFSET}, ${skippedHeuristic} skipped by heuristic)…`);
   for (const v of candidates) {
     examined++;
     if (examined % 25 === 0) console.log(`[precompute] …examined ${examined}/${candidates.length} (routed ${segmentsWritten} segments so far)`);

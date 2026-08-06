@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Inferred-trail precompute state: what the GH-Actions A* cron has stored in D1.
+# Use this to verify a precompute run actually landed (generator_version rollover,
+# segment/waypoint counts) rather than being skipped by the freshness heuristic.
+source "$(dirname "$0")/db-common"
+
+show_help() {
+    cat <<'EOF'
+Usage: db-trails [--pretty] [--mmsi N]
+
+Without --mmsi: totals by generator_version, segment coverage, routing outcomes.
+With --mmsi:    per-segment breakdown for one vessel.
+EOF
+}
+
+MMSI=""
+ARGS=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --mmsi) MMSI="$2"; shift 2 ;;
+        *)      ARGS+=("$1"); shift ;;
+    esac
+done
+set -- "${ARGS[@]+"${ARGS[@]}"}"
+parse_common_flags "$@"
+
+if [[ -n "$MMSI" ]]; then
+    validate_mmsi "$MMSI"
+    d1_query "SELECT s.seg_hash, s.point_count, s.generator_version, s.computed_at,
+                     MIN(p.t) AS first_t, MAX(p.t) AS last_t
+              FROM inferred_segments s
+              LEFT JOIN inferred_positions p
+                     ON p.mmsi = s.mmsi AND p.seg_hash = s.seg_hash
+              WHERE s.mmsi = $MMSI
+              GROUP BY s.seg_hash
+              ORDER BY first_t"
+    exit 0
+fi
+
+# A segment with point_count = 0 was examined but produced no waypoints (gap out of
+# coastline coverage, or no water route) — distinct from one never processed.
+d1_query "SELECT generator_version,
+                 COUNT(*) AS waypoints,
+                 COUNT(DISTINCT mmsi) AS vessels,
+                 COUNT(DISTINCT seg_hash) AS segments,
+                 SUM(dashed) AS dashed
+          FROM inferred_positions
+          GROUP BY generator_version
+          ORDER BY generator_version"
+
+d1_query "SELECT generator_version,
+                 COUNT(*) AS segments,
+                 SUM(CASE WHEN point_count = 0 THEN 1 ELSE 0 END) AS unroutable,
+                 SUM(point_count) AS waypoints,
+                 MAX(computed_at) AS newest_computed_at
+          FROM inferred_segments
+          GROUP BY generator_version
+          ORDER BY generator_version"
+
+d1_query "SELECT COUNT(*) AS vessels_examined, MAX(last_run_at) AS newest_run_at
+          FROM precompute_state"

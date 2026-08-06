@@ -153,6 +153,24 @@ function smoothRoute(wp) {
 // resolution, exactly where fine resolution buys something. The coastal ends of
 // a long gap fall out of this for free: they are the stretches that hit land,
 // so they get the fine treatment while the ocean middle stays a clean curve.
+// Bi-segmentation assumes each blocked span is bracketed by water the vessel can
+// actually sail between. That holds for an island or a cape, and fails completely
+// when the great circle crosses a CONTINENT: the spine re-emerges into a different
+// ocean, so A* is asked to sail from Oregon to the Gulf of Mexico and correctly
+// finds nothing — leaving the spine to drive straight over North America. When any
+// span fails, re-route the whole gap on one coarse grid, which is free to go around
+// the landmass entirely (Columbia mouth → Panama: 41 pts, ~5 s, land-clean).
+// Deliberately NOT smoothed — same reason the spine isn't (see caller).
+function routeWholeOceanGap(a, b, narrowWeight, totalKm) {
+  const marginKm = Math.max(LAND_AVOIDANCE.oceanMarginMinKm, totalKm);
+  const cellKm = Math.max(LAND_AVOIDANCE.coarseCellKm,
+    (totalKm + 2 * marginKm) / LAND_AVOIDANCE.oceanMaxCellsPerSide);
+  return routeWater(a, b, null, null, {
+    isLand, narrowWeight, marginKm, cellKm,
+    headingKm: Math.max(4, cellKm * LAND_AVOIDANCE.oceanHeadingCells),
+  });
+}
+
 export function routeOceanGap(a, b, narrowWeight) {
   const totalKm = haversineKm(a[0], a[1], b[0], b[1]);
   const spine = greatCirclePoints(a, b, Math.max(2, Math.ceil(totalKm / LAND_AVOIDANCE.spineStepKm)));
@@ -171,6 +189,7 @@ export function routeOceanGap(a, b, narrowWeight) {
   const onLand = (v) => isLand(v[0], v[1]);
   const out = [spine[0]];
   let cursor = 0;
+  let unrouted = false;
   for (const [s0, s1] of blocked) {
     // Back the bracket out to open water. A spine vertex can land INSIDE the
     // obstacle (a 100 km step lands mid-peninsula), and A* needs water endpoints.
@@ -181,8 +200,8 @@ export function routeOceanGap(a, b, narrowWeight) {
     // landmass advances the cursor past a later obstacle. Routing that
     // already-covered run would emit points going BACKWARDS along the spine,
     // which splices in as a hairpin (the 156° turns this fixture showed).
-    if (to <= from) continue;
-    if (onLand(spine[from]) || onLand(spine[to])) continue;
+    if (to <= from) { unrouted = true; continue; }
+    if (onLand(spine[from]) || onLand(spine[to])) { unrouted = true; continue; }
     for (let i = cursor + 1; i <= from; i++) out.push(spine[i]);
     // Resolution follows BOTH the data and the scale of the detour.
     //
@@ -223,11 +242,16 @@ export function routeOceanGap(a, b, narrowWeight) {
     // No route (out of coastline coverage) → keep the spine and let it graze;
     // the same graceful degradation as a short gap that can't be routed.
     if (detour && detour.length > 2) for (const p of smoothRoute(detour).slice(1, -1)) out.push(p);
-    else for (let i = from + 1; i < to; i++) out.push(spine[i]);
+    else { unrouted = true; for (let i = from + 1; i < to; i++) out.push(spine[i]); }
     out.push(spine[to]);
     cursor = to;
   }
   for (let i = cursor + 1; i < spine.length; i++) out.push(spine[i]);
+
+  if (unrouted) {
+    const whole = routeWholeOceanGap(a, b, narrowWeight, totalKm);
+    if (whole && whole.length > 2) return whole;
+  }
   return out;
 }
 
