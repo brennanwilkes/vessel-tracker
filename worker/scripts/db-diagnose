@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# Why is ingestion stopped? Runs the checks that distinguish the causes of a
+# "crons fire but nothing is written" stall, in the order that narrows fastest.
+#
+# Background: on 2026-08-05 every scan stopped committing at 13:31 UTC — no
+# positions, no last_seen heartbeats, no new vessels — while the Worker stayed
+# up (its /current endpoint served fine) and its hourly global scan kept firing
+# the precompute workflow_dispatch on schedule. So: crons run, D1 is reachable,
+# but nothing is being HEARD. This script tells you which link is broken.
+#
+#   worker/scripts/db-diagnose [--pretty]
+#
+# Interpreting the output:
+#
+#   1. FRESHNESS — how stale the newest position and heartbeat are. If these are
+#      minutes old, ingestion recovered and there is nothing to chase.
+#
+#   2. AIS LOCK — the single-key advisory lock in scan_meta (see worker/CLAUDE.md
+#      "AIS connection lock"). Its value is an expiry in epoch-ms and it is
+#      written WITHOUT a matching release by the single-drain scans, which rely
+#      on TTL expiry instead. `lock_state` is the diagnosis:
+#        expired  → healthy; the lock is not what is blocking drains.
+#        held     → normal only if seconds old. A lock whose expiry is far in the
+#                   future is a DEADLOCK: every drain skips, so no vessel is ever
+#                   heard, which reproduces the exact symptom. Clear it with:
+#                     wrangler d1 execute vessel-tracker --remote \
+#                       --command "DELETE FROM scan_meta WHERE key LIKE 'ais_lock%'"
+#
+#   3. SCAN CURSOR — the rotating foreign-scan cursor. It advances every foreign
+#      tick, so if it is moving the scheduled handler is running its body (not
+#      dying early), which points at aisstream rather than at the Worker.
+#
+#   4. WRITE PATH — can this DB accept a write at all? Writes a scan_meta probe
+#      row and reads it back. If this fails while reads succeed, the problem is
+#      the database (quota/limits), not the AIS feed.
+#
+# If freshness is stale, the lock is expired, and the write probe succeeds, the
+# remaining suspect is the AIS feed itself — check the Worker's live logs for
+# aisstream close codes (1006 = connection killed, which is what a revoked or
+# concurrently-used API key looks like):
+#
+#     npx wrangler tail vessel-tracker-api --format pretty
+#
+# and confirm the key is still valid at https://aisstream.io.
+set -euo pipefail
+source "$(dirname "$0")/db-common"
+
+show_help() {
+    echo "Usage: $(basename "$0") [--pretty]"
+    echo "Diagnose why AIS ingestion has stopped writing (see comments in this file)."
+}
+
+parse_common_flags "$@"
+
+NOW_MS=$(date +%s000)
+
+echo "── 1. Freshness ────────────────────────────────────────────────"
+d1_query "SELECT
+    (SELECT MAX(ts) FROM positions) AS newest_position_ms,
+    ROUND(($NOW_MS - (SELECT MAX(ts) FROM positions)) / 3600000.0, 1) AS position_age_hours,
+    (SELECT MAX(last_seen) FROM vessels) AS newest_heartbeat_ms,
+    ROUND(($NOW_MS - (SELECT MAX(last_seen) FROM vessels)) / 3600000.0, 1) AS heartbeat_age_hours,
+    (SELECT COUNT(*) FROM positions WHERE ts > $NOW_MS - 3600000) AS positions_last_hour,
+    (SELECT COUNT(*) FROM vessels WHERE first_seen > $NOW_MS - 86400000) AS new_vessels_last_day"
+
+echo
+echo "── 2. AIS lock ─────────────────────────────────────────────────"
+d1_query "SELECT key, value,
+    ROUND((CAST(value AS INTEGER) - $NOW_MS) / 60000.0, 1) AS expires_in_minutes,
+    CASE WHEN CAST(value AS INTEGER) < $NOW_MS THEN 'expired' ELSE 'held' END AS lock_state
+  FROM scan_meta WHERE key LIKE '%lock%'"
+
+echo
+echo "── 3. Scan cursor + all scan_meta ──────────────────────────────"
+d1_query "SELECT key, value FROM scan_meta ORDER BY key"
+
+echo
+echo "── 4. Write path ───────────────────────────────────────────────"
+d1_query "INSERT OR REPLACE INTO scan_meta (key, value) VALUES ('diagnose_probe', '$NOW_MS')"
+d1_query "SELECT key, value,
+    CASE WHEN value = '$NOW_MS' THEN 'writes OK' ELSE 'STALE — write did not land' END AS write_state
+  FROM scan_meta WHERE key = 'diagnose_probe'"

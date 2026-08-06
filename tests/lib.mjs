@@ -1,5 +1,6 @@
 // Shared test helpers: load coastline + water + geo, normalize D1 trail dumps, land tests.
 import { readFileSync } from 'fs';
+import { wrapLon } from '../frontend/app/geo.js';
 import { LAND_POLYGONS } from '../frontend/app/coastline.js';
 import { COARSE_LAND_POLYGONS } from '../frontend/app/coast_coarse.js';
 import { WATER_POLYGONS } from '../frontend/app/water.js';
@@ -34,7 +35,11 @@ export function pointInPolygon(pt, polygon) {
 }
 
 // Is pt inside a water polygon (river/harbour), holes excluded? Mirrors geo.pointInWater.
-export function pointInAnyWater(pt) {
+// pt[1] may be an UNWRAPPED longitude (the pipeline's frame — see geo.js "Longitude
+// frames"); polygons are stored in real ±180 coordinates, so wrap at this boundary.
+// Without this a dateline-crossing trail silently matches no bbox and reads as all-water.
+export function pointInAnyWater(ptIn) {
+  const pt = [ptIn[0], wrapLon(ptIn[1])];
   for (let i = 0; i < WATER_POLYGONS.length; i++) {
     const bb = WATER_BBOXES[i];
     if (pt[0] < bb.minLat || pt[0] > bb.maxLat || pt[1] < bb.minLon || pt[1] > bb.maxLon) continue;
@@ -48,7 +53,8 @@ export function pointInAnyWater(pt) {
 
 // Which land polygon (index) contains pt, or -1. Two-layer: a point inside a water
 // polygon (river/harbour the coastline closed) is NOT land. Mirrors geo.pointOnLand.
-export function pointInAnyLand(pt) {
+export function pointInAnyLand(ptIn) {
+  const pt = [ptIn[0], wrapLon(ptIn[1])];
   let hit = -1;
   for (let i = 0; i < LAND.length; i++) {
     const bb = POLYGON_BBOXES[i];
