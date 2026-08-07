@@ -424,6 +424,30 @@ re-splines the union with the pure pipeline (`frontend/app/trail_spline.js`).
   group, so the second trigger of each hour was cancelled while queued (~22% of runs
   showed `cancelled` — noise, not failures). The repo is PUBLIC, so Actions minutes
   are free; long runs cost staleness, not money.
+- **Driving a batched `--regenerate` (the operational trap).** The same single-pending
+  rule bites any batch you dispatch by hand: a batch that lands while the group is
+  busy sits PENDING and is evicted by the Worker's next dispatch. **Do not assume
+  that dispatch is hourly.** The Worker fires it on *global-scan completion*
+  (`index.ts` → `PRECOMPUTE_WORKFLOW_FILE`), and since the scan-scheduling rework
+  that lands every ~20–40 min, not at `:59` — measured 2026-08-06: dispatches at
+  20:25, 20:58, 21:17, 21:43. The `:59` runs are just the workflow's own hourly
+  fallback cron on top. So the idle window a driver waits for may never open, and a
+  long batch can be evicted repeatedly; if a full regenerate has to get through,
+  quiet the dispatch first rather than fighting it. It shows as run conclusion
+  `failure` with the JOB conclusion
+  `cancelled` and no failed steps — **that signature means eviction, not a code
+  failure**, so check the job before debugging the precompute. Retrying immediately
+  just re-enters the same race; one batch was lost three times in a row that way.
+  A run is only vulnerable while pending — `cancel-in-progress: false` means once it
+  reaches `in_progress` the Worker's dispatch queues behind it harmlessly. So a
+  driver must (1) **wait for the group to go idle** before dispatching, and
+  (2) record the newest run id BEFORE dispatching and wait for a run whose id is
+  DIFFERENT — otherwise it latches onto the Worker's hourly run and reports that
+  run's result as the batch's, silently skipping an offset range. Reference
+  implementation with both fixes: `scratchpad/regen-driver2.sh` (session-local;
+  re-derive from this paragraph if gone). Always confirm a batch actually landed
+  with `worker/scripts/db-trails` — the `generator_version` rollover is the proof,
+  never the driver's own log.
 - **Longitude is wrapped on write.** The pipeline works in an unwrapped frame that
   can run past ±180 on a dateline crossing (root `CLAUDE.md` → "Longitude is
   UNWRAPPED"), so the `inferred_positions` INSERT calls `wrapLon` — D1 stores real

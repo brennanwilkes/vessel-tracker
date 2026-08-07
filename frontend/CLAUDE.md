@@ -214,11 +214,70 @@ what put the precompute cron at 1–2.5 h/run) and spends all of it on open wate
 where there is nothing to route around. A plain bridge is wrong too — it cuts
 through whatever island or peninsula lies between.
 
-So the gap is **bi-segmented**: a great-circle spine (`geo.greatCirclePoints`,
-`spineStepKm` 100 km — a ship's real course, and it curves) is classified span by
-span, and only the **land-crossing** spans go to A\*. The coastal ends of a long
-gap fall out for free: they are the spans that hit land, so they get fine
+So the gap is **bi-segmented**: a spine (`spineStepKm` 100 km) is classified span
+by span, and only the **land-crossing** spans go to A\*. The coastal ends of a
+long gap fall out for free: they are the spans that hit land, so they get fine
 treatment while the ocean middle stays a clean curve.
+
+#### Spine SHAPE — capped, and joined to the boat's real course
+
+The spine is built and shaped BEFORE classification, so anything the shaping
+pushes onto land is still routed around by the A\* pass. Both steps are measured,
+not guessed — see `docs/ocean-routing-study.md`, regression
+`node tests/ocean-shape.test.mjs`.
+
+1. **Limiting latitude** (`geo.compositeGreatCirclePoints`, `OCEAN_ROUTE.maxLatDeg`
+   50°N). A plain great circle from the Salish Sea to Japan peaks at **54°N** and
+   runs the Aleutians, departing on 297°; real Asia-bound vessels leave on
+   **267–273°** (7 outbound legs measured, mirrored on the inbound side). So the
+   spine uses **composite great-circle sailing** — great circle until it reaches
+   the limiting parallel, along the parallel, then a second great circle down to
+   the destination, both arcs TANGENT to the parallel so the course stays
+   continuous at each junction. Falls back to a plain great circle when the cap
+   cannot apply: the route never reaches it, an **endpoint is already poleward**
+   of it (a BC↔Alaska leg genuinely belongs up there — verified it is not dragged
+   south), or the two tangent points cross over.
+   Why 50 and not 48.5: the data alone fits a cap at the departure latitude
+   (→ exactly 270°), but our westernmost Asia-bound observation is only ~180 km
+   offshore, so a tighter cap extrapolates past the evidence. 50°N is standard
+   North Pacific practice and clears the Aleutians.
+2. **Course blend** (`geo.blendCourse`, `OCEAN_ROUTE.blendHoldKm`/`blendKm`). The
+   spine is built from endpoints alone, so it departs on the great-circle tangent —
+   measured **25–35° away** from the course the vessel was actually steering, at the
+   exact point where dashed inference takes over, which renders as a sharp kink at
+   the real→inferred boundary. `routeWater` already honours the boat's heading for
+   coastal gaps; this is the same "trust the boat" idea for the ocean spine. Each
+   end is rotated about its anchor by an angle that HOLDS for `blendHoldKm`
+   (100 km — the real tracks hold their departure course past 127°W) then decays to
+   zero by `blendKm` (500 km), so the ocean middle is untouched. Rotation preserves
+   distance from the anchor, so no point is dragged toward or away from land, and
+   the endpoints do not move at all.
+
+Net effect: SALVIA ACE→Yokohama goes 297°/54.0°N → **271°/50.0°N** against a real
+271°; CS ANTHEM→Singapore 303°/56.0°N → **268°/50.0°N** against a real 268°.
+
+3. **Scope: both apply only to gaps ≥ `OCEAN_ROUTE.shapeMinKm` (3,000 km).** Below
+   that the spine stays a plain great circle. `routeMaxKm` is 800 km, so
+   `routeOceanGap` also receives 1,000–1,200 km runs *down the coast* (Juan de Fuca
+   → Oakland), which are not crossings at all — both endpoints are in fine coverage
+   and the real COG already parallels the shore. Shaping them did active harm, in a
+   direction worth internalising: **`routeOceanGap` runs A\* only on spans that
+   `crossesLand`**, storing everything else as raw `spineStepKm` (100 km) vertices.
+   That gap earned its harbour threading purely because the plain great circle
+   clipped the San Francisco peninsula. Blended, it cleared the peninsula → no
+   blocked run → no A\* → the Oakland approach was stored as bare spine vertices
+   (**50 waypoints → 12**) and the client spline bulged **650 m** ashore. So fine
+   detail near a harbour is contingent on the spine *accidentally* hitting land; any
+   future spine change must be diffed per-gap against a HEAD baseline rather than
+   judged by pass/fail. `tests/README.md` §11 has the diagnostic recipe and the
+   misreading that cost the most time ("nearest control is a real fix" means routing
+   is MISSING, not that routing is uninvolved).
+
+**What this can never be validated against.** aisstream is shore-receiver fed:
+across all 287 tracked vessels there are ZERO real fixes in the open North Pacific
+and exactly one genuine mid-ocean fix in the whole dataset. Only the departure and
+arrival courses are measurable. The ocean middle is a plausible drawing, not a
+claim — which is why it renders dashed.
 
 Resolution follows the data AND the scale of the detour:
 - Short bracket (≤`fineBracketMaxKm` 150 km) inside fine coverage

@@ -58,6 +58,109 @@ export function bearingDeg(lat1, lon1, lat2, lon2) {
 // directly into the trail pipeline. A linear lat/lon bridge is a rhumb line —
 // on an ocean crossing it sags hundreds of km off the path a ship actually
 // steers, and (near the poles) can cut land the great circle clears.
+// Point `distKm` from (lat,lon) along `brg`. Longitude comes back in the input's
+// unwrapped frame so it can be used mid-pipeline without re-wrapping.
+function destinationPoint(lat, lon, brg, distKm) {
+  const rad = Math.PI / 180;
+  const d = distKm / R_KM, br = brg * rad, la = lat * rad;
+  const lat2 = Math.asin(Math.sin(la) * Math.cos(d) + Math.cos(la) * Math.sin(d) * Math.cos(br));
+  const lon2 = lon * rad + Math.atan2(Math.sin(br) * Math.sin(d) * Math.cos(la),
+                                      Math.cos(d) - Math.sin(la) * Math.sin(lat2));
+  return [lat2 / rad, unwrapLon(lon, lon2 / rad)];
+}
+
+// Composite great-circle ("limiting latitude") sailing: follow a great circle
+// until it reaches the limiting parallel, run along that parallel, then follow a
+// second great circle down to the destination. Both great-circle arcs are TANGENT
+// to the parallel, so the course stays continuous at each junction.
+//
+// A plain great circle from the Salish Sea to Japan peaks at 54°N and runs the
+// Aleutians, departing on 297°. Real Asia-bound vessels leave on 267–273° and
+// hold a flatter track — measured across 7 outbound legs and mirrored on the
+// inbound ones (docs/ocean-routing-study.md). Composite sailing is the standard
+// marine practice that produces exactly that shape.
+//
+// Falls back to the plain great circle when the cap cannot apply: the route never
+// reaches it, an ENDPOINT is already poleward of it (a BC→Alaska leg genuinely
+// belongs up there), or the two tangent points cross over — capping below your own
+// departure latitude has no meaning.
+export function compositeGreatCirclePoints(a, b, n, maxLatDeg) {
+  const plain = greatCirclePoints(a, b, n);
+  if (!(maxLatDeg > 0)) return plain;
+
+  let peak = plain[0];
+  for (const p of plain) if (Math.abs(p[0]) > Math.abs(peak[0])) peak = p;
+  if (Math.abs(peak[0]) <= maxLatDeg) return plain;
+
+  const lat1 = a[0], lon1 = a[1];
+  const lat2 = b[0], lon2 = unwrapLon(lon1, b[1]);
+  if (Math.abs(lat1) >= maxLatDeg || Math.abs(lat2) >= maxLatDeg) return plain;
+
+  const rad = Math.PI / 180;
+  const latC = Math.sign(peak[0]) * maxLatDeg;
+  const tanC = Math.tan(latC * rad);
+  // On a great circle, tan(lat) = tan(latVertex)·cos(lon − lonVertex).
+  const d1 = Math.acos(Math.max(-1, Math.min(1, Math.tan(lat1 * rad) / tanC))) / rad;
+  const d2 = Math.acos(Math.max(-1, Math.min(1, Math.tan(lat2 * rad) / tanC))) / rad;
+  const dir = Math.sign(lon2 - lon1) || 1;
+  const lonV1 = lon1 + dir * d1;
+  const lonV2 = lon2 - dir * d2;
+  if (dir * (lonV2 - lonV1) <= 0) return plain;
+
+  const legKm = [
+    haversineKm(lat1, lon1, latC, lonV1),
+    haversineKm(latC, lonV1, latC, lonV2),
+    haversineKm(latC, lonV2, lat2, lon2),
+  ];
+  const totalKm = legKm[0] + legKm[1] + legKm[2];
+  const share = (km) => Math.max(1, Math.round(n * km / totalKm));
+
+  const out = greatCirclePoints([lat1, lon1], [latC, lonV1], share(legKm[0]));
+  const n2 = share(legKm[1]);
+  for (let i = 1; i <= n2; i++) out.push([latC, lonV1 + (lonV2 - lonV1) * i / n2]);
+  const leg3 = greatCirclePoints([latC, lonV2], [lat2, lon2], share(legKm[2]));
+  for (let i = 1; i < leg3.length; i++) out.push(leg3[i]);
+  return out;
+}
+
+// Swing the ends of an ocean path onto the course the vessel was ACTUALLY
+// steering. The spine is built from endpoints alone, so it leaves on the
+// great-circle tangent — measured 25–35° away from the boat's real course at the
+// exact point where the dashed inference takes over, which renders as a sharp kink
+// at the real→inferred boundary. `routeWater` already honours the boat's heading
+// for coastal gaps ("trust the boat"); this is the same idea for the ocean spine.
+//
+// Each point is rotated about the anchored end by an angle that holds for
+// `holdKm` (the boat really does steer its departure course for a while — the
+// observed tracks hold theirs for at least 180 km) and then decays to zero by
+// `blendKm`, so the far ocean shape is untouched. Rotation preserves distance
+// from the anchor, so no point is dragged toward or away from land.
+export function blendCourse(points, entryBearing, exitBearing, holdKm, blendKm) {
+  if (points.length < 3 || !(blendKm > holdKm)) return points;
+  const out = points.map(p => [p[0], p[1]]);
+
+  const swing = (anchorIdx, order, want) => {
+    if (want === undefined || want === null) return;
+    const A = out[anchorIdx];
+    const nextIdx = order[0];
+    let delta = want - bearingDeg(A[0], A[1], out[nextIdx][0], out[nextIdx][1]);
+    delta = ((delta + 180) % 360 + 360) % 360 - 180;
+    if (Math.abs(delta) < 0.5) return;
+    for (const i of order) {
+      const d = haversineKm(A[0], A[1], out[i][0], out[i][1]);
+      const w = d <= holdKm ? 1 : Math.max(0, 1 - (d - holdKm) / (blendKm - holdKm));
+      if (w <= 0) break;   // ordered outward from the anchor, so nothing beyond matters
+      out[i] = destinationPoint(A[0], A[1], bearingDeg(A[0], A[1], out[i][0], out[i][1]) + delta * w, d);
+    }
+  };
+
+  const fwd = []; for (let i = 1; i < out.length; i++) fwd.push(i);
+  const rev = []; for (let i = out.length - 2; i >= 0; i--) rev.push(i);
+  swing(0, fwd, entryBearing);
+  swing(out.length - 1, rev, exitBearing === undefined ? undefined : (exitBearing + 180) % 360);
+  return out;
+}
+
 export function greatCirclePoints(a, b, n) {
   const rad = Math.PI / 180;
   const lat1 = a[0] * rad, lon1 = a[1] * rad;

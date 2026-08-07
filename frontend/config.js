@@ -127,6 +127,35 @@ export const LAND_AVOIDANCE = {
 // yet clear of the ~60-75° bends genuine narrow channels force.
 export const ROUTE_SMOOTHING = { minStepKm: 1, targetPoints: 16, passes: 12, factor: 0.5, backtrackDeg: 100, backtrackPasses: 4 };
 
+// Shape of the ocean-gap spine, before any A* land avoidance runs on it.
+// Grounded in measurement — see docs/ocean-routing-study.md.
+//
+// maxLatDeg: composite great-circle "limiting latitude". An uncapped great circle
+//   from the Salish Sea to Japan peaks at 54°N, runs the Aleutians, and departs on
+//   297°; real Asia-bound vessels leave on 267–273° (7 legs measured, mirrored on
+//   the inbound side). 50°N is a deliberate compromise: the data alone fits a cap
+//   near the departure latitude (48.5°N → exactly 270°), but our westernmost
+//   Asia-bound observation is only ~180 km offshore, so a tighter cap would
+//   extrapolate well past the evidence. 50°N is standard North Pacific practice,
+//   clears the Aleutians, and leaves the shape defensible. Endpoints poleward of
+//   the cap (BC↔Alaska) fall back to a plain great circle — they belong up there.
+// blendHoldKm/blendKm: how the spine's ends swing onto the vessel's real course
+//   (geo.blendCourse). Hold the observed course for blendHoldKm — the tracks
+//   really do hold theirs past 127°W — then decay onto the ocean route by blendKm.
+// shapeMinKm scopes BOTH of the above to genuine ocean crossings. `routeMaxKm`
+// (800 km) sends anything longer through routeOceanGap, but a 1,000–1,200 km run
+// down the coast (Juan de Fuca → San Francisco) is not a great-circle crossing:
+// its endpoints are in fine coverage, its real COG already parallels the shore,
+// and the study that motivated the cap and the blend measured only >3,000 km
+// trans-Pacific legs. Shaping those coastal gaps actively broke them — the blend
+// swung the spine's tail onto the arrival COG, the spine then no longer clipped
+// the San Francisco peninsula, so NO land-crossing run was detected, so the
+// harbour approach lost its fine A* bracket and was stored as bare 100 km spine
+// vertices; the client spline bulged 650 m into Oakland (maunawili, 50 waypoints
+// → 12). Fine harbour threading must not depend on the spine happening to hit
+// land, so keep the plain great circle below this length. See tests/README.md §11.
+export const OCEAN_ROUTE = { maxLatDeg: 50, blendHoldKm: 100, blendKm: 500, shapeMinKm: 3000 };
+
 // Per-vessel narrow-channel routing penalty (routeWater `narrowWeight`). Large
 // ships hold the main channel (e.g. the Fraser) even when slower; small craft are
 // free to cut through tight Gulf Island passages. Linearly interpolated by length

@@ -14,6 +14,7 @@ node tests/trail-precompute.test.mjs # server precompute: harvested fakes reprod
 node tests/coverage.test.mjs         # coastline COVERAGE guard — known landmasses read as land (no silent island/coast drops)
 node tests/scenario.test.mjs         # multi-leg corridor: Fraser→Tacoma→Columbia/Portland approach→SF→LA routes water-tight
 node tests/harbour-route.test.mjs    # routeWater coastal legs go around land
+node tests/ocean-shape.test.mjs      # ocean spine SHAPE — latitude cap + course blend (pure geometry, instant)
 node tests/coarse-global.test.mjs    # worldwide coarse classification (home preserved, foreign land avoided)
 node tests/regions.test.mjs          # all lazy coast/<id>.js regions valid
 node tests/compress.test.mjs         # worker movement-compression unit checks
@@ -136,16 +137,93 @@ turn**, flagging anything ≥60°. The dump made the failure self-evident — 14
 167°/178° reversals, i.e. near-duplicate control points, in a stretch that `buildControlPoints`
 had already cleaned, which located the bug in `repairOffLand`'s later splice.
 
-Two lessons worth keeping:
+Three lessons worth keeping:
 - **Instrument before hypothesising.** A count tells you *that* something is wrong; only
   coordinates tell you *where*, and "where" usually names the cause outright.
 - **Verify the fix fires.** The first `cleanControls` attempt produced byte-identical output
   because it was placed on a code path the ocean branch skips. A one-line `console.error` proved
   it never executed — far cheaper than reasoning about why the numbers hadn't moved.
+- **Measure against a clean HEAD baseline, not against your expectations.** Defect counts on the
+  harbour fixtures look like pre-existing berth noise, so a regression you introduced reads as "the
+  known limitation" and you go on trying to fix it. Get a real baseline:
+  ```
+  git worktree add /tmp/baseline HEAD          # then point the diag script at /tmp/baseline/frontend/...
+  ```
+  This is what finally showed that a whole afternoon of "fixes" was chasing damage from an earlier
+  uncommitted change — maunawili was **1** defect cluster at HEAD and **3** with the change in
+  place, the opposite of the assumed direction. Do this BEFORE the third hypothesis, not after.
 
 ### 9. Visualize on a map
 Emit GeoJSON (land polygons + real trail + routed waypoints + spline + land-clip points) and open it
 at <https://geojson.io>. Seeing the failure beats reading coordinates.
+
+### 10. Journey severing: two "obvious" fixes that measure WORSE
+
+A break means the vessel PARKED, and `splitJourneys` currently tests only
+`speed ≤ MOVING_SPEED_KN`. That is genuinely imperfect — the speed field is the
+LAST REPORTED value, ~0 for a ship merely slowing, anchored, or sending a stale
+fix. Observed in prod: MOUNT ASO broke into 5 journeys across 264/700/2108 km
+gaps and MIRACULOUS ACE across 3,530 km, each leaving an unfilled HOLE where the
+dashed inferred bridge belongs. The bug is real and **still open**.
+
+Two refinements were implemented and measured against the fixtures. Both are
+worse than the speed-only rule they replace, for the same underlying reason:
+
+| rule | maunawili land-defect clusters |
+|---|---|
+| speed only (current, HEAD) | **1** (0.15 km — the documented berth residual) |
+| speed + displacement ≤ 50 km across the gap | 3, worst **5 km** inland |
+| speed + dwell (30 min within 1 km before the gap) | 3, worst **5 km** inland |
+
+The reason both fail: a REAL berth stop is *also* followed by a long voyage and
+does *not* reliably show sustained near-stationary fixes — positions are stored
+as movement EVENTS, so a parked vessel may emit only a fix or two across a whole
+port call. Any rule that makes severing stricter un-severs berths, and an
+un-severed berth draws from an on-land wharf fix straight across the San
+Francisco peninsula to Honolulu.
+
+So the two failure modes are in direct tension, and no test on the LAST FIX alone
+separates them. A fix likely needs a different signal — e.g. the Worker's own
+record of how long the vessel sat inside a port polygon, or an explicit
+server-side break marker carried to the client (the client currently cannot tell
+"server declined to bridge" from "not computed yet").
+
+**Whatever is tried next, measure it against the berth fixtures (maunawili) as
+well as the hole fixtures (mount-aso).** Both prior attempts passed the trails
+they were written for and were never run against the ones they broke — which is
+exactly the trap §8 is about.
+
+### 11. Harbour detail can depend on the spine ACCIDENTALLY hitting land
+
+`routeOceanGap` only runs A\* on spine spans that `crossesLand`. Everything else is
+stored as raw spine vertices at `spineStepKm` (100 km) spacing — far too coarse for a
+harbour. So a gap gets harbour-grade threading only if its **great circle happens to
+clip something**, which is luck, not design.
+
+That fragility was invisible until `OCEAN_ROUTE`'s course blend landed. Juan de Fuca →
+Oakland is 1,189 km, so `routeMaxKm` (800 km) sent it through the ocean router. At HEAD
+the plain great circle clipped the San Francisco peninsula, forcing a fine bracket that
+threaded the Golden Gate: **50 waypoints, 0 defects**. The blend swung the tail onto the
+vessel's real arrival COG, the spine stopped touching land, no blocked run was detected,
+A\* never ran — **12 bare spine vertices**, and the client spline bulged **650 m into
+Oakland**. The stored track got *sparser* because the route got *better*.
+
+Fixed by scoping the shaping to real crossings (`OCEAN_ROUTE.shapeMinKm`, 3,000 km — the
+regime `docs/ocean-routing-study.md` actually measured). The underlying coupling remains:
+**a change that alters spine geometry can silently delete fine routing somewhere far from
+where you changed it.** Symptoms to watch for after any spine change:
+
+- `storedFakes` for a fixture drops a lot (maunawili 435 → 379, cosco-santos 203 → 138) —
+  compare against a HEAD baseline, a bare pass/fail hides it;
+- a defect whose nearest control point is a **real** fix several km away (`fake=false`) —
+  that means a long unrouted chord, not a bad A\* result. This misled me into concluding
+  "the ocean shaping can't be involved, the nearest control is real" — the exact opposite
+  of the truth. Nearest-control-is-real tells you routing is MISSING, not innocent.
+
+`scratchpad`-style helpers worth rebuilding: dump time-ordered segments per root with the
+real anchors and gap length for each (`diag-segcmp2.mjs`), then `diff -y` two roots. The
+vanished segment in the naive diff was a degenerate zero-length one and a red herring; the
+per-gap waypoint-count column is what identified the real culprit.
 
 ## Known limitations / follow-ups
 

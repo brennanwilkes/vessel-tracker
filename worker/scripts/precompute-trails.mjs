@@ -36,10 +36,15 @@ import { haversineKm, wrapLon } from '../../frontend/app/geo.js';
 
 // 2: unwrapped-longitude frame + bi-segmented ocean routing (routeOceanGap). Every
 // segment stored by v1 predates both, so a dateline or long-ocean gap may hold a
-// wrong-way or land-crossing path. Bumping invalidates v1 hashes for any vessel that
-// gets EXAMINED — but the freshness heuristic skips unexamined vessels entirely, so a
-// one-off `--regenerate` dispatch is still required to rebuild the existing backlog.
-const GENERATOR_VERSION = 2;
+// wrong-way or land-crossing path.
+// 3: ocean spine SHAPE — composite great-circle latitude cap (OCEAN_ROUTE.maxLatDeg)
+// plus the course blend that joins the spine to the vessel's real track. v2 spines
+// are uncapped great circles departing ~27° off the boat's actual heading, so every
+// stored ocean gap needs rebuilding. See docs/ocean-routing-study.md.
+// Bumping invalidates older hashes for any vessel that gets EXAMINED — but the
+// freshness heuristic skips unexamined vessels entirely, so a one-off `--regenerate`
+// dispatch is still required to rebuild the existing backlog.
+const GENERATOR_VERSION = 3;
 const DB_NAME = 'vessel-tracker';
 const API_BASE = 'https://api.cloudflare.com/client/v4';
 const READ_CHUNK = 60;   // mmsis per IN(...) read

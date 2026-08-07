@@ -10,9 +10,9 @@
 //
 // See frontend/CLAUDE.md "Trail rendering & land avoidance" for the design and
 // the core "trust the boat" principle.
-import { haversineKm, bearingDeg, routeWater, greatCirclePoints } from './geo.js';
+import { haversineKm, bearingDeg, routeWater, greatCirclePoints, compositeGreatCirclePoints, blendCourse } from './geo.js';
 import { isLand, hasFineLand } from './region_coast.js';
-import { LAND_AVOIDANCE, ROUTE_SMOOTHING, NARROW_WEIGHT } from '../config.js';
+import { LAND_AVOIDANCE, ROUTE_SMOOTHING, NARROW_WEIGHT, OCEAN_ROUTE } from '../config.js';
 import { dedup, splitJourneys, catmullRom, runsBySynthetic, simplifyForSpline, SPLINE_SAMPLES, DEDUP_KM } from './trail_spline.js';
 
 // Re-export the pure pipeline pieces so existing callers/tests that import them
@@ -171,9 +171,19 @@ function routeWholeOceanGap(a, b, narrowWeight, totalKm) {
   });
 }
 
-export function routeOceanGap(a, b, narrowWeight) {
+export function routeOceanGap(a, b, narrowWeight, entryBearing, exitBearing) {
   const totalKm = haversineKm(a[0], a[1], b[0], b[1]);
-  const spine = greatCirclePoints(a, b, Math.max(2, Math.ceil(totalKm / LAND_AVOIDANCE.spineStepKm)));
+  // Shape the spine BEFORE classifying it: the latitude cap and the course blend
+  // both move it, and anything they push onto land must still be routed around by
+  // the A* pass below. See geo.compositeGreatCirclePoints / blendCourse.
+  // Both ends blend, so on a gap barely over routeMaxKm the two would overlap and
+  // compose into a shape neither end asked for. Give each half the gap at most.
+  const blendKm = Math.min(OCEAN_ROUTE.blendKm, totalKm / 2);
+  const n = Math.max(2, Math.ceil(totalKm / LAND_AVOIDANCE.spineStepKm));
+  const spine = totalKm < OCEAN_ROUTE.shapeMinKm
+    ? greatCirclePoints(a, b, n)
+    : blendCourse(compositeGreatCirclePoints(a, b, n, OCEAN_ROUTE.maxLatDeg),
+        entryBearing, exitBearing, Math.min(OCEAN_ROUTE.blendHoldKm, blendKm / 2), blendKm);
 
   // Land-crossing runs of spine SEGMENTS, widened by one vertex each side so the
   // routed sub-gap starts and ends in open water (A* needs water endpoints).
@@ -282,7 +292,7 @@ export function buildControlPoints(journey, route = true, narrowWeight, doDenois
       const entryBearing = i >= 2 ? bearingDeg(real[i - 2][0], real[i - 2][1], a[0], a[1]) : undefined;
       const exitBearing = i + 1 < real.length ? bearingDeg(b[0], b[1], real[i + 1][0], real[i + 1][1]) : undefined;
       const raw = ocean
-        ? routeOceanGap(a, b, narrowWeight)
+        ? routeOceanGap(a, b, narrowWeight, entryBearing, exitBearing)
         : routeAroundLand(a, b, narrowWeight, entryBearing, exitBearing);
       if (raw && raw.length > 2) {
         // An ocean spine is already smooth and its spans are ~100 km; running
