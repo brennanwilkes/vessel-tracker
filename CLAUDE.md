@@ -80,16 +80,39 @@ production.
 
 ## Write budget / maintenance mode (D1 free tier)
 
-The binding limit is **rows written (100k/day)**, not storage or reads. **In D1 every
+The binding limit is **rows written (100k/day)**, not storage or reads (D1 reported
+`size_after` ≈ 78 MB against a 5 GB cap, so storage was never close). **In D1 every
 secondary-index entry counts as a row written**, so index choice is a write-rate decision,
-not just a read-speed one. Measured budget before/after the 2026-09-03 reduction pass
-(model + sampling scripts were throwaway; method below reproduces them):
+not just a read-speed one.
 
-| Source | Before | After |
+**These figures are a MODEL, not a measurement — treat them as an upper bound.**
+
+| Source | Before (modelled) | After (modelled) |
 |---|---|---|
 | `vessels` heartbeat upserts (+ its index) | ~61,400 | ~6,800 |
 | `positions` inserts (+ indexes + AUTOINCREMENT seq bump) | ~20,000 | ~11,300 |
 | **Total** | **~81,500/day (81% of cap)** | **~18,000/day (18%)** |
+
+**Known inflation in the "before" column:** the model assumed all ~371 live vessels heartbeat
+continuously. They do not — **a heartbeat only fires for a vessel actually HEARD by a scan**,
+and only 63 of 372 had been heard within the previous hour. So the real before-total was lower
+than 81,500 and the headline "78% cut" is derived from an inflated baseline. What survives is
+the RATIO for vessels that are being heard: their interval went 10 → 60 min, so their
+vessels-row writes drop ~6×. That part is confirmed in prod by the `last_seen` age distribution
+(63 seen within 60 min / 183 within 120, matching 60/90/120-min intervals rather than 10/30/60).
+
+**Do not try to measure the daily rate from the public API — three methods were tried and all
+bias LOW.** (1) Diffing `/current` counts *distinct vessels whose timestamp advanced*, not
+writes: a direct-tier vessel under way emits a row every ~3 min and is counted once.
+(2) `/current` only contains vessels inside the live TTL, so foreign-scan and non-of-interest
+writes are invisible. (3) Diffing per-vessel `/track` point counts does count rows, but must
+skip any vessel at the 500-point `TRACK_LIMIT` (where the delta is truncated) — and those are
+exactly the busiest, highest-writing vessels; one 61-min window yielded 15 rows across a single
+vessel, far too small a sample to extrapolate. All sampling is also time-of-day sensitive
+(a 02:00-local window sees almost no movement). **The authoritative source is the Cloudflare D1
+analytics dashboard over a full day.** The best API-derived figure remains the ~5,000
+positions/day computed from 60 days of *already-stored* rows (which averages over time-of-day
+and includes busy vessels) — and that predates the far-tier coarsening, so it is now lower.
 
 What changed and why:
 - **`HEARTBEAT_MS` 10 min → 60 min** (backoff 30/60 → 90/120). This was ~75% of ALL writes.
@@ -174,13 +197,27 @@ heard once a day sinks down the list, is never reached, and its ocean gap stays 
 staleness (`precompute_state.last_run_at`, never-examined first). `--regenerate` keeps the raw
 `last_seen DESC` order because its `--offset` batching depends on one stable list.
 
-**GitHub Actions saturation.** Runs averaged **160 min (max 230)** against an **hourly**
-dispatch, so the concurrency group was busy ~100% of the time and **35 of every 60 runs were
-cancelled while queued** — noise that also made hand-dispatched batches impossible to land.
-Fixed by bounding the run (`timeout-minutes: 75`, default `--limit 80`) and throttling the
-Worker's dispatch to every 6 h (`PRECOMPUTE_DISPATCH_EVERY_HOURS`, keyed off the cron's own
-`scheduledTime`, not `Date.now()`). Rule: the dispatch interval must stay ≥ the typical run
-time or the group never goes idle.
+**GitHub Actions saturation — the fix is the DISPATCH INTERVAL, not the run length.** Runs
+averaged **160 min (max 230)** against an **hourly** dispatch, so the concurrency group was busy
+~100% of the time and **35 of every 60 runs were cancelled while queued** — noise that also made
+hand-dispatched batches impossible to land. Fixed by throttling the Worker's dispatch to every
+6 h (`PRECOMPUTE_DISPATCH_EVERY_HOURS`, keyed off the cron's own `scheduledTime`, not
+`Date.now()` — verified: exactly one dispatch per window, landing ~:59 when the hourly global
+scan finishes). Rule: the dispatch interval must stay ≥ the typical run time.
+
+**Do NOT also cap the run to force it short — that was tried and measured worse.** A
+`timeout-minutes: 75` + default `--limit 80` processed only **25 of 80 candidates** before being
+killed at exactly the cap (every run ending `cancelled`), against **~96 vessels becoming
+eligible every 6 h** — i.e. permanently falling behind, with the backlog growing. Two reasons the
+cap looked cheaper than it was: the repo is **PUBLIC so Actions minutes are free** (a long run
+costs staleness, not money), and the staleness ordering deliberately **front-loads the most
+neglected vessels**, which are the long ocean-gap ones that take minutes each (~3 min/vessel
+during catch-up vs the ~45 s/vessel steady-state figure). `timeout-minutes` is now **300** — a
+safety net that keeps a pathological run from overlapping the next 6 h dispatch, not a budget.
+
+Healthy-run signature to check in the log: `N candidate(s) to examine of M eligible (offset 0,
+K skipped by heuristic)`. K should dominate (841 of 937 measured) — that is the heuristic
+converging. If `eligible` climbs run over run, throughput is losing to inflow.
 
 ## Map tiles
 

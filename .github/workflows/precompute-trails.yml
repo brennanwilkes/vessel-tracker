@@ -41,11 +41,16 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    # A run averaged 160 min (max 230) against an hourly trigger, so the concurrency group
-    # was busy ~100% of the time and 35 of every 60 runs were cancelled while queued. Cap
-    # the run so the group actually goes idle between passes; the precompute converges, so
-    # a truncated pass just resumes next time rather than losing work.
-    timeout-minutes: 75
+    # Saturation was caused by the HOURLY dispatch (a 160-min average run, max 230, so the
+    # group was busy ~100% of the time and 35 of every 60 runs were cancelled while queued),
+    # NOT by run length. The dispatch is now 6-hourly (PRECOMPUTE_DISPATCH_EVERY_HOURS), which
+    # a 230-min run fits inside comfortably. So this is a SAFETY NET, not a budget: 300 min
+    # stays under the 6 h interval so a pathological run can never overlap the next dispatch.
+    # The repo is PUBLIC, so Actions minutes are free — a long run costs staleness, not money.
+    # Do NOT tighten this to force short runs: a 75-min cap was measured processing only
+    # 25 of 80 candidates against ~96 becoming eligible every 6 h, i.e. permanently falling
+    # behind, and every run ended as `cancelled` at exactly the cap.
+    timeout-minutes: 300
 
     defaults:
       run:
@@ -71,18 +76,17 @@ jobs:
         # The freshness heuristic skips any vessel whose last_pos_ts hasn't advanced, so
         # a ROUTER change alone never rebuilds existing waypoints — they stay as the old
         # generator left them. After changing the router, dispatch with regenerate=true.
-        # An unbounded pass is what produced the 160-min average, so scheduled/dispatched
-        # runs default to `--limit 80` (~45 s/vessel => ~60 min, inside timeout-minutes).
-        # The freshness heuristic makes this converge: each pass takes the 80 stalest
-        # vessels, so a steady state is reached instead of every run re-walking all ~734.
-        # Pass an explicit `limit` to override.
+        # No default --limit: the freshness heuristic already bounds the work (measured
+        # 96 eligible of 937 examined-worthy vessels, 841 skipped), and a limit caps
+        # throughput BELOW the rate vessels become eligible. Pass `limit` explicitly only
+        # to batch a regenerate, which bypasses the heuristic.
         # To batch it under the 6h job cap, `limit` is NOT enough on its own: regenerate
         # bypasses the heuristic, so every batch would re-do the same first N vessels.
         # Pair it with `offset` (0, then N, then 2N, …) to walk the list.
         run: |
           node --max-old-space-size=4096 scripts/precompute-trails.mjs \
             ${{ inputs.regenerate && '--regenerate' || '' }} \
-            ${{ inputs.limit != '' && format('--limit {0}', inputs.limit) || '--limit 80' }} \
+            ${{ inputs.limit != '' && format('--limit {0}', inputs.limit) || '' }} \
             ${{ inputs.offset != '' && format('--offset {0}', inputs.offset) || '' }} \
             ${{ inputs.mmsi != '' && format('--mmsi {0}', inputs.mmsi) || '' }}
         env:
