@@ -4,7 +4,7 @@ import { json, errorJson } from './http';
 import { getCurrentVessels, getTrack, getInferredTrack, getZoneVisits } from './storage';
 import { zoneMeta } from './zones';
 import { runDirectScan, runLocalScan, runGlobalScan, runForeignScan } from './ingest';
-import { LIVE_TTL_DIRECT_MS, LIVE_TTL_LOCAL_MS, LIVE_TTL_GLOBAL_MS, GITHUB_REPO, PRECOMPUTE_WORKFLOW_FILE, DIRECT_SCAN_CRON, LOCAL_SCAN_CRON, GLOBAL_SCAN_CRON, FOREIGN_SCAN_CRON } from './constants';
+import { LIVE_TTL_DIRECT_MS, LIVE_TTL_LOCAL_MS, LIVE_TTL_GLOBAL_MS, GITHUB_REPO, PRECOMPUTE_WORKFLOW_FILE, PRECOMPUTE_DISPATCH_EVERY_HOURS, DIRECT_SCAN_CRON, LOCAL_SCAN_CRON, GLOBAL_SCAN_CRON, FOREIGN_SCAN_CRON } from './constants';
 
 const TRACK_LIMIT = 500;
 const VALID_TIERS = new Set<Tier>(['direct', 'local', 'global']);
@@ -80,7 +80,7 @@ export default {
       ctx.waitUntil(
         runGlobalScan(env)
           .catch(err => console.error('[scheduled] global scan failed:', err))
-          .then(() => triggerPrecompute(env))
+          .then(() => triggerPrecompute(env, new Date(event.scheduledTime)))
       );
     } else if (event.cron === FOREIGN_SCAN_CRON) {
       ctx.waitUntil(
@@ -94,9 +94,18 @@ export default {
 
 // Fire the trail-precompute GitHub Action so it runs right after fresh global
 // data lands. Best-effort: no token (local dev) or a failed call is logged and
-// swallowed — the workflow's own hourly schedule is the fallback.
-async function triggerPrecompute(env: Env): Promise<void> {
+// swallowed — the workflow's own schedule is the fallback.
+//
+// THROTTLED to every PRECOMPUTE_DISPATCH_EVERY_HOURS. The global scan is hourly, so this
+// used to dispatch hourly — but a precompute run averaged 160 min (max 230). GitHub keeps
+// a single PENDING run per concurrency group, so the group was busy ~100% of the time and
+// 35 of every 60 runs were cancelled while queued: pure noise that also made it impossible
+// to land a hand-dispatched batch. Dispatching on a 6-hourly boundary leaves the group idle
+// between passes. Keyed off the cron's OWN scheduledTime rather than Date.now() so a
+// delayed invocation still maps to the slot it was scheduled for.
+async function triggerPrecompute(env: Env, scheduledAt: Date): Promise<void> {
   if (!env.GITHUB_DISPATCH_TOKEN) return;
+  if (scheduledAt.getUTCHours() % PRECOMPUTE_DISPATCH_EVERY_HOURS !== 0) return;
   try {
     const res = await fetch(
       `https://api.github.com/repos/${GITHUB_REPO}/actions/workflows/${PRECOMPUTE_WORKFLOW_FILE}/dispatches`,

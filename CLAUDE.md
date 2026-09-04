@@ -78,8 +78,123 @@ production.
 - Helpers only when used ≥2× (big) or ≥4× (small).
 - Vessel API returns MMSI as **number** — use `===` comparison with number literals, never string.
 
+## Write budget / maintenance mode (D1 free tier)
+
+The binding limit is **rows written (100k/day)**, not storage or reads. **In D1 every
+secondary-index entry counts as a row written**, so index choice is a write-rate decision,
+not just a read-speed one. Measured budget before/after the 2026-09-03 reduction pass
+(model + sampling scripts were throwaway; method below reproduces them):
+
+| Source | Before | After |
+|---|---|---|
+| `vessels` heartbeat upserts (+ its index) | ~61,400 | ~6,800 |
+| `positions` inserts (+ indexes + AUTOINCREMENT seq bump) | ~20,000 | ~11,300 |
+| **Total** | **~81,500/day (81% of cap)** | **~18,000/day (18%)** |
+
+What changed and why:
+- **`HEARTBEAT_MS` 10 min → 60 min** (backoff 30/60 → 90/120). This was ~75% of ALL writes.
+  A heartbeat's only job is keeping `last_seen` inside `LIVE_TTL_*` (6 h), so 10 min was 36×
+  over-provisioned. The trap: `heartbeatIntervalMs` derives `parkedMs` from `last_pos_ts`, so
+  a MOVING vessel never backs off — the shortest interval applied to exactly the vessels
+  already writing positions rows. Keep every interval ≤ TTL/3 (survives two missed beats).
+- **Dropped `positions_mmsi_tier_ts`** (migration 007). `/track` is
+  `WHERE mmsi=? [AND tier IN (…)] ORDER BY ts DESC LIMIT n`, which `positions_mmsi_ts` already
+  serves optimally (seek mmsi, walk ts DESC, filter tier inline, stop at LIMIT — no sort). The
+  tier index only ever cost ~25% of each insert.
+- **`vessels_of_interest` re-keyed (of_interest, last_seen) → (of_interest)**. `last_seen`
+  changed on every heartbeat, so the index row was rewritten every heartbeat. Dropping it from
+  the key means a heartbeat leaves the index untouched; the `ORDER BY last_seen` now sorts a
+  few hundred rows, which is free at this table's size.
+- **Repetitive traffic coarsened by TIER, not globally** (`compress.ts`). Passenger/ferry
+  (60–69) is the highest-rate class measured (27.6 rows/vessel/day) and the most redundant —
+  it re-sails an identical route daily. `COARSE_TYPE_GAP_FACTOR` (2) still applies to `direct`
+  so the apartment-window view stays crisp; `COARSE_TYPE_GAP_FACTOR_FAR` (4) applies to
+  local/global where a repeating hull's exact wiggle is noise. Turn/speed triggers are never
+  scaled, so maneuvers survive at any factor.
+
+**Measuring without Cloudflare auth.** The prod API is public and read-only —
+`/current` (fleet + `max_extent`) and `/vessel/:mmsi/track` (real + inferred points) are enough
+to derive per-type write rates, gap distributions and trail defects. Use this instead of the
+`db-*` scripts when wrangler is authed to the wrong account; **never re-auth to measure**
+(`npx wrangler whoami` showing `brennan@textgroove.com` is the abort condition, not a fix-it).
+Caveat: `TRACK_LIMIT` caps real points at 500/vessel, so `pts` and span are truncated for busy
+vessels — rate (points ÷ span of what returned) stays representative, absolute counts do not.
+
+## Trail severing — why a gap-length ceiling does NOT work (attempted and reverted)
+
+Reported defect: ASL GALAXY drew one curve across a 58-day / 12,856 km Salish Sea → Singapore
+gap, rendering through Brunei. `splitJourneys` severs only when the vessel was PARKED at the
+last fix (`speed ≤ MOVING_SPEED_KN`), so a vessel that vanished while under way stays ONE
+journey however long the gap. The obvious fix — an absolute `TRAIL_GAP_HARD_SEVER_MS` ceiling
+that severs regardless of speed — was implemented, measured, and **reverted. Do not retry it.**
+
+**Why it fails: no gap-level statistic separates a bad trail from a good one.** A threshold of
+21 days was picked from the live fleet (across 128 real >1,000 km gaps, median implied speed —
+great-circle km ÷ duration — holds ~10 kn through the 14–21 day bucket then collapses to 5.0 kn
+past 21 days). It looked well-founded and was still wrong: `tests/fixtures/cosco-santos.json`
+is a legitimate 33.1-day BC → Hong Kong crossing and `cs-anthem.json` a 32.9-day BC → Singapore
+one — the exact trans-Pacific behaviour `OCEAN_ROUTE` exists to draw. Implied speed does not
+discriminate either: cosco-santos is **5.9 kn** over its 33 days, ASL GALAXY **5.0 kn** over its
+58. Duration and implied speed are the same for both; only the *rendered result* differs.
+
+**The real defect is un-ROUTED, not un-severed.** ASL GALAXY's gap had `inferredFilling=0` — no
+A* waypoints were ever stored, so it straight-bridged through Brunei. cosco-santos has its
+waypoints and bows around the Pacific correctly. So the fix is to get the gap ROUTED (see
+"Precompute fairness" below — starvation is why it never was), never to cut the journey.
+
+**The trap that made the mistake look safe: the fixtures went VACUOUS, not red.** With the
+ceiling in, `trail`, `ocean-trails` and `ocean-shape` all still PASSED — because severing
+deleted the trans-Pacific journey the assertions were measuring, leaving a small local one that
+trivially satisfied them. `ocean-trails` reported cosco-santos `lonSpan=5°` where the real
+fixture spans **124°**, and cs-anthem shattered 1 → 18 journeys. A green suite is not evidence
+that a journey-splitting change is safe. **After ANY change to `splitJourneys` or gap handling,
+diff per-fixture journey COUNT and max lonSpan against a HEAD baseline** — that is the only
+check that catches an assertion which has stopped measuring anything:
+
+```bash
+node -e "const fs=require('fs');(async()=>{const {dedup,splitJourneys}=await import('./frontend/app/trail_spline.js');
+for(const f of ['cosco-santos','cs-anthem']){const d=JSON.parse(fs.readFileSync('tests/fixtures/'+f+'.json','utf8'));
+const p=(d.points||d.track).slice().sort((a,b)=>a.t-b.t);const j=splitJourneys(dedup(p));
+console.log(f,j.length,'journeys, maxLonSpan',Math.max(...j.map(x=>{const l=x.map(q=>q.lon);return Math.max(...l)-Math.min(...l)})).toFixed(0))}})()"
+# Expected baseline: cosco-santos 1 journey / 124°, cs-anthem 17 journeys / 134°
+```
+
+**Not every reported "missing trail" is a bug.** A vessel parked at the gap start (ZEN in
+Honolulu at 0.0 kn, BEOWULF in San Francisco at 0.1 kn) is severed by design and renders as two
+disconnected pieces — which reads to a user as "teleports without a route". BEOWULF's leg is
+also a Panama transit, unroutable by construction. Confirm which gate fired (`realPair` /
+`parked` / tier sever) before treating it as a routing defect.
+
+## Precompute fairness — a bounded run must not order by `last_seen`
+
+The candidate query is `ORDER BY last_seen DESC` (freshest first). That is fine unlimited, but
+under a `--limit` it **starves exactly the vessels that need routing most**: a long-range ship
+heard once a day sinks down the list, is never reached, and its ocean gap stays un-routed
+(straight-bridging through land) indefinitely. A normal run now sorts `eligible` by precompute
+staleness (`precompute_state.last_run_at`, never-examined first). `--regenerate` keeps the raw
+`last_seen DESC` order because its `--offset` batching depends on one stable list.
+
+**GitHub Actions saturation.** Runs averaged **160 min (max 230)** against an **hourly**
+dispatch, so the concurrency group was busy ~100% of the time and **35 of every 60 runs were
+cancelled while queued** — noise that also made hand-dispatched batches impossible to land.
+Fixed by bounding the run (`timeout-minutes: 75`, default `--limit 80`) and throttling the
+Worker's dispatch to every 6 h (`PRECOMPUTE_DISPATCH_EVERY_HOURS`, keyed off the cron's own
+`scheduledTime`, not `Date.now()`). Rule: the dispatch interval must stay ≥ the typical run
+time or the group never goes idle.
+
+## Map tiles
+
+CARTO's free basemaps now stamp **"API KEY REQUIRED"** onto every tile (they still return
+HTTP 200 with distinct per-tile bytes, so only rendering one reveals it — a status check does
+not). Replaced with **Esri Dark Gray Canvas**, keyless, same dark cartography, water darker
+than land. It has no `{s}` subdomain shard and is native to z16, so the layer sets
+`maxNativeZoom: 16` and lets Leaflet upscale to 18.
+
 ## Key reference docs
 
+- `docs/handoff.md` — session state, open tasks, operational traps (regenerate batching, pace); **start here after a break**
+- `docs/known-issues.md` — open defects with the evidence already gathered, so a session starts from measurements rather than re-deriving them
+- `docs/ocean-routing-study.md` — do real ships follow great circles? (the measurement behind `OCEAN_ROUTE`)
 - `docs/ais-reference.md` — aisstream message shapes, AIS vessel-type codes, bounding box
 - `docs/architecture.md` — data flow diagram, KV/D1 usage, cron model
 - `docs/decisions.md` — architectural decisions (why cron not Durable Objects, etc.)
@@ -105,6 +220,13 @@ repo root: `worker/scripts/db-stats`.
 | `db-tiers` | Position stats per scan tier |
 | `db-search <term>` | Search vessels by MMSI or name fragment |
 | `db-diagnose` | Why has ingestion stopped? Freshness, AIS lock state, scan cursor, write probe |
+**Auditing LIVE trails** (not fixtures): `node tests/audit-prod.mjs --all --top 30`, or
+per-vessel with span detail. Fetches what the browser receives and splines it with the
+client pipeline. **It loads `region_coast` regions explicitly** — `tests/lib.mjs` alone
+loads only the home-bbox coastline + the ~2 km coarse layer, and regions load lazily, so
+a naive probe reports fine-covered areas as coarse and invents land defects that do not
+exist (this produced a confident wrong root cause once; `docs/known-issues.md` §4).
+
 | `db-trails [--mmsi N]` | Inferred-trail precompute state: waypoints/segments by `generator_version`, unroutable count, last run. Use it to confirm a precompute run actually LANDED rather than being skipped by the freshness heuristic — `--regenerate` is required to rebuild existing segments, so a version rollover is the proof. |
 
 Common flags: `--local` for local D1, `--db <name>` to change database, `--pretty` for

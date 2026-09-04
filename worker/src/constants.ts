@@ -23,7 +23,7 @@ export const GLOBAL_BOUNDING_BOX: [[number, number], [number, number]] = [
 // Trajectory-compression thresholds (MOVE_THRESHOLD_NM, MOVE_PROFILE, MOVING_SPEED_KN,
 // COARSE_TYPE_GAP_FACTOR) and the isSignificantMove decision live in `compress.ts` — a
 // self-contained, unit-testable module. Re-exported here for back-compat imports.
-export { MOVE_THRESHOLD_NM, MOVE_PROFILE, MOVING_SPEED_KN, COARSE_TYPE_GAP_FACTOR } from './compress';
+export { MOVE_THRESHOLD_NM, MOVE_PROFILE, MOVING_SPEED_KN, COARSE_TYPE_GAP_FACTOR, COARSE_TYPE_GAP_FACTOR_FAR } from './compress';
 export type { MoveProfile } from './compress';
 
 // Phantom speed detection for direct-tier vessels. Some AIS transponders keep broadcasting
@@ -42,12 +42,18 @@ export const ZONE_VISIT_THROTTLE_MS = 30 * 60 * 1000;
 
 // How long a stationary vessel can go without a heartbeat last_seen update (ms).
 // Backoff: the longer a vessel has been parked (no position row), the less often it
-// needs a heartbeat — it isn't going anywhere. All intervals stay < the 6h live TTL so
-// the vessel never silently drops off /current.
-export const HEARTBEAT_MS = 10 * 60 * 1000;
+// needs a heartbeat — it isn't going anywhere.
+// A heartbeat's ONLY job is to keep last_seen inside the live TTL below, so the interval
+// is sized against that TTL, not against how fast the vessel moves. At 10 min against a
+// 6 h TTL it was 36x over-provisioned, and because `parkedMs` derives from last_pos_ts a
+// MOVING vessel never backs off — so the base interval applied to exactly the vessels
+// already writing positions rows. That made vessels-row churn the single largest write
+// source in the whole system (~61k of ~81k rows/day, index included). Every interval here
+// stays <= TTL/3 so a vessel survives two consecutive missed heartbeats.
+export const HEARTBEAT_MS = 60 * 60 * 1000;
 export const HEARTBEAT_BACKOFF: { parkedMs: number; intervalMs: number }[] = [
-  { parkedMs: 6 * 60 * 60 * 1000, intervalMs: 60 * 60 * 1000 }, // parked >6h → hourly
-  { parkedMs: 1 * 60 * 60 * 1000, intervalMs: 30 * 60 * 1000 }, // parked >1h → every 30 min
+  { parkedMs: 6 * 60 * 60 * 1000, intervalMs: 120 * 60 * 1000 }, // parked >6h → every 2h
+  { parkedMs: 1 * 60 * 60 * 1000, intervalMs:  90 * 60 * 1000 }, // parked >1h → every 90 min
 ];
 
 // Max age before a vessel is dropped from the /current response.
@@ -169,3 +175,6 @@ export const FOREIGN_RELEVANCE = {
 // lands) via workflow_dispatch; the workflow also keeps its own hourly fallback.
 export const GITHUB_REPO = 'brennanwilkes/vessel-tracker';
 export const PRECOMPUTE_WORKFLOW_FILE = 'precompute-trails.yml';
+// Dispatch only on UTC hours divisible by this (see triggerPrecompute). Must stay >= the
+// workflow's typical run time or the concurrency group never goes idle.
+export const PRECOMPUTE_DISPATCH_EVERY_HOURS = 6;

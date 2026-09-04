@@ -220,8 +220,9 @@ async function main() {
      ORDER BY last_seen DESC`
   )).filter(v => ONLY_MMSI === null || v.mmsi === ONLY_MMSI);
 
-  const stateRows = await read(`SELECT mmsi, last_pos_ts_seen FROM precompute_state`);
+  const stateRows = await read(`SELECT mmsi, last_pos_ts_seen, last_run_at FROM precompute_state`);
   const lastSeenTs = new Map(stateRows.map(r => [r.mmsi, r.last_pos_ts_seen]));
+  const lastRunAt  = new Map(stateRows.map(r => [r.mmsi, r.last_run_at]));
 
   // Heuristic: examine only vessels whose newest position advanced since last run.
   let skippedHeuristic = 0;
@@ -230,6 +231,18 @@ async function main() {
     if (skip) skippedHeuristic++;
     return !skip;
   });
+  // Fair ordering for a BOUNDED run. `vessels` is `last_seen DESC` (freshest first),
+  // which starves exactly the vessels that need routing most: a long-range ship heard
+  // once a day sinks to the bottom of the list, so under a `--limit` it is never
+  // reached and its ocean gap stays un-routed (rendering as a straight bridge through
+  // land) indefinitely. Order a normal run by precompute staleness instead — never
+  // examined first, then longest-since-examined — so every eligible vessel is reached
+  // within a bounded number of passes regardless of how often it is heard.
+  // `--regenerate` keeps the raw `last_seen DESC` order, because its `--offset`
+  // batching contract depends on walking one stable list across dispatches.
+  if (!REGENERATE) {
+    eligible.sort((a, b) => (lastRunAt.get(a.mmsi) ?? -Infinity) - (lastRunAt.get(b.mmsi) ?? -Infinity));
+  }
   const candidates = eligible.slice(OFFSET, LIMIT === Infinity ? undefined : OFFSET + LIMIT);
   const mmsis = candidates.map(v => v.mmsi);
 

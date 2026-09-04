@@ -14,8 +14,12 @@ import { dedup, splitJourneys, catmullRom, runsBySynthetic } from './trail_splin
 
 const HOME = VIEWSHEDS[0].home;
 
-const TILE_URL = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
-const TILE_ATTR = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com">CARTO</a>';
+// CARTO's free basemaps now stamp "API KEY REQUIRED" onto every tile. Esri's Dark Gray
+// Canvas is a keyless drop-in with the same dark cartography, and renders water darker
+// than land — which suits a marine map. It has no {s} subdomain shard and tops out at
+// z16 natively, so Leaflet upscales z17-18 rather than requesting 404s.
+const TILE_URL = 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}';
+const TILE_ATTR = '&copy; <a href="https://www.esri.com">Esri</a>';
 
 // ── State (module-level, reset on each mount) ────────────────────────────────
 
@@ -585,7 +589,7 @@ export function mount(root) {
   map = L.map('leaflet-map', { zoomControl: true, attributionControl: true, preferCanvas: true })
     .setView([HOME.lat, HOME.lon], 11);
 
-  L.tileLayer(TILE_URL, { attribution: TILE_ATTR, maxZoom: 18 }).addTo(map);
+  L.tileLayer(TILE_URL, { attribution: TILE_ATTR, maxZoom: 18, maxNativeZoom: 16 }).addTo(map);
 
   requestAnimationFrame(() => map !== null && map.invalidateSize());
 

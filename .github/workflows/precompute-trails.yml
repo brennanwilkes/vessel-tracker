@@ -20,6 +20,10 @@ on:
         description: "Skip this many vessels first — batches a regenerate across runs (blank = 0)"
         type: string
         default: ""
+      mmsi:
+        description: "Rebuild ONE vessel only (blank = all). Pair with regenerate to clear a bad stored trail."
+        type: string
+        default: ""
   # Fallback only, every 6h. It used to be hourly, which collided with the
   # Worker's own hourly dispatch: GitHub keeps a single pending run per
   # concurrency group, so the second trigger of each hour was cancelled while
@@ -37,6 +41,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    # A run averaged 160 min (max 230) against an hourly trigger, so the concurrency group
+    # was busy ~100% of the time and 35 of every 60 runs were cancelled while queued. Cap
+    # the run so the group actually goes idle between passes; the precompute converges, so
+    # a truncated pass just resumes next time rather than losing work.
+    timeout-minutes: 75
 
     defaults:
       run:
@@ -62,14 +71,20 @@ jobs:
         # The freshness heuristic skips any vessel whose last_pos_ts hasn't advanced, so
         # a ROUTER change alone never rebuilds existing waypoints — they stay as the old
         # generator left them. After changing the router, dispatch with regenerate=true.
+        # An unbounded pass is what produced the 160-min average, so scheduled/dispatched
+        # runs default to `--limit 80` (~45 s/vessel => ~60 min, inside timeout-minutes).
+        # The freshness heuristic makes this converge: each pass takes the 80 stalest
+        # vessels, so a steady state is reached instead of every run re-walking all ~734.
+        # Pass an explicit `limit` to override.
         # To batch it under the 6h job cap, `limit` is NOT enough on its own: regenerate
         # bypasses the heuristic, so every batch would re-do the same first N vessels.
         # Pair it with `offset` (0, then N, then 2N, …) to walk the list.
         run: |
           node --max-old-space-size=4096 scripts/precompute-trails.mjs \
             ${{ inputs.regenerate && '--regenerate' || '' }} \
-            ${{ inputs.limit != '' && format('--limit {0}', inputs.limit) || '' }} \
-            ${{ inputs.offset != '' && format('--offset {0}', inputs.offset) || '' }}
+            ${{ inputs.limit != '' && format('--limit {0}', inputs.limit) || '--limit 80' }} \
+            ${{ inputs.offset != '' && format('--offset {0}', inputs.offset) || '' }} \
+            ${{ inputs.mmsi != '' && format('--mmsi {0}', inputs.mmsi) || '' }}
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

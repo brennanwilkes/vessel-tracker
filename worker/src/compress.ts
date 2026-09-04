@@ -49,9 +49,20 @@ export const MOVE_PROFILE: Record<string, MoveProfile> = {
   global: { turnDeg: 30, speedKn: 3.0, maxGapNm: 25.0, maxGapMs: 120 * 60 * 1000 },
 };
 
-// Low-value resident types (tugs 31/32/52, pleasure 36/37, fishing 30) loiter locally
-// and nobody watches their exact wiggles — coarsen their gaps.
-export const COARSE_TYPE_GAP_FACTOR = 2;
+// Low-value resident types loiter locally on repeating routes and nobody watches their
+// exact wiggles — coarsen their gaps. Passenger/ferry (60-69) is the highest-rate class
+// measured (27.6 position rows/vessel/day, the busiest of any type) and the most
+// redundant: a ferry re-sails an identical route several times a day, so the Nth crossing
+// carries no information the 1st didn't.
+//
+// The factor is TIER-dependent because the tiers mean different things. `direct` is the
+// apartment-window view — the entire point of the project — so it stays gently coarsened
+// and a ferry crossing the window still renders smoothly (turn/speed triggers are
+// untouched by the factor and keep every maneuver). `local`/`global` are approach and
+// transit tracks where a repeating hull's exact wiggle is pure noise, so they coarsen
+// harder.
+export const COARSE_TYPE_GAP_FACTOR = 2;         // direct — preserve the window view
+export const COARSE_TYPE_GAP_FACTOR_FAR = 4;     // local/global — repetition is noise
 
 const R_NM = 3440.065;
 
@@ -70,13 +81,16 @@ export function headingDeltaDeg(a: number | null, b: number | null): number | nu
 }
 
 export function isLowValueResident(type: number | null): boolean {
+  if (type === null) return false;
+  if (type >= 60 && type <= 69) return true;  // passenger/ferry — fixed repeating routes
   return type === 30 || type === 31 || type === 32 || type === 36 || type === 37 || type === 52;
 }
 
 function moveProfileFor(tier: Tier, vesselType: number | null): MoveProfile {
   const p = MOVE_PROFILE[tier];
   if (!isLowValueResident(vesselType)) return p;
-  return { turnDeg: p.turnDeg, speedKn: p.speedKn, maxGapNm: p.maxGapNm * COARSE_TYPE_GAP_FACTOR, maxGapMs: p.maxGapMs * COARSE_TYPE_GAP_FACTOR };
+  const f = tier === 'direct' ? COARSE_TYPE_GAP_FACTOR : COARSE_TYPE_GAP_FACTOR_FAR;
+  return { turnDeg: p.turnDeg, speedKn: p.speedKn, maxGapNm: p.maxGapNm * f, maxGapMs: p.maxGapMs * f };
 }
 
 // Is this fix worth a new positions row vs the last emitted point? Caller guarantees
