@@ -370,12 +370,27 @@ export async function getZoneVisits(env: Env, mmsi: number): Promise<ZoneVisitRo
   return res.results;
 }
 
+// TRACK EXACTLY THE SET WE RENDER. `first_direct_at IS NOT NULL` mirrors the filter in
+// getCurrentVessels — a vessel that has never entered the apartment-window box is never
+// drawn, so tracking it worldwide bought nothing. Measured 2026-09-10: this list returned
+// **7,193** vessels while /current rendered **344**, and `INSERT INTO positions` was 10,572
+// inserts/day (31.7k rows written — 66% of ALL writes, at exactly 3.00 rows per insert:
+// base + positions_mmsi_ts + the AUTOINCREMENT sqlite_sequence bump). Over half of those
+// inserts were for vessels that are never displayed.
+//
+// This does NOT cost the "how did it get to the inner harbour" approach track: runLocalScan
+// drains LOCAL_BOUNDING_BOX and writes positions for everything it hears WITHOUT consulting
+// this list at all, so the whole Salish Sea / Puget Sound approach is covered independently.
+// Nor does it cost the trans-Pacific trails — those vessels have visited, so first_direct_at
+// is set. What is dropped is mid-voyage fixes for a ship that has never once been seen from
+// the window; its gap renders as the dashed A*-inferred curve the trail system exists to draw
+// (there are essentially no real open-Pacific fixes anyway — aisstream is shore-receiver fed).
 export async function getOfInterestMmsis(env: Env, staleCutoffMs?: number): Promise<number[]> {
   if (staleCutoffMs !== undefined) {
     const result = await env.VESSELS_DB
       .prepare(
         `SELECT mmsi FROM vessels
-         WHERE of_interest = 1
+         WHERE of_interest = 1 AND first_direct_at IS NOT NULL
          ORDER BY
            CASE
              WHEN max_extent = 'global' THEN 0
@@ -393,7 +408,7 @@ export async function getOfInterestMmsis(env: Env, staleCutoffMs?: number): Prom
   }
 
   const result = await env.VESSELS_DB
-    .prepare(`SELECT mmsi FROM vessels WHERE of_interest = 1 ORDER BY last_seen ASC`)
+    .prepare(`SELECT mmsi FROM vessels WHERE of_interest = 1 AND first_direct_at IS NOT NULL ORDER BY last_seen ASC`)
     .all<{ mmsi: number }>();
   return result.results.map(r => r.mmsi);
 }

@@ -147,6 +147,69 @@ error bars — the `enrichStaticData` and foreign-initial-row terms are the two 
 least directly measurable. **The authoritative check is the Cloudflare D1 analytics dashboard
 over a full day**, and the public-API sampling caveats in round 1 below still apply.
 
+## Write-budget round 3 — MEASURED attribution from the D1 query stats (2026-09-10)
+
+Round 2 got 83k → **~48k/day**, but my model said 21–24k, i.e. **2x optimistic**. The D1
+dashboard's **per-query breakdown** (Console → the query list with `Rows written` per
+statement) settled it in one shot. **Use that view FIRST in any future write audit — it is
+the only source that attributes rows to statements, and it made three sessions of API
+inference redundant.**
+
+Measured over 24 h at ~48k rows written:
+
+| Statement | Count | Rows written |
+|---|---|---|
+| `INSERT INTO positions` | 10,572 | **31.72k (66%)** |
+| `INSERT INTO vessels … ON CONFLICT` | 2,211 | 4.42k |
+| `UPDATE scan_meta` (AIS lock) | 6,849 | 1.33k |
+| `UPDATE vessels …` (enrichStaticData) | 4,439 | **348** |
+
+- **Round 2's `enrichStaticData` fix is CONFIRMED working**: 4,439 attempts → 348 rows, i.e.
+  92% correctly skipped as no-ops. That gate was the right diagnosis.
+- **`positions` is exactly 3.00 rows written per insert** — base + `positions_mmsi_ts` +
+  the `AUTOINCREMENT` `sqlite_sequence` bump. The 3.00 ratio is how you PROVE the seq bump
+  is real rather than assuming it.
+
+**Root cause: the global scan tracked 7,193 vessels to render 344.**
+`getOfInterestMmsis` filtered on `of_interest = 1` with **no `first_direct_at` filter**, so it
+targeted every vessel the foreign scan had ever pre-seeded (7,193 — read straight off the
+dashboard as 136.68k rows / 19 calls). `/current` renders only `of_interest = 1 AND
+first_direct_at IS NOT NULL` (344). So >half of all position inserts were for vessels that are
+never drawn. **This is also why every public-API estimate came in ~2x low** — `/track` sampling
+can only see the 344, and the invisible cohort is unreachable that way.
+
+Fixed by adding `first_direct_at IS NOT NULL`, so **we track exactly the set we render**.
+`precompute-trails.mjs` **already had that filter** (its candidate query) — the global scan was
+the sole outlier, which is the tell that the filter was an oversight, not a design choice.
+
+**Why this does NOT cost the "how did it get to the inner harbour" approach track:**
+`runLocalScan` drains `LOCAL_BOUNDING_BOX` and writes positions for everything it hears
+**without consulting the of-interest list at all**. The whole Salish Sea / Puget Sound approach
+is local-scan territory. Trans-Pacific trails are also safe — those vessels have visited, so
+`first_direct_at` is set. What is dropped is mid-voyage fixes for a ship never once seen from
+the window, whose gap renders as the dashed A*-inferred curve the trail system exists to draw
+(and there are essentially no real open-Pacific fixes anyway — aisstream is shore-receiver fed).
+
+## Removing `AUTOINCREMENT` from `positions` — DO NOT. Measured, not assumed.
+
+Tempting (a guaranteed 1-of-every-3 position rows) and repeatedly proposed. **It is a trap.**
+`INTEGER PRIMARY KEY AUTOINCREMENT` can only be dropped by REBUILDING the table, costing ~2N
+writes (copy N rows + rebuild the index on N). Size N from the dashboard: the precompute's
+`SELECT … FROM positions WHERE mmsi IN (…)` read **72.79k rows for 37 vessels ≈ 1,967
+rows/vessel**.
+
+| Rendered fleet | N | Rebuild cost | Days of FULL cap | Payback |
+|---|---|---|---|---|
+| 344 | ~677k | ~1.35M writes | 13.5 | 278 days |
+| 700 | ~1.38M | ~2.75M writes | 27.5 | 565 days |
+
+Even the best case is 13.5 days of the entire cap for a 278-day payback. Worse, it **cannot run
+as an auto-applying migration**: D1 hits the 100k daily cap partway through the copy and errors
+out, potentially after `DROP TABLE positions` — a half-applied schema change is far worse than
+paying the seq bump. `positions.id` only ever needs a unique rowid (`p.id = (SELECT id … ORDER
+BY ts DESC LIMIT 1)`), so plain `INTEGER PRIMARY KEY` would be semantically fine — the blocker
+is purely the migration cost. Revisit ONLY if `positions` is being rebuilt for another reason.
+
 ## Write budget / maintenance mode (D1 free tier)
 
 The binding limit is **rows written (100k/day)**, not storage or reads (D1 reported
