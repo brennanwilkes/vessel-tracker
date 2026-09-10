@@ -9,13 +9,13 @@ Four cron schedules in `wrangler.toml [triggers]`, all handled in `scheduled` (b
 - `0-48/2 * * * *` — direct scan, 25×/hr (every 2 min, :00–:48): drain DIRECT box (apartment view, ≤45s), write every vessel as of_interest=1. (Live `/current` dot refreshes every 2 min, except it pauses ~:48→:00 during the global block.)
 - `1-49/4 * * * *` — local scan, 13×/hr (:01,:05,…,:49): drain LOCAL box (≤50s — shortened from 90s to fit its slot), write only large vessels (≥50m / cargo / tanker) or already-of-interest vessels.
 - `50 * * * *` — global scan hourly, owns the **reserved :50–:59 block** (nothing else fires then, so it has the socket to itself): one invocation chaining ~15 drains of the global box filtered to of-interest MMSIs in retrying batches, stale vessels first, widen max_extent. `GLOBAL_SCAN_BUDGET_MS` (9 min) caps it to finish before :00 so it can't bleed into the next hour's slots. Trade-off of the block (vs a spread-refactor): the live direct view pauses ~:48→:00 (~10–12 min/hr).
-- `3-49/4 * * * *` (`FOREIGN_SCAN_CRON`) — rotating **foreign scan**, 12×/hr (:03,:07,…,:47): drain a rotating SLICE of distant port boxes (`zones.ts` foreign zones — **41 of them**, 12/tick via the aisstream `BoundingBoxes` array, ≤50s → 144 zone-coverages/hr ≈ each zone ~every 17 min, NO MMSI filter) and pre-seed large, plausibly-inbound vessels. (Was `*/15` 4×/hr; the collision-free partition gave it more slots — 3× more foreign coverage.) The worldwide global scan above rarely hears its targets (a 30 s window over the planet seldom catches a specific MMSI); a dense port box hears everything there. **Write-frugal** (free-tier): functions like the local scan (skip confirmed-small new, keep an initial row for unknown types to enrich+reclassify later) but ingests only a relevant vessel (≥100 m anywhere on the Pacific rim, or ≥70 m bound for a NA-Pacific-NW port per AIS destination, or already-of-interest) as of-interest='global' + a `zone_visit` + a **sparse port-dwell track**: a position on first zone entry, then at most one more per `FOREIGN_POSITION_THROTTLE_MS` (30 min) while the vessel stays in the zone. **`last_pos_ts` is read from the latest `positions` row** (the heartbeat upsert path leaves `vessels.last_pos_ts` stale), so each write self-advances the throttle — `loadForeignStates` fetches it via a scalar subquery. **`FOREIGN_MAX_POSITIONS_PER_SCAN` (25) is the hard ceiling**: foreign now runs 288×/day (12×/hr), so cap × 288 ⇒ ≤~7,200 foreign position rows/day ceiling (was ~2,400 at the old 4×/hr — the 3× frequency raised it; still far under the 100k/day D1 cap, realistic ≈1,800/day; lower the cap to ~8 to hold the old ~2,400 ceiling if desired), so a busy world port can't run away (LA/Long Beach + Singapore boxes are widened to include their offshore anchorages — many waiting ships — which the cap bounds). Full-resolution tracking begins only if the vessel reaches the home box (`first_direct_at` stays null → not on `/current` until then). Config + the relevance gate are in `constants.ts` "Rotating foreign scan" (`FOREIGN_*`); cursor persists in `scan_meta`. The `BoundingBoxes` cap is unprobed; per-port heard counts + per-scan `positions=` are logged so the write rate can be projected and the gate/throttle/cap retuned.
+- `3-49/4 * * * *` (`FOREIGN_SCAN_CRON`) — rotating **foreign scan**, 12×/hr (:03,:07,…,:47): drain a rotating SLICE of distant port boxes (`zones.ts` foreign zones — **41 of them**, 12/tick via the aisstream `BoundingBoxes` array, ≤50s → 144 zone-coverages/hr ≈ each zone ~every 17 min, NO MMSI filter) and pre-seed large, plausibly-inbound vessels. (Was `*/15` 4×/hr; the collision-free partition gave it more slots — 3× more foreign coverage.) The worldwide global scan above rarely hears its targets (a 30 s window over the planet seldom catches a specific MMSI); a dense port box hears everything there. **Write-frugal** (free-tier): functions like the local scan (skip confirmed-small new, keep an initial row for unknown types to enrich+reclassify later) but ingests only a relevant vessel (≥100 m anywhere on the Pacific rim, or ≥70 m bound for a NA-Pacific-NW port per AIS destination, or already-of-interest) as of-interest='global' + a `zone_visit` + a **sparse port-dwell track**: a position on first zone entry, then at most one more per `FOREIGN_POSITION_THROTTLE_MS` (**2 h** — was 30 min) while the vessel stays in the zone. **`last_pos_ts` is read from the latest `positions` row** (the heartbeat upsert path leaves `vessels.last_pos_ts` stale), so each write self-advances the throttle — `loadForeignStates` fetches it via a scalar subquery. **`FOREIGN_MAX_POSITIONS_PER_SCAN` (**8**) is the hard ceiling**: foreign runs 288×/day (12×/hr), so cap × 288 ⇒ ≤~2,300 foreign position rows/day. It was 25 while an adjacent comment still claimed "96 scans/day → ≤2,400" — stale since the cron went 4×/hr → 12×/hr, making the real ceiling **7,200/day** (7% of the whole free tier). Lowered to 8 in write-budget round 2. **When the foreign cron cadence changes, re-derive this ceiling** — the cap alone does not tell you the daily cost, so a busy world port can't run away (LA/Long Beach + Singapore boxes are widened to include their offshore anchorages — many waiting ships — which the cap bounds). Full-resolution tracking begins only if the vessel reaches the home box (`first_direct_at` stays null → not on `/current` until then). Config + the relevance gate are in `constants.ts` "Rotating foreign scan" (`FOREIGN_*`); cursor persists in `scan_meta`. The `BoundingBoxes` cap is unprobed; per-port heard counts + per-scan `positions=` are logged so the write rate can be projected and the gate/throttle/cap retuned.
 
 **Why cron not Durable Objects:** Durable Objects require the paid Workers plan. Scheduled Workers are free-tier and sufficient. See `docs/decisions.md`.
 
 **AIS connection lock (single-key serialization).** aisstream **throttles concurrent connections per API key** — a second socket on the same key kills/rejects the other (WebSocket close `code 1006`). The four scans fire on independent cron triggers that collide at shared minutes (all four at `:00`), so the every-minute direct scan (45 s of every 60 s) was **starving the hourly global scan**: empirically its catches landed only at minute `:04–:08`, never `:00–:02` (the early drains 1006'd against direct/local/foreign). Fix: a single-key advisory lock in `scan_meta` (`acquireAisLock`/`releaseAisLock` in `storage.ts`; lock value = expiry epoch-ms, "free" = `value < now`, conditional UPDATE → SQLite single-writer makes check-and-set atomic; conditional release on the written token so an overran drain can't free a new holder). **Each DRAIN — not each scan run — acquires → drains → releases** (threaded via `DrainOptions.lock = {env, holder, maxWaitMs}` in `drainAisStream`), so direct's 45 s and global's 30 s drains **interleave on one connection** instead of colliding. A drain that can't get the lock within `maxWaitMs` is **skipped** (empty result — scans handle this) rather than forced; direct yields soonest (`AIS_LOCK_WAIT_*` in `constants.ts`), global waits per-drain but its 3-round/14-min budget gives many retries, and the global loop sleeps 2 s between drains so it can't instantly re-acquire and starve the others. Lock auto-expires (`drainMs + AIS_LOCK_TTL_BUFFER_MS`) so a crashed scan can't deadlock.
 
-**Write frugality.** Each `acquire` and `release` is a D1 write. To keep this cheap, the **single-drain scans (direct/local/foreign) do NOT write a release** — they hold the lock once per run and let it expire via TTL (`release: false` in their `lock` opt). Only **global** explicitly releases, because it chains ~13 drains and must free the lock between them. Consequence: `AIS_LOCK_TTL_BUFFER_MS` must stay **below the direct cadence** (10 s now; drain 45 s + 10 s = 55 s ≪ the 120 s every-2-min period) or a direct run's un-released lock would still be held when the next fires. Net lock writes ≈ **1,700/day** (direct `*/2` acquire-only 720, local 144, foreign 96, global ~620) — ~1.7 % of the 100k/day free write cap. Staggering the crons does NOT reduce these (acquire/release fire regardless of timing); only cadence + the release-skip do.
+**Write frugality.** Each `acquire` and `release` is a D1 write. To keep this cheap, the **single-drain scans (direct/local/foreign) do NOT write a release** — they hold the lock once per run and let it expire via TTL (`release: false` in their `lock` opt). Only **global** explicitly releases, because it chains ~13 drains and must free the lock between them. Consequence: `AIS_LOCK_TTL_BUFFER_MS` must stay **below the direct cadence** (10 s now; drain 45 s + 10 s = 55 s ≪ the 120 s every-2-min period) or a direct run's un-released lock would still be held when the next fires. Net lock writes ≈ **1,700/day** (direct `*/2` acquire-only 720, local 144, foreign 96, global ~620) — ~1.7 % of the 100k/day free write cap. The lock ROW is seeded by migration 008; `acquireAisLock` used to run an `INSERT OR IGNORE` on every acquire, a per-drain write attempt for a row that can only be created once. It now runs **once per isolate** (`aisLockRowEnsured`) — kept as a self-heal because if the row is ever missing the conditional UPDATE matches 0 rows FOREVER and every drain silently skips, which presents exactly as the "crons fire but nothing is written" stall above. Staggering the crons does NOT reduce these (acquire/release fire regardless of timing); only cadence + the release-skip do.
 
 NOTE: this is a single-key stopgap — a second aisstream key (direct on its own key, the rest on key 2) would remove even the interleave waits; deferred.
 
@@ -85,13 +85,16 @@ A `positions` row is only inserted when the vessel has moved past the tier-speci
 - local: 0.5 nm
 - global: 5.0 nm
 
-Stationary vessels update `last_seen` heartbeat every ≥10 min but emit no position row.
+Stationary vessels update `last_seen` heartbeat but emit no position row. The interval is
+PER `max_extent` (`HEARTBEAT_BY_EXTENT`): direct 60 min, local 8 h, global 12 h, each ≤ that
+extent's `LIVE_TTL_*`/3. A flat interval sized the whole table against the 6 h direct TTL, but
+only ~15 vessels are direct — see root `CLAUDE.md` → "Write-budget round 2".
 
 Movement uses **trajectory compression** (`src/compress.ts` `isSignificantMove`): past a
 jitter floor, a position row is written only on a turn / speed change / start-stop / a
 bounded max gap (per-tier `MOVE_PROFILE`; direct stays gentle to keep the live dot
 fresh, local/global compress hard). Low-value resident types (tug/pleasure/fishing) get
-coarser gaps. Heartbeats back off as a vessel stays parked (10m→30m→1h). Unit-tested:
+coarser gaps. Heartbeats back off as a vessel stays parked, per extent (`HEARTBEAT_BY_EXTENT`). Unit-tested:
 `node tests/compress.test.mjs`.
 
 **Decoupled per-move `vessels` upsert (write reduction).** A move writes a `positions`
@@ -121,8 +124,11 @@ Seattle, …) are attributed **for free** from the direct/local boxes we already
 of-interest vessels heard worldwide by the global scan get foreign attribution for free
 too. `commitZoneVisits` (`storage.ts`) is **saturating**: one row per `(mmsi, zone_id)`
 — first sighting inserts, later sightings only bump `last_ts` once past
-`ZONE_VISIT_THROTTLE_MS` (30 min), so a parked ship doesn't re-write every scan. Never
-deleted; bounded by the vessel×zone matrix. **Distant ports are now covered by the
+`ZONE_VISIT_THROTTLE_MS` (**6 h** — was 30 min), so a parked ship doesn't re-write every
+scan. **`zone_visits_zone` is keyed `(zone_id)` ONLY** (migration 008): `last_ts` used to be
+in the key, so every bump rewrote the index entry too — 2 rows per bump, ~12k rows/day. Never
+put `last_ts` back in an index key. Rows are never
+deleted; growth is bounded by the vessel×zone matrix. **Distant ports are now covered by the
 rotating foreign scan** (see Cron model → foreign scan): it drains the foreign `zones.ts`
 boxes directly, so a vessel at Tokyo/Shanghai/Hawaii gets its foreign zone attributed even
 though the worldwide global scan almost never hears it.
@@ -139,7 +145,10 @@ Drop a new `NNN_my_change.sql` file in `worker/migrations/`. On next push to mai
 
 ## HTTP API
 
-- `GET /current` → of-interest vessels within tier TTLs: direct/local 6h, global 72h. `max_extent` reflects the strongest extent actually observed in D1.
+- `GET /current` → of-interest vessels within tier TTLs: direct 6h, **local 72h**, global 72h.
+  (Local really is 72h: the WHERE clause compares `max_extent='local'` against the GLOBAL
+  cutoff `?3`; `?2` is bound but never referenced. `LIVE_TTL_LOCAL_MS` now says 72h to match.
+  Changing this REQUIRES shortening `HEARTBEAT_BY_EXTENT.local` with it.) `max_extent` reflects the strongest extent actually observed in D1.
 - `GET /vessel/:mmsi/track?tier=direct,local` → movement event positions, `Cache-Control: public, max-age=60`
 - `GET /vessel/:mmsi/zones` → visited destinations `[{zone_id,name,kind,lat,lon,first_t,last_t}]` (zone_visits joined with code metadata), `Cache-Control: public, max-age=300`
 - `OPTIONS *` → CORS preflight
@@ -416,14 +425,23 @@ re-splines the union with the pure pipeline (`frontend/app/trail_spline.js`).
   inherited `tier` so the client tier filter works, and `dashed` for solid/dashed
   styling), plus `inferred_segments` (processed marker, present even at 0 points →
   out-of-coverage segments never retried) and `precompute_state` (the heuristic).
-- **Trigger:** the hourly global scan fires the workflow on completion (most new gaps
-  appear then) via `workflow_dispatch` (`triggerPrecompute` in `index.ts`, needs the
-  `GITHUB_DISPATCH_TOKEN` Worker secret — optional); the workflow's own cron is
-  the fallback, **every 6 h** (`0 */6 * * *`). It was hourly, which collided with the
-  Worker's own hourly dispatch: GitHub keeps a single PENDING run per concurrency
-  group, so the second trigger of each hour was cancelled while queued (~22% of runs
-  showed `cancelled` — noise, not failures). The repo is PUBLIC, so Actions minutes
-  are free; long runs cost staleness, not money.
+- **Trigger:** the global scan fires the workflow on completion (most new gaps appear
+  then) via `workflow_dispatch` (`triggerPrecompute` in `index.ts`, needs the
+  `GITHUB_DISPATCH_TOKEN` Worker secret — optional). The scan is hourly but the dispatch
+  is **THROTTLED to every `PRECOMPUTE_DISPATCH_EVERY_HOURS` (6)**, keyed off the cron's own
+  `event.scheduledTime` rather than `Date.now()`, so it lands ~:59 on hours divisible by 6
+  (verified 2026-09-04: fired at 06:59 and 12:59, silent at 07:59-11:59). An unthrottled
+  hourly dispatch against a 160-min average run is what saturated the group. The
+  workflow's own cron is
+  the fallback, now **daily** (`0 3 * * *`) — it was every 6 h, but GitHub runs scheduled
+  workflows best-effort and it drifted 3.5-4.5 h late (measured 2026-09-04: the 06:00 cron
+  fired at 10:23, the 12:00 at 15:37) while the Worker's dispatch hit 12:59:07 exactly. At
+  6 h the drifting cron simply doubled the run count at unpredictable offsets; daily keeps
+  the safety net (Worker outage / missing `GITHUB_DISPATCH_TOKEN`) without the waste.
+  Earlier still it was HOURLY, which collided with the Worker's own hourly dispatch:
+  GitHub keeps a single PENDING run per concurrency group, so the second trigger of each
+  hour was cancelled while queued (~22% of runs showed `cancelled` — noise, not failures).
+  The repo is PUBLIC, so Actions minutes are free; long runs cost staleness, not money.
 - **Driving a batched `--regenerate` (the operational trap).** The same single-pending
   rule bites any batch you dispatch by hand: a batch that lands while the group is
   busy sits PENDING and is evicted by the Worker's next dispatch. **Do not assume

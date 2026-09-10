@@ -24,12 +24,17 @@ on:
         description: "Rebuild ONE vessel only (blank = all). Pair with regenerate to clear a bad stored trail."
         type: string
         default: ""
-  # Fallback only, every 6h. It used to be hourly, which collided with the
-  # Worker's own hourly dispatch: GitHub keeps a single pending run per
-  # concurrency group, so the second trigger of each hour was cancelled while
-  # queued (~22% of all runs showed as `cancelled` — noise, not failures).
+  # DAILY safety net only — the Worker's dispatch is the real trigger.
+  # This was every 6h, mirroring the Worker's own 6-hourly dispatch, on the theory that
+  # the two would interleave ~50 min apart. They do not: GitHub runs scheduled workflows
+  # best-effort and this one fired 4h23m late (06:00 -> 10:23) and 3h37m late
+  # (12:00 -> 15:37) on 2026-09-04, while the Worker's dispatch hit 12:59:07 exactly.
+  # So the cron cannot be reasoned about relative to the dispatch — it just doubled the
+  # run count at random offsets, and every extra run was another full pass. Demoted to
+  # once a day: it still covers a Worker outage / missing GITHUB_DISPATCH_TOKEN, which is
+  # all a fallback owes us. Drift of a few hours is irrelevant at daily cadence.
   schedule:
-    - cron: "0 */6 * * *"
+    - cron: "0 3 * * *"
 
 # Don't pile up overlapping runs; let an in-flight run finish.
 concurrency:

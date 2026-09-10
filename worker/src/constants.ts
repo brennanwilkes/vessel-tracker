@@ -38,7 +38,13 @@ export const PHANTOM_STALL_MS     = 20 * 60 * 1000;
 // Zone-visit write throttle: while a vessel sits in a named zone, only bump its
 // zone_visits row this often (else a parked ship would re-write every scan). First
 // sighting in a zone always inserts.
-export const ZONE_VISIT_THROTTLE_MS = 30 * 60 * 1000;
+// Sized against what the row is FOR — "which named places has this vessel visited",
+// where first_ts/last_ts only need to bracket presence. At 30 min this was ~12k rows/day
+// (145 of 330 live vessels sit inside a named zone at any moment, each bumping 48x/day,
+// and last_ts used to be in the zone_visits_zone index key so every bump cost 2 rows).
+// 6 h keeps the bracket meaningful while cutting bumps 12x; migration 008 drops last_ts
+// from the index so a bump no longer touches it at all.
+export const ZONE_VISIT_THROTTLE_MS = 6 * 60 * 60 * 1000;
 
 // How long a stationary vessel can go without a heartbeat last_seen update (ms).
 // Backoff: the longer a vessel has been parked (no position row), the less often it
@@ -50,17 +56,52 @@ export const ZONE_VISIT_THROTTLE_MS = 30 * 60 * 1000;
 // already writing positions rows. That made vessels-row churn the single largest write
 // source in the whole system (~61k of ~81k rows/day, index included). Every interval here
 // stays <= TTL/3 so a vessel survives two consecutive missed heartbeats.
-export const HEARTBEAT_MS = 60 * 60 * 1000;
-export const HEARTBEAT_BACKOFF: { parkedMs: number; intervalMs: number }[] = [
-  { parkedMs: 6 * 60 * 60 * 1000, intervalMs: 120 * 60 * 1000 }, // parked >6h → every 2h
-  { parkedMs: 1 * 60 * 60 * 1000, intervalMs:  90 * 60 * 1000 }, // parked >1h → every 90 min
-];
+//
+// The interval is now sized PER max_extent, because the TTLs differ by 12x and a flat
+// interval provisioned every vessel against the SHORTEST one. A global/foreign vessel
+// only has to stay inside a 72 h TTL, so heartbeating it hourly was ~24x over-provisioned
+// — and global/foreign is the bulk of the table. Each tier's intervals stay <= its own
+// TTL/3 (survives two consecutive missed beats).
+// Per-extent heartbeat schedule. `base` applies to a vessel that is under way (or has no
+// position history); `backoff` steps apply the longer it has been parked. MUST stay
+// <= LIVE_TTL_*_MS / 3 for the matching extent — see HEARTBEAT_BUDGET_NOTE in ingest.ts.
+export const HEARTBEAT_BY_EXTENT: Record<string, { base: number; backoff: { parkedMs: number; intervalMs: number }[] }> = {
+  // TTL 6 h → cap 2 h. Unchanged: this is the apartment-window view.
+  direct: {
+    base: 60 * 60 * 1000,
+    backoff: [
+      { parkedMs: 6 * 60 * 60 * 1000, intervalMs: 120 * 60 * 1000 },
+      { parkedMs: 1 * 60 * 60 * 1000, intervalMs:  90 * 60 * 1000 },
+    ],
+  },
+  // TTL 72 h (see LIVE_TTL_LOCAL_MS) → cap 24 h.
+  local: {
+    base: 8 * 60 * 60 * 1000,
+    backoff: [
+      { parkedMs: 24 * 60 * 60 * 1000, intervalMs: 24 * 60 * 60 * 1000 },
+      { parkedMs:  6 * 60 * 60 * 1000, intervalMs: 12 * 60 * 60 * 1000 },
+    ],
+  },
+  // TTL 72 h → cap 24 h.
+  global: {
+    base: 12 * 60 * 60 * 1000,
+    backoff: [
+      { parkedMs: 24 * 60 * 60 * 1000, intervalMs: 24 * 60 * 60 * 1000 },
+    ],
+  },
+};
 
 // Max age before a vessel is dropped from the /current response.
 // Direct/local vessels can miss multiple drain windows; keep them visible for a workday.
 // Global vessels update hourly; keep them through missed scans.
 export const LIVE_TTL_DIRECT_MS = 6 * 60 * 60 * 1000;
-export const LIVE_TTL_LOCAL_MS  = 6 * 60 * 60 * 1000;
+// 72 h, NOT 6 h. getCurrentVessels' WHERE clause has always compared max_extent='local'
+// against the GLOBAL cutoff (it binds ?3, never ?2), so 72 h is the TTL local vessels have
+// actually been getting. That was invisible while the constant said 6 h and the bind was
+// silently unused. HEARTBEAT_BY_EXTENT.local is sized against this 72 h — so if anyone
+// "fixes" the query back to a 6 h local cutoff they MUST shorten the local heartbeat with
+// it, or local vessels will age out of /current between beats.
+export const LIVE_TTL_LOCAL_MS  = 72 * 60 * 60 * 1000;
 export const LIVE_TTL_GLOBAL_MS = 72 * 60 * 60 * 1000;
 
 // Drain windows per tier (ms). Direct cron is every 1 min — leave headroom.
@@ -150,14 +191,23 @@ export const GLOBAL_SCAN_CRON       = '50 * * * *';       // owns :50–:59
 export const FOREIGN_DRAIN_MS       = 50_000;             // fits its 1-min slot (was 60 s)
 export const FOREIGN_SCAN_BOX_BATCH = 12;                     // boxes per connection. ceil(41/12)=4 ticks → each zone drained ~every 60 min (was 6 → ~105 min)
 export const FOREIGN_REFRESH_MS     = 6 * 60 * 60 * 1000;     // re-upsert a parked foreign vessel at most this often
-export const FOREIGN_MAX_NEW_PER_SCAN = 200;                  // cap initial rows/scan so a first run can't exhaust the write cap
+// Cap initial rows/scan so a busy world port can't exhaust the write cap. 200 x 96
+// scans/day is a 19,200 rows/day CEILING — it saturates once a port's regulars all have
+// rows, but every new MMSI in Singapore/Shanghai/Busan is another write, and world ports
+// produce a long tail of them forever. 25 caps the ceiling at ~2,400/day; a genuinely
+// relevant vessel is still picked up, just over more scans.
+export const FOREIGN_MAX_NEW_PER_SCAN = 25;
 // Foreign port-dwell track: a relevant vessel gets a position on first zone entry, then
 // at most one more per throttle while it stays in the zone (a sparse track, not a single
 // anchor). last_pos_ts derives from the latest positions row, so each write self-advances
-// the throttle. The per-scan cap is the hard ceiling: 96 scans/day × cap bounds the daily
-// foreign position writes (cap 25 → ≤~2,400/day) so a busy world port can't run away.
-export const FOREIGN_POSITION_THROTTLE_MS  = 30 * 60 * 1000;
-export const FOREIGN_MAX_POSITIONS_PER_SCAN = 25;
+// the throttle. The per-scan cap is the hard ceiling: SCANS/DAY × cap.
+// The old comment here said "96 scans/day → ≤2,400/day" and was STALE: FOREIGN_SCAN_CRON
+// is '3-49/4' = 12×/hr = 288 scans/day, so cap 25 was really a ≤7,200/day ceiling — 7% of
+// the whole free tier for sparse foreign port anchors. Cap 8 restores the ~2,300/day the
+// comment claimed. The throttle is also widened: a port-dwell anchor exists to show that a
+// vessel sat at a port, which does not need 30-min resolution.
+export const FOREIGN_POSITION_THROTTLE_MS  = 2 * 60 * 60 * 1000;
+export const FOREIGN_MAX_POSITIONS_PER_SCAN = 8;
 export const FOREIGN_RELEVANCE = {
   bigLenM: 100,   // any ≥100 m vessel at a Pacific-rim port is plausibly trans-Pacific → track
   midLenM: 70,    // 70–100 m only when its destination is a NA-Pacific-NW port

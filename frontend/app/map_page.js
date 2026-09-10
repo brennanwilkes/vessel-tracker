@@ -135,7 +135,14 @@ function currentExtent(vessel) {
 
 function markerOpacity(vessel) {
   if (vessel.mmsi === highlightedMmsi) return 1.0;
-  const age = Date.now() - vessel.last_seen;
+  // Age off the freshest evidence we have, not last_seen alone. A moving vessel writes a
+  // `positions` row WITHOUT a vessels-row upsert (that path is gated by vesselRowNeedsWrite),
+  // so last_seen only advances on a heartbeat — now 8 h local / 12 h global. Using it alone
+  // faded an actively-tracked ship toward the floor while its dot sat at a fresh position.
+  const lastHeard = vessel.last_pos_ts !== null && vessel.last_pos_ts > vessel.last_seen
+    ? vessel.last_pos_ts
+    : vessel.last_seen;
+  const age = Date.now() - lastHeard;
   const ttl = FADE_TTL_MS[currentExtent(vessel)] ?? FADE_TTL_MS.local;
   const remaining = Math.max(0, 1 - age / ttl);
   return Math.max(0.30, remaining);
@@ -202,6 +209,10 @@ function openSheet(vessel) {
   const lengthStr = vessel.length !== null ? ` · ${vessel.length}m` : '';
   const typeStr = vessel.vessel_type !== null ? ` · Type ${vessel.vessel_type}` : '';
   const isHighlighted = highlightedMmsi === vessel.mmsi;
+  // Same reasoning as markerOpacity: last_seen lags a moving vessel by up to a heartbeat.
+  const lastHeard = vessel.last_pos_ts !== null && vessel.last_pos_ts > vessel.last_seen
+    ? vessel.last_pos_ts
+    : vessel.last_seen;
 
   sheet.innerHTML = `
     <div class="sheet-handle"></div>
@@ -236,7 +247,7 @@ function openSheet(vessel) {
       <div class="detail-destination-label">Destination</div>
       <div class="detail-destination-value">${vessel.destination ?? '—'}</div>
     </div>
-    <div class="detail-footer">Updated ${formatAge(vessel.last_seen)}</div>
+    <div class="detail-footer">Updated ${formatAge(lastHeard)}</div>
   `;
 
   sheet.querySelector('.detail-highlight-btn').addEventListener('click', e => {

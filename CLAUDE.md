@@ -78,6 +78,75 @@ production.
 - Helpers only when used ≥2× (big) or ≥4× (small).
 - Vessel API returns MMSI as **number** — use `===` comparison with number literals, never string.
 
+## Write-budget round 2 — the 83% alert (2026-09-09)
+
+Cloudflare alerted at **83% of the 100k/day `rows_written` cap** despite the round-1 cuts
+below. Root cause was NOT volume — measured real `positions` are only **~4,039 rows/day**.
+It was four structural amplifiers, three of which the round-1 model never counted at all.
+
+**Measured, via the PUBLIC API only (no wrangler — the account was authed elsewhere):**
+- ~4,039 real position rows/day fleet-wide (`/track`, rate = points ÷ span; 95 of 330
+  vessels truncated at `TRACK_LIMIT` so absolute counts undercount, rates don't).
+- **145 of 330 live vessels sit inside a named zone at any moment** (106 local, 39 foreign)
+  — run `zoneOf` from `zones.ts` over `/current`.
+- Live fleet by `max_extent`: **local 194, global 121, direct 15.** Only 15 direct.
+- Precompute is NOT the hog: its own run log shows `points_written=446`,
+  `write_statements=599` per run. The 100k inferred points in D1 are accumulated history,
+  not daily churn. (A "precompute is churning" hypothesis was checked and DISPROVED here —
+  don't re-derive it; read `gh run view <id> --log | grep candidates=`.)
+
+**The amplifiers, in order of size:**
+
+1. **`enrichStaticData`'s gate never converged.** `WHERE ... AND (vessel_type IS NULL OR
+   length IS NULL OR destination IS NULL)` matches FOREVER for the many vessels that
+   legitimately never broadcast a `destination` (tugs, fishing, pleasure craft). Every
+   static broadcast rewrote the row through `COALESCE(?, existing)` with identical values —
+   a real row written, changing nothing, thousands of times a day. Now gated on the incoming
+   value actually DIFFERING from the stored one. **Trap when fixing this:** the old gate also
+   drove the `of_interest`/`max_extent` promotion as a side effect of firing on a NULL field,
+   so a convergent gate must keep "promotion still pending" as its own OR-clause or a vessel
+   whose type already qualifies is stranded un-promoted forever.
+2. **`zone_visits` bumps cost 2 rows each.** `zone_visits_zone` was keyed
+   `(zone_id, last_ts DESC)` and `last_ts` is exactly what a bump changes — the same
+   frequently-updated-column-in-an-index-key mistake round 1 fixed on `vessels_of_interest`.
+   Migration 008 re-keys it to `(zone_id)`; `ZONE_VISIT_THROTTLE_MS` 30 min → 6 h. ~24x cut.
+3. **Heartbeats were TTL-blind.** A flat `HEARTBEAT_MS` provisioned the WHOLE table against
+   the shortest TTL (direct, 6 h), but only 15 vessels are direct — the other ~226 have a
+   72 h TTL and were heartbeating ~24x more often than needed. Replaced by
+   `HEARTBEAT_BY_EXTENT` (direct 60 min unchanged; local 8 h; global 12 h), each ≤ its own
+   TTL/3.
+4. **Stale ceilings in the foreign scan.** Its comment claimed "96 scans/day → ≤2,400/day",
+   but `FOREIGN_SCAN_CRON` is `3-49/4` = **288 scans/day**, so cap 25 was really a
+   **7,200/day** ceiling. Cap → 8, `FOREIGN_POSITION_THROTTLE_MS` 30 min → 2 h,
+   `FOREIGN_MAX_NEW_PER_SCAN` 200 → 25 (that one was a 19,200/day ceiling).
+
+**`LIVE_TTL_LOCAL_MS` was a lie — it said 6 h, the query always used 72 h.**
+`getCurrentVessels` binds `?1`=direct and `?3`=global; `max_extent='local'` compares against
+**`?3`**, and `?2` (localCutoff) is bound but **never referenced**. So local vessels have
+always had a 72 h TTL. The constant now says 72 h to match reality. `HEARTBEAT_BY_EXTENT.local`
+is sized against that 72 h — **if anyone "fixes" the query to actually use `?2`, they must
+shorten the local heartbeat with it** or local vessels age out of `/current` between beats.
+
+**Deliberately NOT done: removing `AUTOINCREMENT` from `positions`.** The `sqlite_sequence`
+bump is a real ~4,039 rows/day (~4% of cap), but `INTEGER PRIMARY KEY AUTOINCREMENT` can only
+be dropped by rebuilding the table, and copying ~300k existing rows would itself burn 3+ days
+of write budget to save 4%/day. Revisit only if `positions` is being rebuilt anyway.
+
+**Marker fade must age off the FRESHEST evidence, not `last_seen`.** A moving vessel writes a
+`positions` row WITHOUT a vessels-row upsert (gated by `vesselRowNeedsWrite`), so `last_seen`
+only advances on a heartbeat. That was invisible at a 60-min heartbeat; at 8 h/12 h it faded
+actively-tracked ships toward the opacity floor and made the detail footer read hours stale
+while the dot sat at a fresh position. `markerOpacity` and the detail footer in `map_page.js`
+now age off `max(last_seen, last_pos_ts)`. **Any future heartbeat lengthening must re-check
+anything keyed on `last_seen`** — it is a "when did we last WRITE the row" timestamp, not
+"when did we last HEAR the vessel". (`frontend/config.js` `LIVE_TTL_MS` already had local=72h,
+which independently corroborated that the query's local TTL really is 72 h.)
+
+**Modelled result ≈ 21–24k/day (21–24% of cap), from ~83k.** Treat that as a MODEL with wide
+error bars — the `enrichStaticData` and foreign-initial-row terms are the two biggest and the
+least directly measurable. **The authoritative check is the Cloudflare D1 analytics dashboard
+over a full day**, and the public-API sampling caveats in round 1 below still apply.
+
 ## Write budget / maintenance mode (D1 free tier)
 
 The binding limit is **rows written (100k/day)**, not storage or reads (D1 reported

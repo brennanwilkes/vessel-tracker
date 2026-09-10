@@ -203,7 +203,36 @@ export async function enrichStaticData(env: Env, updates: StaticUpdate[]): Promi
            ELSE max_extent
          END
        WHERE mmsi = ?1
-         AND (vessel_type IS NULL OR length IS NULL OR destination IS NULL)`
+         -- Write ONLY if this static message actually changes something. The old gate was
+         -- "vessel_type IS NULL OR length IS NULL OR destination IS NULL", which NEVER
+         -- CONVERGES for the many vessels that legitimately never broadcast a destination
+         -- (tugs, fishing, pleasure craft). Those rows matched forever, so every static
+         -- broadcast rewrote the row via COALESCE with the identical values — a real D1
+         -- row written, thousands of times a day, changing nothing. Comparing the incoming
+         -- value against the stored one makes enrichment converge: once a field is filled,
+         -- only a genuine change writes.
+         AND (
+              (?2 IS NOT NULL AND (name        IS NULL OR name        <> ?2))
+           OR (?3 IS NOT NULL AND (vessel_type IS NULL OR vessel_type <> ?3))
+           OR (?4 IS NOT NULL AND (length      IS NULL OR length      <> ?4))
+           OR (?5 IS NOT NULL AND (destination IS NULL OR destination <> ?5))
+           -- The old gate also drove the of_interest / max_extent promotion as a SIDE
+           -- EFFECT of firing on a NULL field. Convergence would silently strand a vessel
+           -- whose type/length already qualifies but was stored before it was classified
+           -- (the foreign scan writes initial rows with of_interest=0). So make the
+           -- pending promotion its own reason to write. Still convergent: once promoted,
+           -- of_interest=1 / max_extent<>'direct' and these stop matching.
+           OR (of_interest = 0 AND (
+                    (COALESCE(?3, vessel_type) BETWEEN 70 AND 89)
+                 OR (COALESCE(?3, vessel_type) BETWEEN 60 AND 69 AND COALESCE(?4, length) >= 50)
+                 OR COALESCE(?4, length) >= 50
+              ))
+           OR (max_extent = 'direct' AND (
+                    (COALESCE(?3, vessel_type) BETWEEN 70 AND 89)
+                 OR (COALESCE(?3, vessel_type) BETWEEN 60 AND 69 AND COALESCE(?4, length) >= 50)
+                 OR COALESCE(?4, length) >= 50
+              ))
+         )`
     ).bind(u.mmsi, u.name, u.vesselType, u.length, u.destination)
   );
   await env.VESSELS_DB.batch(stmts);
@@ -432,11 +461,20 @@ export async function setScanCursor(env: Env, key: string, value: number): Promi
 // scan) can't free the new holder's lock.
 const AIS_LOCK_KEY = 'ais_conn_lock';
 const AIS_LOCK_POLL_MS = 1000;
+let aisLockRowEnsured = false;
 const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
 
 // Returns the expiry token to pass to releaseAisLock, or null if it gave up after maxWaitMs.
 export async function acquireAisLock(env: Env, ttlMs: number, maxWaitMs: number, holder: string): Promise<number | null> {
-  await env.VESSELS_DB.prepare(`INSERT OR IGNORE INTO scan_meta (key,value) VALUES (?1, 0)`).bind(AIS_LOCK_KEY).run();
+  // The lock row is seeded by migration 008. This used to run an INSERT OR IGNORE on EVERY
+  // acquire (~1,700/day) for a row that can only be created once. It is kept only as a
+  // self-heal, once per isolate: if the row is ever missing, the conditional UPDATE below
+  // matches 0 rows forever and every drain silently skips — the "crons fire but nothing is
+  // written" stall in CLAUDE.md. Once per isolate is a rounding error; per acquire was not.
+  if (!aisLockRowEnsured) {
+    await env.VESSELS_DB.prepare(`INSERT OR IGNORE INTO scan_meta (key,value) VALUES (?1, 0)`).bind(AIS_LOCK_KEY).run();
+    aisLockRowEnsured = true;
+  }
   const deadline = Date.now() + maxWaitMs;
   for (;;) {
     const now = Date.now();

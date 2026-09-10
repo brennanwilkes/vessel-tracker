@@ -1,7 +1,7 @@
 import type { Env, Tier, MaxExtent, Vessel } from './types';
 import {
   DIRECT_BOUNDING_BOX, LOCAL_BOUNDING_BOX, GLOBAL_BOUNDING_BOX,
-  HEARTBEAT_MS, HEARTBEAT_BACKOFF,
+  HEARTBEAT_BY_EXTENT,
   DIRECT_DRAIN_MS, LOCAL_DRAIN_MS, GLOBAL_DRAIN_MS,
   PHANTOM_SPEED_MIN_KN, PHANTOM_STALL_MS,
   GLOBAL_MMSI_CHUNK_SIZE, GLOBAL_SCAN_ATTEMPTS, GLOBAL_SCAN_BUDGET_MS,
@@ -20,14 +20,21 @@ import {
   type VesselUpsert, type PositionInsert, type VesselState, type ZoneObservation,
 } from './storage';
 
-// Stationary vessels heartbeat less often the longer they've been parked.
-function heartbeatIntervalMs(prev: VesselState | undefined, nowMs: number): number {
-  if (prev === undefined || prev.last_pos_ts === null) return HEARTBEAT_MS;
+// HEARTBEAT_BUDGET_NOTE — a heartbeat's ONLY job is to keep `last_seen` inside the live
+// TTL that getCurrentVessels enforces for the vessel's max_extent. So the interval is
+// sized per extent (HEARTBEAT_BY_EXTENT) and must stay <= that extent's TTL/3. A flat
+// interval provisioned the whole table against the SHORTEST TTL (direct, 6 h), which meant
+// global/foreign vessels — the bulk of the rows — heartbeat ~24x more often than their
+// 72 h TTL requires. Stationary vessels additionally back off the longer they're parked.
+function heartbeatIntervalMs(prev: VesselState | undefined, maxExtent: MaxExtent, nowMs: number): number {
+  const sched = HEARTBEAT_BY_EXTENT[maxExtent];
+  if (sched === undefined) throw new Error(`heartbeatIntervalMs: unknown max_extent ${maxExtent}`);
+  if (prev === undefined || prev.last_pos_ts === null) return sched.base;
   const parkedMs = nowMs - prev.last_pos_ts;
-  for (const step of HEARTBEAT_BACKOFF) {
+  for (const step of sched.backoff) {
     if (parkedMs > step.parkedMs) return step.intervalMs;
   }
-  return HEARTBEAT_MS;
+  return sched.base;
 }
 
 function assessMovement(v: Vessel, prev: VesselState | undefined, tier: Tier, nowMs: number): { moved: boolean; effectiveSpeed: number | null; forceUpsert: boolean } {
@@ -68,7 +75,7 @@ function vesselRowNeedsWrite(prev: VesselState | undefined, of_interest: number,
   if (max_extent !== prev.max_extent) return true;
   if (firstDirect !== null) return true;
   if (direct_entry_count !== prev.direct_entry_count) return true;
-  return (nowMs - prev.last_seen) >= heartbeatIntervalMs(prev, nowMs);
+  return (nowMs - prev.last_seen) >= heartbeatIntervalMs(prev, max_extent, nowMs);
 }
 
 function tierOf(lat: number, lon: number): Tier {
