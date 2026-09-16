@@ -10,7 +10,13 @@
 // plus simplifyForSpline, used by the precompute to store the fewest waypoints
 // whose spline still reproduces a routed segment. See frontend/CLAUDE.md.
 import { haversineKm, unwrapLon } from './geo.js';
-import { MOVING_SPEED_KN, TRAIL_GAP_SEVER_MS, TRAIL_SIMPLIFY } from '../config.js';
+import { MOVING_SPEED_KN, TRAIL_GAP_SEVER_MS, TRAIL_SIMPLIFY, LOCAL_BOUNDING_BOX } from '../config.js';
+
+// A point lies inside the local (home) box — Victoria / Puget Sound / the
+// Salish Sea. Far-wrapped longitudes (an unwrapped track can pass ±180) are
+// never inside this box, so the test works on unwrapped points unchanged.
+const inLocalBox = (p) => p.lat >= LOCAL_BOUNDING_BOX.sw[0] && p.lat <= LOCAL_BOUNDING_BOX.ne[0]
+  && p.lon >= LOCAL_BOUNDING_BOX.sw[1] && p.lon <= LOCAL_BOUNDING_BOX.ne[1];
 
 export const SPLINE_SAMPLES = 12;
 
@@ -47,6 +53,21 @@ export function dedup(points) {
   return out;
 }
 
+// Client replay of a routed track. The server routes over dedup(allPoints) of RAW
+// real fixes (computeControlPoints → splitJourneys(dedup(allPoints))); the client
+// receives the same reals with the inferred fakes inlined and must collapse
+// near-duplicate REAL fixes the same way BEFORE merging — otherwise a fake
+// interpolated between a real pair < DEDUP_KM apart makes the naive union dedup
+// keep BOTH reals (dedup compares against the last KEPT point, i.e. the packed
+// fake, not the other real), and the resurrected pair perturbs Catmull-Rom
+// tangents until the spline bulges into land (27 precompute defects on maunawili).
+export function replayTrack(points) {
+  const reals = points.filter(p => !p.fake);
+  const fakes = points.filter(p => p.fake);
+  if (fakes.length === 0) return dedup(reals);
+  return dedup([...dedup(reals), ...fakes].sort((a, b) => a.t - b.t));
+}
+
 // Break the trail into journeys at stops only: the vessel was stationary at its
 // last fix (speed ~0) and then a long gap followed — it parked and we lost it.
 // Wherever it resurfaces starts a fresh journey/curve. A vessel still moving
@@ -58,6 +79,15 @@ export function dedup(points) {
 // a gap the server already chose to bridge — so two reals separated by fakes are
 // no longer adjacent and the gap is (correctly) not severed. All-real input has
 // `fake` undefined, so this is a no-op for the server/tests.
+//
+// Severing is reserved for GENUINELY AMBIGUOUS stops: both bracketing fixes
+// inside the home box (e.g. a vessel parked in Victoria that resurfaces in
+// Tacoma — a real hop or a lost one, we can't tell). Any gap with a far end is
+// an EXPECTED TRANSIT (Victoria → Asia, Salish Sea → New York, a berth whose
+// vessel resurfaced across an ocean): severing it opens a hole where the dashed
+// A*-routed bridge belongs, so the journey stays intact and `routeWater` draws
+// the gap. A parked far berth stays one journey too — its straight berth legs
+// are handled by `buildControlPoints`' nearest-water splice, not by cutting.
 export function splitJourneys(points) {
   const journeys = [];
   let cur = [points[0]];
@@ -66,7 +96,10 @@ export function splitJourneys(points) {
     const sever = TRAIL_GAP_SEVER_MS[points[i - 1].tier] ?? TRAIL_GAP_SEVER_MS.local;
     const parked = (points[i - 1].speed ?? 0) <= MOVING_SPEED_KN;
     const realPair = !points[i].fake && !points[i - 1].fake;
-    if (realPair && sever !== null && gap > sever && parked) { journeys.push(cur); cur = [points[i]]; }
+    if (realPair && sever !== null && gap > sever && parked
+        && inLocalBox(points[i - 1]) && inLocalBox(points[i])) {
+      journeys.push(cur); cur = [points[i]];
+    }
     else cur.push(points[i]);
   }
   journeys.push(cur);

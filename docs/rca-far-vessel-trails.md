@@ -82,13 +82,25 @@ Nothing else is wrong for this class of vessel: the trail exists, is routed (105
 fakes), the marker follows it, culling (runInView) handles ±360, and the trail
 signature/redraw are view-independent.
 
-## Defect A fix (DRAFTED, ALREADY APPLIED, UNCOMMITTED)
+## Defect A fix (COMMITTED, DEPLOYED, VERIFIED 2026-09-15)
+
+Landed in `78fc517` ("fix: Reduced quotas"); frontend Pages deploy + worker deploy
+both green on that SHA. Confirmed live against prod:
 
 ```js
 const m = markers.get(mmsi);
 const center = m !== undefined ? m.getLatLng() : [v.lat, v.lon];
-map.setView(center, map.getZoom(), { animate: true });
+map.setView(center, map.getZoom(), { animate: true });   // map_page.js:770-772
 ```
+
+- Deployed bundle (`https://brennanwilkes.github.io/vessel-tracker/app/map_page.js`)
+  contains the fix (lines 765-771).
+- Fresh `/vessel/249011000/track` still unwraps to the same trail tip (lon −225.1,
+  span 103°, 105 fakes) → `turn = round((−225.06 − +134.94)/360) = −1` → the marker
+  and now the centred view land on the west copy where the boat actually renders.
+- Raw-centring is gone: only `map_page.js:770-772` navigates on highlight, and both
+  highlight entrances (list-card tap with pan, marker click with pan=false) route
+  through it.
 
 Centring on the marker lands on the boat wherever its trail put it. Fallback to raw
 if the marker isn't drawn yet (first paint / not-yet-fetched trail → `_lonTurn` 0 anyway).
@@ -132,7 +144,7 @@ spending time.
 
 ## Resume pointers (after context compaction)
 
-- `frontend/app/map_page.js:746-763` — the Defect A fix site (uncommitted edit).
+- `frontend/app/map_page.js:760-772` — the Defect A fix (committed `78fc517`, deployed, verified).
 - `frontend/app/trail_spline.js:27-48,61-74` — `unwrapTrack` (anchors frame on FIRST
   point) + `splitJourneys` (the Defect B sever; `TRAIL_GAP_SEVER_MS` in
   `frontend/config.js:51`).

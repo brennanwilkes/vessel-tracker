@@ -31,7 +31,7 @@ import { join } from 'node:path';
 
 import { harvestInferredSegments } from '../../frontend/app/trail_geometry.js';
 import { ensureRegionsForExtent, extentOf, isLand } from '../../frontend/app/region_coast.js';
-import { dedup, splitJourneys, catmullRom } from '../../frontend/app/trail_spline.js';
+import { splitJourneys, catmullRom, replayTrack } from '../../frontend/app/trail_spline.js';
 import { haversineKm, wrapLon } from '../../frontend/app/geo.js';
 
 // 2: unwrapped-longitude frame + bi-segmented ocean routing (routeOceanGap). Every
@@ -44,7 +44,7 @@ import { haversineKm, wrapLon } from '../../frontend/app/geo.js';
 // Bumping invalidates older hashes for any vessel that gets EXAMINED — but the
 // freshness heuristic skips unexamined vessels entirely, so a one-off `--regenerate`
 // dispatch is still required to rebuild the existing backlog.
-const GENERATOR_VERSION = 3;
+const GENERATOR_VERSION = 4;
 const DB_NAME = 'vessel-tracker';
 const API_BASE = 'https://api.cloudflare.com/client/v4';
 const READ_CHUNK = 60;   // mmsis per IN(...) read
@@ -191,7 +191,7 @@ function curveIsLandFree(points, existingFakes) {
   const fakes = existingFakes.map(f => ({ lat: f.lat, lon: f.lon, t: f.t, fake: true, synthetic: f.dashed === 1 }));
   const reals = points.map(p => ({ lat: p.lat, lon: p.lon, t: p.t, tier: p.tier, speed: p.speed, fake: false, synthetic: false }));
   const combined = [...reals, ...fakes].sort((a, b) => a.t - b.t);
-  for (const journey of splitJourneys(dedup(combined))) {
+  for (const journey of splitJourneys(replayTrack(combined))) {
     if (journey.length < 2) continue;
     for (const s of catmullRom(journey)) {
       if (!isLand(s.lat, s.lon)) continue;

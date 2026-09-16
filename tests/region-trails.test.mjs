@@ -20,7 +20,7 @@
 import { readFileSync, readdirSync } from 'fs';
 import { ensureRegionsForExtent, extentOf, isLand } from '../frontend/app/region_coast.js';
 import { harvestInferredSegments } from '../frontend/app/trail_geometry.js';
-import { dedup, splitJourneys, catmullRom } from '../frontend/app/trail_spline.js';
+import { splitJourneys, catmullRom, replayTrack } from '../frontend/app/trail_spline.js';
 import { haversineKm } from '../frontend/app/geo.js';
 
 // A spline sample on land deeper than this is a real defect. Shallower clips are
@@ -51,7 +51,7 @@ for (const file of readdirSync(dir).filter(f => f.endsWith('.json')).sort()) {
   const combined = [...real.map(p => ({ ...p, fake: false, synthetic: false })), ...fakes].sort((a, b) => a.t - b.t);
 
   let defects = 0, maxPen = 0, worst = null;
-  for (const journey of splitJourneys(dedup(combined))) {
+  for (const journey of splitJourneys(replayTrack(combined))) {
     if (journey.length < 2) continue;
     for (const s of catmullRom(journey)) {
       if (!isLand(s.lat, s.lon)) continue;

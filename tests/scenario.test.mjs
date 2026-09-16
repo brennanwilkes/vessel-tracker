@@ -20,7 +20,7 @@ import { pointInAnyLand, LAND_POLYGONS } from './lib.mjs';
 import { haversineKm } from '../frontend/app/geo.js';
 import { harvestInferredSegments } from '../frontend/app/trail_geometry.js';
 import { ensureRegionsForExtent, extentOf } from '../frontend/app/region_coast.js';
-import { dedup, splitJourneys, catmullRom } from '../frontend/app/trail_spline.js';
+import { splitJourneys, catmullRom, replayTrack } from '../frontend/app/trail_spline.js';
 
 const FINE = LAND_POLYGONS.length;
 const COARSE_MAX_PEN_M = 2500;
@@ -70,7 +70,7 @@ const fakes = segs.flatMap(s => s.fakes.map(f => ({ lat: f.lat, lon: f.lon, t: f
 const combined = [...pts.map(p => ({ lat: p.lat, lon: p.lon, t: p.t, tier: p.tier, speed: p.speed, fake: false, synthetic: false })), ...fakes].sort((a, b) => a.t - b.t);
 
 let defects = 0, maxPen = 0;
-for (const journey of splitJourneys(dedup(combined))) {
+for (const journey of splitJourneys(replayTrack(combined))) {
   for (const s of catmullRom(journey)) {
     if (pointInAnyLand([s.lat, s.lon]) < 0) continue;
     if (onLandInputs.some(r => haversineKm(r.lat, r.lon, s.lat, s.lon) < NEAR_REAL_KM)) continue;

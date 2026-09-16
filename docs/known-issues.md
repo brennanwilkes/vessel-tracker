@@ -224,7 +224,7 @@ tuned against.
 
 ## 7. Highlight centring ignores the marker's world copy (dateline vessels)
 
-**Status:** RCA done, fix drafted `frontend/app/map_page.js:746-763` (uncommitted).
+**Status:** Fixed — committed `78fc517`, deployed, verified against prod 2026-09-15.
 Full writeup: `docs/rca-far-vessel-trails.md`.
 
 **Symptom (TITUS 249011000):** a BC→Japan vessel renders its dot in the west world

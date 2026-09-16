@@ -8,7 +8,7 @@ import { subscribe as subscribeHighlight, getHighlight, setHighlight, clearHighl
 // Pure spline pipeline only — NO coastline/A* in the browser. The trail's
 // inferred (A*-routed) waypoints are precomputed server-side and arrive inline
 // in /track (flagged `fake`/`dashed`); the client just splines the union.
-import { dedup, splitJourneys, catmullRom, runsBySynthetic } from './trail_spline.js';
+import { splitJourneys, catmullRom, runsBySynthetic, replayTrack } from './trail_spline.js';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -343,7 +343,7 @@ function clientRuns(allPoints) {
     fake: p.fake === true, synthetic: p.dashed === 1,
   }));
   const runs = [];
-  for (const journey of splitJourneys(dedup(ctrl))) {
+  for (const journey of splitJourneys(replayTrack(ctrl))) {
     if (journey.length < 2) continue;
     for (const run of runsBySynthetic(catmullRom(journey))) {
       if (run.samples.length >= 2) runs.push(run);

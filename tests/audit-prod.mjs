@@ -24,7 +24,7 @@
 //                      `fake=false` points means routing produced nothing (§4a).
 import { pointInAnyLand, LAND_POLYGONS } from './lib.mjs';
 import { haversineKm } from '../frontend/app/geo.js';
-import { dedup, splitJourneys, catmullRom } from '../frontend/app/trail_spline.js';
+import { splitJourneys, catmullRom, replayTrack } from '../frontend/app/trail_spline.js';
 import { isLand as regionIsLand, hasFineLand, ensureRegionsForExtent, extentOf } from '../frontend/app/region_coast.js';
 import { WORKER_URL } from '../frontend/config.js';
 
@@ -72,7 +72,7 @@ async function audit(mmsi) {
   spans.sort((x, y) => y.d - x.d);
 
   let near = 0, away = 0, fine = 0, coarse = 0, maxPenM = 0, worst = null, peakLat = -90;
-  for (const journey of splitJourneys(dedup(pts))) {
+  for (const journey of splitJourneys(replayTrack(pts))) {
     if (journey.length < 2) continue;
     for (const s of catmullRom(journey)) {
       if (s.lat > peakLat) peakLat = s.lat;

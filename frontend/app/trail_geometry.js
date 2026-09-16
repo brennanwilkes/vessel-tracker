@@ -291,17 +291,31 @@ export function buildControlPoints(journey, route = true, narrowWeight, doDenois
       // heading — that read as a sharp kink at the real→inferred boundary.
       const entryBearing = i >= 2 ? bearingDeg(real[i - 2][0], real[i - 2][1], a[0], a[1]) : undefined;
       const exitBearing = i + 1 < real.length ? bearingDeg(b[0], b[1], real[i + 1][0], real[i + 1][1]) : undefined;
+      // A BERTH fix sits ON our "land" — a wharf is land at 25 m coastline
+      // resolution — so no water route to that endpoint exists and routeWater's
+      // grid-cell snap can pick a channel on the wrong side of a pier (the
+      // observed approach hairpins). Route to/from the NEAREST water point and
+      // splice the straight leg to/from the berth as inference: the berth fix
+      // is real, trust the boat across the last few hundred metres of pier.
+      // Falls back to the raw fix when no water is within reach (a genuine
+      // coverage gap, e.g. a river simplified shut — don't invent a route).
+      const aW = isLand(a[0], a[1]) ? nearestWaterBeyond(a[0], a[1]) : null;
+      const bW = isLand(b[0], b[1]) ? nearestWaterBeyond(b[0], b[1]) : null;
       const raw = ocean
-        ? routeOceanGap(a, b, narrowWeight, entryBearing, exitBearing)
-        : routeAroundLand(a, b, narrowWeight, entryBearing, exitBearing);
+        ? routeOceanGap(aW || a, bW || b, narrowWeight, entryBearing, exitBearing)
+        : routeAroundLand(aW || a, bW || b, narrowWeight, entryBearing, exitBearing);
       if (raw && raw.length > 2) {
         // An ocean spine is already smooth and its spans are ~100 km; running
         // smoothRoute over it would densify then land-check every 100 m of an
         // ocean crossing. Its short A*-routed detours are smoothed in place.
         const wp = ocean ? raw : smoothRoute(raw);
         const t0 = journey[i - 1].t, t1 = journey[i].t;
-        for (let k = 1; k < wp.length - 1; k++) {
-          ctrl.push({ lat: wp[k][0], lon: wp[k][1], t: t0 + (t1 - t0) * (k / (wp.length - 1)), synthetic: true, fake: true });
+        const inferred = [];
+        if (aW) inferred.push({ lat: aW[0], lon: aW[1] });
+        for (let k = 1; k < wp.length - 1; k++) inferred.push({ lat: wp[k][0], lon: wp[k][1] });
+        if (bW) inferred.push({ lat: bW[0], lon: bW[1] });
+        for (let m = 0; m < inferred.length; m++) {
+          ctrl.push({ ...inferred[m], t: t0 + (t1 - t0) * ((m + 1) / (inferred.length + 1)), synthetic: true, fake: true });
         }
       }
     }

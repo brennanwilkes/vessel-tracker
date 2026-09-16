@@ -14,7 +14,7 @@ import { readFileSync, readdirSync } from 'fs';
 import { pointInAnyLand, LAND_POLYGONS } from './lib.mjs';
 import { haversineKm } from '../frontend/app/geo.js';
 import { harvestInferredSegments, computeControlPoints } from '../frontend/app/trail_geometry.js';
-import { dedup, splitJourneys, catmullRom } from '../frontend/app/trail_spline.js';
+import { splitJourneys, catmullRom, replayTrack } from '../frontend/app/trail_spline.js';
 
 const MAX_LAND_PENETRATION_M = 150;
 const FINE_COUNT = LAND_POLYGONS.length;
@@ -41,7 +41,7 @@ function clientReconstruct(realPts, segments) {
   })));
   const reals = realPts.map(p => ({ lat: p.lat, lon: p.lon, t: p.t, tier: p.tier, speed: p.speed, fake: false, synthetic: false }));
   const combined = [...reals, ...fakes].sort((a, b) => a.t - b.t);
-  return splitJourneys(dedup(combined));
+  return splitJourneys(replayTrack(combined));
 }
 
 let failures = 0;
