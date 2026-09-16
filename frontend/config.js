@@ -20,13 +20,20 @@ export const LOCAL_BOUNDING_BOX = { sw: [47.0, -128.7], ne: [51.2, -122.0] };
 
 export const WORKER_URL = 'https://vessel-tracker-api.brennan-a53.workers.dev';
 
-export const POLL_INTERVAL_MS = 30_000;
+// Poll cadence for /current. Sized to the DATA's own update rate, not to the
+// display: the direct scan (which writes the apartment-window dots) fires every
+// 2 min, so a faster poll re-reads the same rows. D1 free tier bills reads
+// (5M rows/day) — at 30 s this poll alone burned ~4-6M rows/day. See
+// worker/CLAUDE.md "Write budget / maintenance mode".
+export const POLL_INTERVAL_MS = 120_000;
 
 // Speed threshold below which a vessel renders as a dot instead of a directional arrow
 export const MOVING_SPEED_KN = 0.5;
 
-// Trail cache TTL — refetch only when older than this
-export const TRAIL_TTL_MS = 120_000;
+// Trail cache TTL — trails are historical geometry (the live dot updates via
+// /current), so 30 min is plenty. Was 2 min, which refetched every on-screen
+// vessel's full 500-point trail — the single largest D1 read cost by far.
+export const TRAIL_TTL_MS = 30 * 60 * 1000;
 
 // How long a tier's vessels stay on screen after last_seen.
 // Must stay in sync with worker/src/constants.ts LIVE_TTL_*_MS.

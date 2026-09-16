@@ -463,10 +463,22 @@ async function scheduleTrails(visibleVessels, token) {
   // from the last local fix to a distant current position — cutting across land.
   const TRAIL_TIERS = ['direct', 'local', 'global'];
 
+  // Fetch trails only for vessels near the current view, plus the highlighted
+  // one (its detail-sheet trail is being watched). Every on-screen vessel's full
+  // 500-point trail refetched every 2 min was the biggest D1 read cost in the
+  // project (~100M+ rows/day with the map open — the whole 5M/day free budget
+  // in under an hour). Off-view vessels keep their cached trail; panning back
+  // within the TTL renders from cache instantly. Caches/pruning still cover the
+  // full filtered set so panning doesn't drop usable geometry.
+  const viewBounds = map !== null ? map.getBounds().pad(0.5) : null;
+
   for (const vessel of visibleVessels) {
     if (token !== trailReqToken) break;
     if (!lastSettings.trail[vesselCategory(vessel)]) continue;
     if (!passesVesselTypeFilter(vessel, lastSettings.vesselType)) continue;
+    if (viewBounds !== null
+        && highlightedMmsi !== vessel.mmsi
+        && !viewBounds.contains([vessel.lat, vessel.lon])) continue;
     getTrail(vessel.mmsi, TRAIL_TIERS).then(points => drawTrail(vessel, points, token));
   }
 }
@@ -547,6 +559,8 @@ function onVesselsUpdate(vessels, error) {
   if (error !== null) {
     console.error('[map] poll error:', error);
     if (statusEl !== null) {
+      // Quota exhaustion and transient fetch failures both just keep the last good
+      // vessels on the map and explain themselves in the status chip.
       statusEl.innerHTML = `<span style="color:var(--red)">⚠ ${error.message}</span>`;
     }
     return;
@@ -747,7 +761,16 @@ export function mount(root) {
     highlightedMmsi = mmsi;
     if (pan !== false && mmsi !== null && map !== null) {
       const v = lastVessels.find(v => v.mmsi === mmsi);
-      if (v !== undefined) map.setView([v.lat, v.lon], map.getZoom(), { animate: true });
+      if (v !== undefined) {
+        // The marker lives in its trail's world copy: drawTrail moved it to a
+        // dateline-crossing trail's unwrapped lon (±360 vs the raw /current
+        // value). Center on the marker (which follows the trail) rather than the
+        // raw position, or a BC→Japan vessel lands you on empty ocean with the
+        // boat a full world-copy away.
+        const m = markers.get(mmsi);
+        const center = m !== undefined ? m.getLatLng() : [v.lat, v.lon];
+        map.setView(center, map.getZoom(), { animate: true });
+      }
     }
     render();
   });

@@ -9,60 +9,89 @@ import { LIVE_TTL_DIRECT_MS, LIVE_TTL_LOCAL_MS, LIVE_TTL_GLOBAL_MS, GITHUB_REPO,
 const TRACK_LIMIT = 500;
 const VALID_TIERS = new Set<Tier>(['direct', 'local', 'global']);
 
+// Classify the D1 free-tier daily quota error. When the quota is exhausted EVERY
+// query rejects, so each route throws on its first read/write. Without this the
+// unhandled rejection surfaced as Cloudflare error 1101 — a crashing Worker with
+// NO Access-Control-Allow-Origin header, which the browser misreads as a CORS
+// failure. Return a structured, CORS'd 503 instead so the UI can tell the user
+// "daily data allowance reached (resets at UTC midnight)".
+function quotaKind(err: unknown): 'read' | 'write' | null {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (/daily row read limit/i.test(msg)) return 'read';
+  if (/daily row write limit/i.test(msg)) return 'write';
+  return null;
+}
+
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
+    if (req.method === 'OPTIONS') return handleOptions(req, env);
+
     const url = new URL(req.url);
 
-    if (req.method === 'OPTIONS') return handleOptions(req, env);
-    if (req.method !== 'GET') return errorJson(req, env, 405, 'Method not allowed');
+    // Everything below touches D1 and can throw (quota exhaustion, transient
+    // DB errors). Always answer with CORS'd JSON so a backend failure can never
+    // again present as a mysterious browser CORS block.
+    try {
+      if (req.method !== 'GET') return errorJson(req, env, 405, 'Method not allowed');
 
-    if (url.pathname === '/current') {
-      const vessels = await getCurrentVessels(env, LIVE_TTL_DIRECT_MS, LIVE_TTL_LOCAL_MS, LIVE_TTL_GLOBAL_MS);
-      return json(req, env, 200, { vessels }, { 'Cache-Control': 'no-store' });
+      if (url.pathname === '/current') {
+        const vessels = await getCurrentVessels(env, LIVE_TTL_DIRECT_MS, LIVE_TTL_LOCAL_MS, LIVE_TTL_GLOBAL_MS);
+        return json(req, env, 200, { vessels }, { 'Cache-Control': 'no-store' });
+      }
+
+      const trackMatch = url.pathname.match(/^\/vessel\/(\d+)\/track$/);
+      if (trackMatch !== null) {
+        const mmsi = parseInt(trackMatch[1], 10);
+        const tierParam = url.searchParams.get('tier');
+        const tiers: Tier[] = tierParam
+          ? tierParam.split(',').filter((t): t is Tier => VALID_TIERS.has(t as Tier))
+          : [];
+
+        const [points, inferred] = await Promise.all([
+          getTrack(env, mmsi, tiers, TRACK_LIMIT),
+          getInferredTrack(env, mmsi, tiers),
+        ]);
+
+        // Combined response: real fixes UNION precomputed inferred (A*-routed)
+        // waypoints, annotated. Newest-first (the established /track contract); the
+        // client re-splines the union with pure math (no coastline) and dashes the
+        // `dashed` runs. Inferred points carry the tier of their bracketing reals
+        // so the client's per-tier trail filter keeps/hides them together.
+        const combined = [
+          ...points.map(p => ({ lat: p.lat, lon: p.lon, speed: p.speed, heading: p.heading, t: p.ts, tier: p.tier, fake: false, dashed: 0 })),
+          ...inferred.map(p => ({ lat: p.lat, lon: p.lon, speed: null, heading: null, t: p.t, tier: p.tier, fake: true, dashed: p.dashed })),
+        ].sort((a, b) => b.t - a.t);
+
+        return json(
+          req, env, 200,
+          { points: combined },
+          { 'Cache-Control': 'public, max-age=60' }
+        );
+      }
+
+      const zonesMatch = url.pathname.match(/^\/vessel\/(\d+)\/zones$/);
+      if (zonesMatch !== null) {
+        const mmsi = parseInt(zonesMatch[1], 10);
+        const visits = await getZoneVisits(env, mmsi);
+        const zones = visits.map(v => {
+          const z = zoneMeta(v.zone_id);
+          return { zone_id: v.zone_id, name: z?.name ?? v.zone_id, kind: z?.kind ?? 'port', lat: v.lat, lon: v.lon, first_t: v.first_ts, last_t: v.last_ts };
+        });
+        return json(req, env, 200, { zones }, { 'Cache-Control': 'public, max-age=300' });
+      }
+
+      return errorJson(req, env, 404, 'Not found');
+    } catch (err) {
+      const kind = quotaKind(err);
+      if (kind !== null) {
+        return json(req, env, 503,
+          { error: 'd1_quota', kind, message: 'D1 free-tier daily row read limit reached' },
+          { 'Cache-Control': 'no-store' }
+        );
+      }
+      console.error('[fetch] handler error:', err);
+      return errorJson(req, env, 500, 'Internal error');
     }
-
-    const trackMatch = url.pathname.match(/^\/vessel\/(\d+)\/track$/);
-    if (trackMatch !== null) {
-      const mmsi = parseInt(trackMatch[1], 10);
-      const tierParam = url.searchParams.get('tier');
-      const tiers: Tier[] = tierParam
-        ? tierParam.split(',').filter((t): t is Tier => VALID_TIERS.has(t as Tier))
-        : [];
-
-      const [points, inferred] = await Promise.all([
-        getTrack(env, mmsi, tiers, TRACK_LIMIT),
-        getInferredTrack(env, mmsi, tiers),
-      ]);
-
-      // Combined response: real fixes UNION precomputed inferred (A*-routed)
-      // waypoints, annotated. Newest-first (the established /track contract); the
-      // client re-splines the union with pure math (no coastline) and dashes the
-      // `dashed` runs. Inferred points carry the tier of their bracketing reals
-      // so the client's per-tier trail filter keeps/hides them together.
-      const combined = [
-        ...points.map(p => ({ lat: p.lat, lon: p.lon, speed: p.speed, heading: p.heading, t: p.ts, tier: p.tier, fake: false, dashed: 0 })),
-        ...inferred.map(p => ({ lat: p.lat, lon: p.lon, speed: null, heading: null, t: p.t, tier: p.tier, fake: true, dashed: p.dashed })),
-      ].sort((a, b) => b.t - a.t);
-
-      return json(
-        req, env, 200,
-        { points: combined },
-        { 'Cache-Control': 'public, max-age=60' }
-      );
-    }
-
-    const zonesMatch = url.pathname.match(/^\/vessel\/(\d+)\/zones$/);
-    if (zonesMatch !== null) {
-      const mmsi = parseInt(zonesMatch[1], 10);
-      const visits = await getZoneVisits(env, mmsi);
-      const zones = visits.map(v => {
-        const z = zoneMeta(v.zone_id);
-        return { zone_id: v.zone_id, name: z?.name ?? v.zone_id, kind: z?.kind ?? 'port', lat: v.lat, lon: v.lon, first_t: v.first_ts, last_t: v.last_ts };
-      });
-      return json(req, env, 200, { zones }, { 'Cache-Control': 'public, max-age=300' });
-    }
-
-    return errorJson(req, env, 404, 'Not found');
   },
 
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {

@@ -183,7 +183,10 @@ export function mount(root) {
     if (error !== null) {
       console.error('[list] poll error:', error);
       const listEl = container?.querySelector('.vessel-list');
-      if (listEl !== null) listEl.innerHTML = `<div class="state-error">Poll failed: ${error.message}</div>`;
+      // api.js turns quota exhaustion into a human message ("Daily map-data
+      // allowance reached…"); other failures stay `HTTP n`. Both keep the last
+      // rendered list in place.
+      if (listEl !== null) listEl.innerHTML = `<div class="state-error">${error.message}</div>`;
       return;
     }
     lastVessels = vessels;
