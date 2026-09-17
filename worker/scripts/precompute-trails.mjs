@@ -55,10 +55,16 @@ import { haversineKm, wrapLon } from '../../frontend/app/geo.js';
 // plus the course blend that joins the spine to the vessel's real track. v2 spines
 // are uncapped great circles departing ~27° off the boat's actual heading, so every
 // stored ocean gap needs rebuilding. See docs/ocean-routing-study.md.
+// 4: A* routed trans-canal gaps (panama-canal + suez-canal carve regions).
+// 5: harvestInferredSegments tangent-context fix — the simplified fakes for each
+// fake-run now include ONE adjacent real control each side in the simplify input
+// (Catmull-Rom's boundary tangents see adjacent controls, so simplifying each
+// run in isolation let the spline bow off the canal corridor). v4 Suez segments
+// can land outside the 0.6 km corridor; needs a `--regenerate` rebuild.
 // Bumping invalidates older hashes for any vessel that gets EXAMINED — but the
 // freshness heuristic skips unexamined vessels entirely, so a one-off `--regenerate`
 // dispatch is still required to rebuild the existing backlog.
-const GENERATOR_VERSION = 4;
+const GENERATOR_VERSION = 5;
 const DB_NAME = 'vessel-tracker';
 const API_BASE = 'https://api.cloudflare.com/client/v4';
 const READ_CHUNK = 60;   // mmsis per IN(...) read

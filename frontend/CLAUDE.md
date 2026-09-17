@@ -320,12 +320,18 @@ entirely. Results: MH BORGA 379 → **0**, MIRACULOUS ACE 325 → **6** (worst
 and fires only on failure, so ordinary ocean crossings keep the fast path. Like
 the spine, its output is **not** smoothed.
 
-**Canal transits stay unroutable.** The Panama isthmus is closed in every land
-layer (verified: zero open meridians across 7–10.5°N), so no Pacific↔Atlantic
-path exists short of Cape Horn. In practice such legs are long port stops, so
-`splitJourneys` severs the journey and nothing is drawn — the right outcome. A
-non-stop canal transit would still bridge straight. The fix is carving canal
-channels into the land data, not changing the router.
+**Canal transits (Panama, Suez) are routable via carved corridors** (regions
+`panama-canal` / `suez-canal`, built by `buildCanalRegion` in `worker/scripts/build-region.mjs`;
+see worker/CLAUDE.md → "Coastline data generation"). The isthmus is closed in every land layer, so a vessel that
+never stops bridges straight across it. A canal region is **synthesized, not fetched**: OSM
+maps the canals as lock/lake `natural=water` polys plus LINEAR `waterway=canal` ways that
+never assemble into one polygon, so `buildCanalRegion` offsets the canal's known centerline
+(held in `CANAL_REGIONS`, `build-all-regions.mjs`) into one water quad per segment, each
+extended past its joints so consecutive quads OVERLAP — A* sees contiguous water, no seam at
+a cell corner. Keep `halfWidthKm` ≥ ~3 × the A* floor cell (0.35 km Panama / 0.6 km Suez;
+Suez's 50–190 km gaps let the sparse spline bow ~450 m off-center, which clipped land at
+0.7 km). A parked canal stop still severs by design. Regression: `tests/region-trails.test.mjs`
+(fixtures `tests/fixtures/regions/panama-canal.json` + `suez-canal.json`).
 
 `routeMaxKm` is deliberately set above the longest gap any fixture depends on
 (623 km chasing-daylight, 553 km bc-inside-passage) so every proven coastal case

@@ -485,7 +485,14 @@ export function harvestInferredSegments(allPoints, opts = {}) {
       const before = controls[runStart - 1];   // always real — controls[0] is real
       const after = controls[i];                // always real — controls[last] is real
       if (!before || !after) continue;
-      const segCtrl = [before, ...controls.slice(runStart, i), after];
+      // Simplify within the FULL journey's tangent context: Catmull-Rom's boundary
+      // tangents also see the controls OUTSIDE the bracket, and a simplified[fake-run]
+      // spline validated in isolation differs from the one the client draws (its
+      // overshoot lands off-corridor — the Suez Port Said→Timsah bow). Include one
+      // adjacent control each side; only the segment's fakes are kept afterward.
+      const head = runStart >= 2 ? [controls[runStart - 2]] : [];
+      const tail = i + 1 < controls.length ? [controls[i + 1]] : [];
+      const segCtrl = [...head, ...controls.slice(runStart - 1, i + 1), ...tail];
       const kept = simplifyForSpline(segCtrl, isLand);
       const fakes = kept
         .filter(c => c.fake)

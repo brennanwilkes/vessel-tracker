@@ -16,7 +16,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildRegion, COAST_DIR } from './build-region.mjs';
+import { buildRegion, buildCanalRegion, COAST_DIR } from './build-region.mjs';
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const ZONES_TS = path.resolve(SCRIPT_DIR, '../src/zones.ts');
@@ -50,6 +50,53 @@ const CORRIDORS = [
   // truncates a single Overpass call (worker/CLAUDE.md "Known coverage boundary").
   { id: 'bc-central-south', bbox: { minLat: 50.7, minLon: -130.8, maxLat: 52.5, maxLon: -125.5 }, landSimplifyKm: 0.15 },
   { id: 'bc-central-north', bbox: { minLat: 52.3, minLon: -130.8, maxLat: 54.15, maxLon: -126.5 }, landSimplifyKm: 0.15 },
+];
+
+// CANAL corridors (Panama, Suez) — carved water threads across an isthmus. A scheduled
+// canal transit is a real, routable journey (a vessel that never stops bridges straight
+// across the continent); OSM gives it no continuous polygon (locks + linear
+// `waterway=canal` cuts), so these are synthesized from their centerline by
+// buildCanalRegion (see build-region.mjs) and need NO Overpass fetch. Centerline
+// coordinates follow the real canal's known geography; halfWidth ≥ 3 × the A* floor cell.
+const CANAL_REGIONS = [
+  {
+    id: 'panama-canal',
+    bbox: { minLat: 8.87, minLon: -80.05, maxLat: 9.45, maxLon: -79.42 },
+    centerline: [ // Atlantic (Limón Bay) → Pacific (Balboa), the real canal route
+      [9.36, -79.96],      // Atlantic open — Limón Bay outer roads
+      [9.345, -79.93],     // Limón Bay approach
+      [9.3, -79.925],      // Gatun Locks approach channel
+      [9.2725, -79.9228],  // Gatun Locks
+      [9.22, -79.88],      // Gatun Lake
+      [9.17, -79.83],      // Gatun Lake
+      [9.1167, -79.7],     // Gamboa — Culebra Cut north
+      [9.0667, -79.67],    // Culebra Cut
+      [9.0333, -79.65],    // Culebra Cut south
+      [9.0167, -79.6083],  // Pedro Miguel Locks
+      [8.9964, -79.5911],  // Miraflores Locks
+      [8.97, -79.56],      // Balboa — Pacific channel
+      [8.945, -79.52],     // Pacific open
+    ],
+  },
+  {
+    id: 'suez-canal',
+    bbox: { minLat: 29.83, minLon: 32.18, maxLat: 31.37, maxLon: 32.62 },
+    // Suez gaps run 50–190 km and its water surface is genuinely wider (GB Lake,
+    // the ship canal), so the corridor is 1.2 km (vs Panama 0.7) — the sparse spline
+    // over a long thread bows ~450 m off-center, which clipped land at 0.7 km.
+    halfWidthKm: 0.6,
+    centerline: [ // Mediterranean (Port Said) → Gulf of Suez, the real canal route
+      [31.35, 32.42],     // Mediterranean open — off Port Said
+      [31.26, 32.31],     // Port Said / canal mouth
+      [30.85, 32.3],      // El-Qantara
+      [30.58, 32.27],     // Lake Timsah / Ismailia
+      [30.35, 32.4],      // Great Bitter Lake north
+      [30.15, 32.47],     // Great Bitter Lake south
+      [29.99, 32.53],     // Small Bitter Lake
+      [29.93, 32.55],     // Suez — Gulf of Suez entrance
+      [29.85, 32.6],      // Gulf of Suez open
+    ],
+  },
 ];
 
 const args = process.argv.slice(2);
@@ -90,6 +137,7 @@ function deriveRegions() {
     regions.push({ id: z.id, bbox: BBOX_OVERRIDE[z.id] ?? unionPad([z.box]) });
   }
   for (const c of CORRIDORS) regions.push({ id: c.id, bbox: c.bbox, landSimplifyKm: c.landSimplifyKm });
+  for (const c of CANAL_REGIONS) regions.push({ id: c.id, bbox: c.bbox, centerline: c.centerline, halfWidthKm: c.halfWidthKm });
   return regions;
 }
 function unionPad(boxes) {
@@ -148,6 +196,7 @@ ${entries}
 
 // ── Run ─────────────────────────────────────────────────────────────────────
 const allRegions = deriveRegions();              // full set — manifest always lists all built
+const canalById = new Map(CANAL_REGIONS.map(c => [c.id, c]));
 let regions = ONLY.length ? allRegions.filter(r => ONLY.includes(r.id)) : allRegions;
 console.log(`[regions] ${allRegions.length} regions derived; ${regions.length} in this run`);
 
@@ -159,12 +208,18 @@ for (let round = 1; round <= MAX_ROUNDS && pending.length; round++) {
   const failed = [];
   for (const r of pending) {
     try {
-      console.log(`[${r.id}] fetching coastline…`);
-      const coastElements = await fetchWithRetry(`${r.id} coast`, coastQuery(r.bbox));
-      await sleep(DELAY_MS);
-      console.log(`[${r.id}] fetching water…`);
-      const waterElements = await fetchWithRetry(`${r.id} water`, waterQuery(r.bbox));
-      const s = buildRegion({ id: r.id, bbox: r.bbox, coastElements, waterElements, landSimplifyKm: r.landSimplifyKm });
+      let s;
+      if (canalById.has(r.id)) {
+        console.log(`[${r.id}] synthesizing canal corridor (${r.centerline.length} centerline points, no Overpass)…`);
+        s = buildCanalRegion({ id: r.id, bbox: r.bbox, centerline: r.centerline, halfWidthKm: r.halfWidthKm });
+      } else {
+        console.log(`[${r.id}] fetching coastline…`);
+        const coastElements = await fetchWithRetry(`${r.id} coast`, coastQuery(r.bbox));
+        await sleep(DELAY_MS);
+        console.log(`[${r.id}] fetching water…`);
+        const waterElements = await fetchWithRetry(`${r.id} water`, waterQuery(r.bbox));
+        s = buildRegion({ id: r.id, bbox: r.bbox, coastElements, waterElements, landSimplifyKm: r.landSimplifyKm });
+      }
       if (s.landRings === 0 && s.waterPolys === 0) console.warn(`[${r.id}] WARN: empty (no land or water in bbox)`);
       console.log(`[${r.id}] ✓ ${s.landRings} land, ${s.waterPolys} water (${s.holes} holes), ${s.kb} KB`);
       regenerateManifest(allRegions); // keep manifest current as we go

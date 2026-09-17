@@ -322,6 +322,15 @@ Two region shapes (resolution follows navigation):
   e.g. Golden Gate). Islands are reliable closed loops, and they're exactly what opens
   the inter-island channels coarse's 2 km merges shut (Inside Passage). `CORRIDORS` in
   `build-all-regions.mjs` (e.g. `inside-passage`, ~150 m land per the resolution policy).
+- **Canal corridors (Panama, Suez) → SYNTHESIZED water thread.** An isthmus is closed in
+  every land layer and OSM gives it no continuous polygon (locks + LINEAR `waterway=canal`
+  cuts), so `buildCanalRegion` carves one water quad per centerline segment, extended
+  past each joint so quads OVERLAP — A* sees contiguous water with no corner seam.
+  Centerlines + `halfWidthKm` (0.35 Panama / 0.6 Suez) live in `CANAL_REGIONS`
+  (`build-all-regions.mjs`); no Overpass fetch (gate on `canalById.has(r.id)`).
+  **`deriveRegions` MUST pass `halfWidthKm` through** (dropping it rebuilds Suez at the
+  0.35 default → land bulge). Width ≥ ~3 × the A* floor cell; keep it ≥ real canal width
+  since the sparse dashed spline bows off-center on long gaps.
 
 Caveat (the cell-size limit, mitigated by server A*): a single LONG gap into/through a
 narrow channel uses coarse A* cells (≥0.68 km) that can't thread it → straight-bridge.

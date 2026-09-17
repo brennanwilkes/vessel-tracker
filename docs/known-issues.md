@@ -116,14 +116,19 @@ route at the nearest water point and run the final leg straight to the berth.
 
 ## 3. Canal transits (Panama, Suez) cannot be routed
 
-**Status:** accepted, by construction.
-
-The isthmus is closed in every land layer (verified: zero open meridians across
-7–10.5°N), so no Pacific↔Atlantic water path exists short of Cape Horn. In
-practice these legs are long port stops, so `splitJourneys` severs and nothing is
-drawn — the correct outcome. A canal transit by a vessel that never stops would
-still bridge straight across Central America. Fixing it properly means carving
-canal channels into the land data, not changing the router.
+**Status: RESOLVED 2026-09-17** via carved canal corridors. Regions `panama-canal`
++ `suez-canal` (`buildCanalRegion`, synthesized from a known centerline — OSM's
+`waterway=canal` is linear and never assembles into one polygon) re-open the
+isthmus as water, so a non-stop transit now routes the dashed bridge through the
+canal instead of straight-bridging the continent. Half-width 0.35 km Panama /
+0.6 km Suez. Two gotchas that each produced a land bulge during the fix: (1)
+`deriveRegions` dropped `halfWidthKm`, silently rebuilding Suez at the 0.35
+default; (2) `harvestInferredSegments` simplified each fake-run in isolation, so
+the stored spline bowed off-corridor once the client splined the full journey —
+it now passes one adjacent real control each side into `simplifyForSpline`.
+Regression: `node tests/region-trails.test.mjs` (panama-canal + suez-canal
+fixtures, all 5 region fixtures maxPen=0 m). A parked canal stop still severs by
+design.
 
 ---
 

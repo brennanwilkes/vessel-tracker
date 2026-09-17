@@ -1,0 +1,13 @@
+{
+  "name": "suez-canal",
+  "mmsi": 555555000,
+  "vesselLength": 320,
+  "points": [
+    { "lat": 29.85, "lon": 32.6, "speed": 15, "heading": 300, "t": 1781400000000, "tier": "global" },
+    { "lat": 29.93, "lon": 32.55, "speed": 7, "heading": 300, "t": 1781385000000, "tier": "global" },
+    { "lat": 30.15, "lon": 32.47, "speed": 9, "heading": 300, "t": 1781360000000, "tier": "global" },
+    { "lat": 30.58, "lon": 32.27, "speed": 11, "heading": 300, "t": 1781340000000, "tier": "global" },
+    { "lat": 31.26, "lon": 32.31, "speed": 13, "heading": 300, "t": 1781320000000, "tier": "global" },
+    { "lat": 31.35, "lon": 32.42, "speed": 18, "heading": 300, "t": 1781300000000, "tier": "global" }
+  ]
+}
