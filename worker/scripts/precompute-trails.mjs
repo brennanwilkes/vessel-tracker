@@ -7,7 +7,21 @@
 // coastline. See worker/CLAUDE.md "server-side inferred-positions precompute".
 //
 //   node scripts/precompute-trails.mjs [--local] [--dry-run] [--regenerate]
-//                                      [--limit N] [--mmsi N]
+//                                      [--limit N] [--mmsi N] [--write-budget N] [--offset N]
+//
+// WRITE BUDGET: D1's free tier caps rows WRITTEN per UTC day (100k), shared with
+// live ingestion. This script is self-limiting so a regenerate can never trip the
+// cap: it reads a shared daily ledger from scan_meta (ingest_rows_written_<date>,
+// maintained by the Worker; pc_rows_written_<date>, maintained here) and stops at
+// whichever comes first — its own `--write-budget` allowance (default 50k, leaving
+// headroom for ingestion under the 100k cap) or a combined safety ceiling (90k,
+// `ACCOUNT_SAFETY_CEILING`). The ledger is bumped after every flush, so a killed
+// run still accounts for what it wrote. A budget stop exits 0 (it is a controlled
+// stop, not a crash): the run logs how far it got, and the NEXT run resumes because
+// `--regenerate` now SKIPS vessels whose stored segments already carry this
+// GENERATOR_VERSION (a version-converge check), so a budget-bounded backlog advances
+// run over run / day over day instead of re-burning its allowance on done vessels.
+// Bump GENERATOR_VERSION to force a full rebuild regardless (v4-vs-v3 hashes differ).
 //
 // I/O is BATCHED so the run is dominated by A* CPU, not DB round-trips: remote
 // uses the D1 HTTP query API (one fetch per chunk — no per-vessel process spawn,
@@ -51,6 +65,19 @@ const READ_CHUNK = 60;   // mmsis per IN(...) read
 const WRITE_CHUNK = 50;  // statements per batched HTTP write
 const FLUSH_EVERY = 400; // flush accumulated writes mid-run past this many statements
 
+// Shared daily D1 write budget (see header comment). The account caps TOTAL rows
+// written per UTC day at 100k; these two limits keep the precompute inside it while
+// leaving headroom for live ingestion. `--write-budget` overrides the precompute's
+// own allowance; the shared ceiling is fixed.
+const PRECOMPUTE_DAILY_BUDGET = 50000; // rows/day the precompute may write
+const ACCOUNT_SAFETY_CEILING = 90000;  // shared ingest+precompute stop line (< 100k cap)
+
+// Worker ledger keys (storage.ts flushIngestLedger writes ingest_rows_written_<date>;
+// this script bumps pc_rows_written_<date>). The D1 free-tier day rolls at 00:00 UTC.
+const utcDateKey = (d = new Date()) => d.toISOString().slice(0, 10);
+const INGEST_LEDGER_KEY = `ingest_rows_written_${utcDateKey()}`;
+const PC_LEDGER_KEY = `pc_rows_written_${utcDateKey()}`;
+
 const argv = process.argv.slice(2);
 const has = (f) => argv.includes(f);
 const valOf = (f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : undefined; };
@@ -65,6 +92,7 @@ const LIMIT = valOf('--limit') ? parseInt(valOf('--limit'), 10) : Infinity;
 // and stay under the 6h GitHub job cap.
 const OFFSET = valOf('--offset') ? parseInt(valOf('--offset'), 10) : 0;
 const ONLY_MMSI = valOf('--mmsi') ? parseInt(valOf('--mmsi'), 10) : null;
+const WRITE_BUDGET = valOf('--write-budget') ? parseInt(valOf('--write-budget'), 10) : PRECOMPUTE_DAILY_BUDGET;
 
 const tmp = LOCAL ? mkdtempSync(join(tmpdir(), 'precompute-')) : null;
 const chunk = (arr, n) => { const out = []; for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n)); return out; };
@@ -147,20 +175,44 @@ async function read(sql) {
 }
 
 // Batched multi-statement writes. Remote = chunked HTTP queries (no import-lock);
-// local = one wrangler --file.
+// local = one wrangler --file. Returns the total D1 rows actually written (summed
+// each statement's meta.rows_written) — the metering source for the write budget.
+// Local returns 0 (the wrangler CLI doesn't expose per-statement rows cheaply, and
+// local dev has no account cap to respect).
 async function writeBatch(statements) {
-  if (statements.length === 0 || DRY) return;
+  if (statements.length === 0 || DRY) return 0;
   if (LOCAL) {
     const file = join(tmp, 'writes.sql');
     writeFileSync(file, statements.join('\n'));
     execFileSync('npx', ['wrangler', 'd1', 'execute', DB_NAME, '--local', '--file', file], { stdio: 'inherit' });
-    return;
+    return 0;
   }
+  let total = 0;
   const acct = mustEnv('CLOUDFLARE_ACCOUNT_ID');
   for (const c of chunk(statements, WRITE_CHUNK)) {
-    await cfFetch(`${API_BASE}/accounts/${acct}/d1/database/${DB_ID}/query`,
+    const data = await cfFetch(`${API_BASE}/accounts/${acct}/d1/database/${DB_ID}/query`,
       { method: 'POST', body: JSON.stringify({ sql: c.join('\n') }) });
+    for (const r of data.result ?? []) total += r.meta?.rows_written ?? 0;
   }
+  return total;
+}
+
+// Read today's ingest-ledger value (the Worker accumulates this key; we only ever
+// bump our own PC_LEDGER_KEY, so re-reading it lets us see ingestion spend live).
+async function readIngestLedger() {
+  const rows = await read(`SELECT value FROM scan_meta WHERE key = '${INGEST_LEDGER_KEY}'`);
+  return Number(rows[0]?.value ?? 0);
+}
+
+// Bump the precompute side of the shared ledger by `rows`. Called after every
+// writeBatch flush so even a killed run accounts for everything it wrote. The bump
+// itself writes one scan_meta row (no secondary indexes) and is not recounted.
+async function bumpPcLedger(rows) {
+  if (rows <= 0) return;
+  await writeBatch([
+    `INSERT INTO scan_meta (key, value) VALUES ('${PC_LEDGER_KEY}', ${rows})` +
+    ` ON CONFLICT(key) DO UPDATE SET value = value + ${rows};`,
+  ]);
 }
 
 // A segment's stable key: bracketing real timestamps (positions are immutable, so
@@ -250,12 +302,27 @@ async function main() {
     c => `SELECT mmsi, lat, lon, speed, ts, tier FROM positions WHERE mmsi IN (${c.join(',')}) ORDER BY mmsi, ts ASC`,
     r => ({ lat: r.lat, lon: r.lon, speed: r.speed, t: r.ts, tier: r.tier }));
   const infByMmsi = await readByMmsi(mmsis,
-    c => `SELECT mmsi, seg_hash, lat, lon, t, tier, dashed FROM inferred_positions WHERE mmsi IN (${c.join(',')})`,
+    c => `SELECT mmsi, seg_hash, lat, lon, t, tier, dashed, generator_version FROM inferred_positions WHERE mmsi IN (${c.join(',')})`,
     r => r);
 
   const writes = [];
   const now = Date.now();
-  let examined = 0, skippedConverged = 0, segmentsWritten = 0, pointsWritten = 0, segmentsDeleted = 0, flushedStatements = 0;
+  let examined = 0, skippedConverged = 0, skippedVersion = 0, segmentsWritten = 0;
+  let pointsWritten = 0, segmentsDeleted = 0, flushedStatements = 0;
+  let runRowsWritten = 0; // D1 rows this run has actually written (ledgered per flush)
+  let budgetStopped = false;
+
+  // Shared daily write ledger at run start; ingestLatest is re-read periodically so a
+  // long run sees ingestion spend live. pcAtStart + runRowsWritten == the PC ledger
+  // key's value at any moment (every flush bumps it by that flush's rows), so the
+  // budget check below never double-counts this run.
+  const pcAtStart = Number((await read(`SELECT value FROM scan_meta WHERE key = '${PC_LEDGER_KEY}'`))[0]?.value ?? 0);
+  const ingestAtStart = await readIngestLedger();
+  let ingestLatest = ingestAtStart;
+  const budgetExhausted = () => {
+    const pcSpent = pcAtStart + runRowsWritten;
+    return pcSpent >= WRITE_BUDGET || ingestLatest + pcSpent >= ACCOUNT_SAFETY_CEILING;
+  };
 
   // Flush completed-vessel writes mid-run so memory stays bounded as coverage
   // grows and a late transient failure can't discard the whole run's A* work.
@@ -263,23 +330,43 @@ async function main() {
   // its precompute_state upsert — so the buffer always ends on a vessel boundary
   // (state is committed only after that vessel's segment writes). Local batches
   // once at the end (one wrangler --file; no keep-alive race, avoids N spawns).
+  // Each flush bumps the shared ledger by the rows it actually wrote, so a
+  // budget-stopped or killed run still accounts for itself.
   async function maybeFlush() {
     if (LOCAL || writes.length < FLUSH_EVERY) return;
     flushedStatements += writes.length;
-    await writeBatch(writes.splice(0));
+    const rows = await writeBatch(writes.splice(0));
+    runRowsWritten += rows;
+    await bumpPcLedger(rows);
   }
 
   console.log(`[precompute] ${candidates.length} candidate(s) to examine of ${eligible.length} eligible` +
-    ` (offset ${OFFSET}, ${skippedHeuristic} skipped by heuristic)…`);
+    ` (offset ${OFFSET}, ${skippedHeuristic} skipped by heuristic) | write budget ${WRITE_BUDGET}/day,` +
+    ` spent today: pc ${pcAtStart} + ingest ${ingestAtStart}`);
   for (const v of candidates) {
-    examined++;
-    if (examined % 25 === 0) console.log(`[precompute] …examined ${examined}/${candidates.length} (routed ${segmentsWritten} segments so far)`);
     await maybeFlush();
+    if (budgetExhausted()) { budgetStopped = true; break; }
+    examined++;
     const points = posByMmsi.get(v.mmsi) ?? [];
     if (points.length < 2) { writes.push(stateUpsertSql(v.mmsi, v.last_pos_ts, now)); continue; }
 
     await ensureRegionsForExtent(extentOf(points));
     const existing = infByMmsi.get(v.mmsi) ?? [];
+
+    // --regenerate now CONVERGES instead of churning: a fleet rebuild driven in
+    // budget-bounded increments advances across runs because any vessel whose stored
+    // segments already carry this GENERATOR_VERSION and still keep its curve off land
+    // is skipped, not rewritten. Without this, a resumed run re-routes the vessels
+    // the previous run already upgraded and re-burns the daily budget on done work.
+    // `--mmsi` bypasses on purpose ("clear a bad stored trail"). Bump
+    // GENERATOR_VERSION to force a full rebuild of everything again.
+    if (REGENERATE && ONLY_MMSI === null && existing.length > 0 &&
+        existing.every(r => r.generator_version === GENERATOR_VERSION) &&
+        curveIsLandFree(points, existing)) {
+      skippedVersion++;
+      writes.push(stateUpsertSql(v.mmsi, v.last_pos_ts, now));
+      continue;
+    }
 
     if (!REGENERATE && curveIsLandFree(points, existing)) {
       skippedConverged++;
@@ -322,17 +409,38 @@ async function main() {
       segmentsWritten++;
     }
     writes.push(stateUpsertSql(v.mmsi, v.last_pos_ts, now));
+
+    if (examined % 25 === 0) {
+      console.log(`[precompute] …examined ${examined}/${candidates.length} (routed ${segmentsWritten} segments so far)` +
+        ` | spent ${pcAtStart + runRowsWritten} pc / ${ingestLatest} ingest today`);
+      ingestLatest = await readIngestLedger();
+    }
   }
 
   flushedStatements += writes.length;
-  await writeBatch(writes);
+  const finalRows = await writeBatch(writes);
+  runRowsWritten += finalRows;
+  await bumpPcLedger(finalRows);
 
+  const pcSpent = pcAtStart + runRowsWritten;
   console.log(
     `[precompute] candidates=${candidates.length} examined=${examined} ` +
-    `skipped_heuristic=${skippedHeuristic} skipped_converged=${skippedConverged} ` +
+    `skipped_heuristic=${skippedHeuristic} skipped_converged=${skippedConverged} skipped_version=${skippedVersion} ` +
     `segments_written=${segmentsWritten} segments_deleted=${segmentsDeleted} points_written=${pointsWritten} ` +
+    `rows_written=${runRowsWritten} spent_today=${pcSpent}+${ingestLatest} ` +
     `write_statements=${flushedStatements}` + (DRY ? '  (DRY RUN — no writes)' : '')
   );
+  if (budgetStopped) {
+    const remain = candidates.length - examined;
+    const perVessel = examined > 0 ? runRowsWritten / examined : 0;
+    const estRuns = perVessel > 0 ? Math.max(1, Math.ceil((remain * perVessel) / WRITE_BUDGET)) : null;
+    console.log(
+      `[precompute] WRITE BUDGET STOP — ${examined} of ${candidates.length} candidate(s) examined, ` +
+      `spent ${pcSpent} pc / ${ingestLatest} ingest today (pc allowance ${WRITE_BUDGET}, shared ceiling ${ACCOUNT_SAFETY_CEILING}). ` +
+      `At this rate the remaining ${remain} vessel(s) need ~${estRuns === null ? '?' : estRuns} more daily run(s). ` +
+      `Already-upgraded vessels skip on resume; budget resets 00:00 UTC.`
+    );
+  }
 }
 
 main().catch(err => { console.error(err); process.exit(1); });

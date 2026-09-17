@@ -190,7 +190,45 @@ is local-scan territory. Trans-Pacific trails are also safe — those vessels ha
 the window, whose gap renders as the dashed A*-inferred curve the trail system exists to draw
 (and there are essentially no real open-Pacific fixes anyway — aisstream is shore-receiver fed).
 
-## Removing `AUTOINCREMENT` from `positions` — DO NOT. Measured, not assumed.
+## Write-budget round 4 — the shared daily ledger (2026-09-16)
+
+Round 3's fixes brought ingest down to ~48k rows/day, but the **trail precompute
+shares the same 100k/day cap** and nothing budgeted it. On 2026-09-16 two bare v4
+`--regenerate` runs (both `d355d7f`) died on `Cloudflare API error (400): … exceeded
+D1's free tier daily row write limit` at ~25 vessels / ~2,650 segments each. The log
+showed `1029 candidate(s) to examine of 1029 eligible` — the fleet is ~1029 vessels
+(old ~734 estimate was stale) and a full rebuild is ~1–3M rows ≈ 10–30 daily budgets,
+so it cannot be flushed in one day, and a naive day-after-day retry would re-burn the
+budget redoing an identical first-N.
+
+**The fix is a shared daily ledger in `scan_meta` (keyed per UTC day — the cap resets
+00:00 UTC):**
+- **Worker side (`storage.ts` + `index.ts`):** `meterResults` accumulates each D1
+  statement's real `meta.rows_written` (commitScan, enrichStaticData, commitZoneVisits,
+  setScanCursor, AIS lock acquire/release) into a module counter, and `flushIngestLedger`
+  writes it to `ingest_rows_written_<date>` once per scheduled scan. Wired with
+  `.finally()` (not just `.then`) so a scan that throws still flushes — only a scan that
+  dies BETWEEN a write and its flush undercounts for the day, which the ceiling's margin
+  absorbs (a few hundred rows × a couple of midwrite crashes/day). The flush itself is
+  deliberately unmetered: one scan_meta upsert, no secondary indexes, ~24 rows/day.
+- **Precompute side (`precompute-trails.mjs`):** reads both ledger keys at start,
+  bumps `pc_rows_written_<date>` after EVERY `writeBatch` flush (so a killed run still
+  accounts for itself), re-reads `ingest_rows_written_<date>` every 25 vessels (ingest
+  continues under you), and stops — exiting 0 with `WRITE BUDGET STOP` — at whichever
+  comes first: its own `--write-budget` (`PRECOMPUTE_DAILY_BUDGET` 50k rows/day, leaves
+  room for ingestion) or the shared `ACCOUNT_SAFETY_CEILING` (90k, absorbs the unmetered
+  slack above). The workflow gained a `budget` input (default 50k). `--dry-run` never
+  budgets. Steady state converges (vessels already at the current version are skipped),
+  so eventually a day's runs write ~nothing.
+- **`--regenerate` now CONVERGES instead of churning:** a fleet regenerate skips any
+  vessel whose stored segments all carry the current `GENERATOR_VERSION` AND still keep
+  the curve off land (`skipped_version` counter); `--mmsi` still forces a rebuild. So a
+  day-after-day re-dispatch advances the fleet rather than redoing the done first-N —
+  this is what makes the ~1029-vessel rebuild resumable across UTC days. Drive it once
+  per UTC day until `worker/scripts/db-trails` shows the new version fleet-wide and
+  `skipped_version` dominates. `worker/scripts/db-ledger` shows today's ingest + pc
+  spend. Watch for the classic trap: a run whose budget is already spent exits fast
+  with 0/RESERVED — that is the guard working, not a no-op to restart.
 
 Tempting (a guaranteed 1-of-every-3 position rows) and repeatedly proposed. **It is a trap.**
 `INTEGER PRIMARY KEY AUTOINCREMENT` can only be dropped by REBUILDING the table, costing ~2N
@@ -430,6 +468,7 @@ repo root: `worker/scripts/db-stats`.
 | `db-tiers` | Position stats per scan tier |
 | `db-search <term>` | Search vessels by MMSI or name fragment |
 | `db-diagnose` | Why has ingestion stopped? Freshness, AIS lock state, scan cursor, write probe |
+| `db-ledger` | Today's daily write-ledger spend: `ingest_rows_written_<date>` + `pc_rows_written_<date>` from scan_meta. Read this to see how much of the day's 100k budget ingestion and the trail precompute have used, and whether a precompute run's budget is already spent. |
 **Auditing LIVE trails** (not fixtures): `node tests/audit-prod.mjs --all --top 30`, or
 per-vessel with span detail. Fetches what the browser receives and splines it with the
 client pipeline. **It loads `region_coast` regions explicitly** — `tests/lib.mjs` alone

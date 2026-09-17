@@ -1,7 +1,7 @@
 import type { Env, Tier } from './types';
 import { handleOptions } from './cors';
 import { json, errorJson } from './http';
-import { getCurrentVessels, getTrack, getInferredTrack, getZoneVisits } from './storage';
+import { getCurrentVessels, getTrack, getInferredTrack, getZoneVisits, flushIngestLedger } from './storage';
 import { zoneMeta } from './zones';
 import { runDirectScan, runLocalScan, runGlobalScan, runForeignScan } from './ingest';
 import { LIVE_TTL_DIRECT_MS, LIVE_TTL_LOCAL_MS, LIVE_TTL_GLOBAL_MS, GITHUB_REPO, PRECOMPUTE_WORKFLOW_FILE, PRECOMPUTE_DISPATCH_EVERY_HOURS, DIRECT_SCAN_CRON, LOCAL_SCAN_CRON, GLOBAL_SCAN_CRON, FOREIGN_SCAN_CRON } from './constants';
@@ -99,21 +99,28 @@ export default {
 
     if (event.cron === DIRECT_SCAN_CRON) {
       ctx.waitUntil(
-        runDirectScan(env).catch(err => console.error('[scheduled] direct scan failed:', err))
+        runDirectScan(env)
+          .catch(err => console.error('[scheduled] direct scan failed:', err))
+          .finally(() => flushIngestLedger(env))
       );
     } else if (event.cron === LOCAL_SCAN_CRON) {
       ctx.waitUntil(
-        runLocalScan(env).catch(err => console.error('[scheduled] local scan failed:', err))
+        runLocalScan(env)
+          .catch(err => console.error('[scheduled] local scan failed:', err))
+          .finally(() => flushIngestLedger(env))
       );
     } else if (event.cron === GLOBAL_SCAN_CRON) {
       ctx.waitUntil(
         runGlobalScan(env)
           .catch(err => console.error('[scheduled] global scan failed:', err))
           .then(() => triggerPrecompute(env, new Date(event.scheduledTime)))
+          .finally(() => flushIngestLedger(env))
       );
     } else if (event.cron === FOREIGN_SCAN_CRON) {
       ctx.waitUntil(
-        runForeignScan(env).catch(err => console.error('[scheduled] foreign scan failed:', err))
+        runForeignScan(env)
+          .catch(err => console.error('[scheduled] foreign scan failed:', err))
+          .finally(() => flushIngestLedger(env))
       );
     } else {
       console.warn(`[scheduled] unrecognised cron: ${event.cron}`);

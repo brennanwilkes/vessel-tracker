@@ -395,17 +395,38 @@ re-splines the union with the pure pipeline (`frontend/app/trail_spline.js`).
   Deploy a routing fix and the stored backlog keeps rendering the OLD geometry
   indefinitely (and if ingestion is stalled, `last_pos_ts` never advances for anyone, so
   NOTHING is re-examined). After changing the router, dispatch the workflow once with
-  **`regenerate: true`** (`workflow_dispatch` inputs `regenerate` + `limit` + `offset`;
-  there is no default limit, so a bare `--regenerate` examines all ~734 vessels).
-- **`limit` ALONE CANNOT BATCH A REGENERATE — pair it with `offset`.** Regenerate
-  bypasses the freshness heuristic, so `eligible` is the same full list every run and
-  `slice(0, LIMIT)` re-does the identical first N vessels; the tail is never reached.
-  `--offset` walks the (stable, `last_seen DESC`) list, so a full rebuild splits across
-  dispatches as `offset 0`, `offset N`, `offset 2N`, … under the 6 h cap. Measured rate
-  with the current fine-celled A*: **~45 s/vessel** (50 vessels ≈ 40 min), i.e. ~9 h for
-  all 734 — a bare unlimited `--regenerate` WILL hit the cap. Writes flush mid-run
-  (`FLUSH_EVERY`), so a capped run keeps its completed vessels; `last_seen DESC` means
-  those are the ones currently on the map.
+  **`regenerate: true`** (`workflow_dispatch` inputs `regenerate` + `limit` + `offset` +
+  `budget`). A bare `--regenerate` is now SAFE — it self-limits on the shared write
+  ledger (below) instead of running unbounded.
+- **The rebuild is rationed by a SHARED DAILY WRITE LEDGER, not `limit`/`offset`.**
+  D1's free tier caps rows WRITTEN per UTC day at 100k, and the precompute shares that
+  budget with live ingestion. On 2026-09-16 two bare v4 `--regenerate` runs died on
+  `Cloudflare API error (400): … exceeded D1's free tier daily row write limit` at
+  ~25 vessels / 2,650 segments each — the fleet is ~1029 eligible vessels and a full
+  rebuild is ~1–3M rows (10–30 daily budgets). The script now reads two scan_meta
+  ledger keys: `ingest_rows_written_<date>` (the Worker meters its real
+  `meta.rows_written` on every write path in `storage.ts` and flushes it once per scan
+  via `flushIngestLedger`, wired with `.finally()` in `index.ts` so it runs on error
+  paths too) and `pc_rows_written_<date>` (bumped here after EVERY `writeBatch` flush,
+  so a killed run still accounts for what it wrote). It stops — exiting 0 with a
+  `WRITE BUDGET STOP` log — at whichever comes first: its own `--write-budget`
+  (`PRECOMPUTE_DAILY_BUDGET` 50k rows/day, leaves headroom for ingestion) or the shared
+  `ACCOUNT_SAFETY_CEILING` (90k, absorbs un-metered slack like the ledger upserts and
+  a scan that dies mid-commit). `budget` workflow input overrides the 50k default.
+- **`--regenerate` now CONVERGES, not churns (version-converge skip).** Because a
+  budgeted rebuild stops mid-list and resumes on a later dispatch/day, a fleet
+  regenerate skips any vessel whose stored segments all carry the current
+  `GENERATOR_VERSION` AND still keep its curve off land (`skipped_version` counter) —
+  otherwise each resumed run would re-route the first-N vessels the last run already
+  upgraded and re-burn the daily budget on done work. `--mmsi` bypasses the skip
+  (still a forced rebuild). So drive a full rebuild by re-dispatching `regenerate=true`
+  once per UTC day until `db-trails` shows the new version fleet-wide; a run that finds
+  its budget already spent exits fast with a budget-stop and no writes (the guard
+  working). Bump `GENERATOR_VERSION` to force a rebuild of everything again.
+- **Writes flush mid-run (`FLUSH_EVERY`)**, so a budget-stopped run keeps the vessels
+  it finished — and because `last_seen DESC` orders candidates, those are the freshest,
+  currently-on-the-map hulls first. `worker/scripts/db-ledger` shows today's
+  `ingest_rows_written` + `pc_rows_written` spend.
 - **What's stored (D1 frugality):** only the inferred (A*-routed / repair) waypoints —
   never real fixes (those live in `positions`). Per land-crossing **segment** (a run
   of fakes bracketed by two real fixes), reduced by `simplifyForSpline` to the minimum
@@ -442,37 +463,28 @@ re-splines the union with the pure pipeline (`frontend/app/trail_spline.js`).
   GitHub keeps a single PENDING run per concurrency group, so the second trigger of each
   hour was cancelled while queued (~22% of runs showed `cancelled` — noise, not failures).
   The repo is PUBLIC, so Actions minutes are free; long runs cost staleness, not money.
-- **Driving a batched `--regenerate` (the operational trap).** The same single-pending
-  rule bites any batch you dispatch by hand: a batch that lands while the group is
-  busy sits PENDING and is evicted by the Worker's next dispatch. **Do not assume
-  that dispatch is hourly.** The Worker fires it on *global-scan completion*
-  (`index.ts` → `PRECOMPUTE_WORKFLOW_FILE`), and since the scan-scheduling rework
-  that lands every ~20–40 min, not at `:59` — measured 2026-08-06: dispatches at
-  20:25, 20:58, 21:17, 21:43. The `:59` runs are just the workflow's own hourly
-  fallback cron on top. So the idle window a driver waits for may never open, and a
-  long batch can be evicted repeatedly; if a full regenerate has to get through,
-  quiet the dispatch first rather than fighting it. It shows as run conclusion
-  `failure` with the JOB conclusion
-  `cancelled` and no failed steps — **that signature means eviction, not a code
-  failure**, so check the job before debugging the precompute. Retrying immediately
-  just re-enters the same race; one batch was lost three times in a row that way.
-  A run is only vulnerable while pending — `cancel-in-progress: false` means once it
-  reaches `in_progress` the Worker's dispatch queues behind it harmlessly. So a
-  driver must (1) **wait for the group to go idle** before dispatching, and
-  (2) record the newest run id BEFORE dispatching and wait for a run whose id is
-  DIFFERENT — otherwise it latches onto the Worker's hourly run and reports that
-  run's result as the batch's, silently skipping an offset range. Reference
-  implementation with both fixes: `scratchpad/regen-driver2.sh` (session-local;
-  re-derive from this paragraph if gone). Always confirm a batch actually landed
-  with `worker/scripts/db-trails` — the `generator_version` rollover is the proof,
-  never the driver's own log.
+- **Driving a `--regenerate` (concurrency trap, still real).** The single-pending
+  rule bites any run dispatched by hand: one that lands while the group is busy sits
+  PENDING and is evicted by the Worker's next dispatch (run conclusion `failure`, JOB
+  conclusion `cancelled`, no failed steps — eviction, not a code failure; retrying
+  immediately re-enters the same race). A run is only vulnerable while pending —
+  `cancel-in-progress: false` means once it reaches `in_progress` the Worker's
+  dispatch queues behind it harmlessly. The Worker's dispatch is keyed to
+  `event.scheduledTime` every `PRECOMPUTE_DISPATCH_EVERY_HOURS` (6), so it lands ~:59
+  on hours divisible by 6; the workflow's own cron is the daily (03:00 UTC) fallback.
+  A budgeted fleet rebuild is otherwise fire-and-forget: dispatch `regenerate=true`,
+  let it stop at `WRITE BUDGET STOP`, re-dispatch next UTC day; the version-converge
+  skip makes each run advance, so there is no offset range to track. Confirm with
+  `worker/scripts/db-trails` — the `generator_version` rollover is the proof, never
+  the driver's own log.
 - **Longitude is wrapped on write.** The pipeline works in an unwrapped frame that
   can run past ±180 on a dateline crossing (root `CLAUDE.md` → "Longitude is
   UNWRAPPED"), so the `inferred_positions` INSERT calls `wrapLon` — D1 stores real
   coordinates and the client re-unwraps when it splines. Shrinks the straight-bridge window (an un-routed gap renders straight
   until filled) to minutes.
 - **Run manually:** `node scripts/precompute-trails.mjs [--local] [--dry-run]
-  [--regenerate] [--limit N] [--mmsi N]` (same wrangler D1 backend as `db-*`).
+  [--regenerate] [--limit N] [--offset N] [--mmsi N] [--write-budget N]` (same wrangler
+  D1 backend as `db-*`).
 
 ### Expanding coverage (Portland river, Alaska, foreign ports, …)
 1. Edit `BB` in **both** `build-coastline.mjs` and the Overpass bbox in step 1 (and `HOME`/`TIERS`

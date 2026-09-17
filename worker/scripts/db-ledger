@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/db-common"
+parse_common_flags "$@"
+today="$(date -u +%Y-%m-%d)"
+d1_query "
+SELECT 'ingest_rows_written_today' as metric, COALESCE((SELECT value FROM scan_meta WHERE key = 'ingest_rows_written_${today}'), 0) as value;
+SELECT 'pc_rows_written_today' as metric, COALESCE((SELECT value FROM scan_meta WHERE key = 'pc_rows_written_${today}'), 0) as value;
+"

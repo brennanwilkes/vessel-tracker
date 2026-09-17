@@ -57,6 +57,41 @@ export interface PositionInsert {
 
 const MMSI_CHUNK = 99; // D1 caps bound parameters per statement at 100
 
+// ── Daily D1 write meter ────────────────────────────────────────────────────
+// The D1 free tier caps rows WRITTEN per UTC day (100k, reset 00:00 UTC). Every
+// ingest write funnels through the helpers below, so accumulate each statement's
+// real `meta.rows_written` and flush the day's total to a scan_meta ledger key the
+// trail precompute (GitHub Actions) reads to budget itself. The precompute shares
+// the account cap, so this is one shared reservoir, not a standalone counter.
+// Flushed once per scheduled scan via flushIngestLedger (wired in index.ts).
+let ingestRowsWritten = 0;
+
+function meterResults(results: D1Result[]): void {
+  for (const r of results) ingestRowsWritten += r.meta.rows_written;
+}
+
+export function ingestLedgerKey(date = new Date()): string {
+  return `ingest_rows_written_${date.toISOString().slice(0, 10)}`;
+}
+
+// Persist the per-scan accumulation to scan_meta. Called after every scan (incl.
+// error paths) from index.ts. Never throws, so a ledger failure can't crash the
+// Worker. The upsert itself writes one scan_meta row (no secondary indexes) and is
+// deliberately NOT counted — a few rows/day, inside the shared ceiling's margin.
+export async function flushIngestLedger(env: Env): Promise<void> {
+  const pending = ingestRowsWritten;
+  ingestRowsWritten = 0;
+  if (pending === 0) return;
+  try {
+    await env.VESSELS_DB
+      .prepare(`INSERT INTO scan_meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = value + ?2`)
+      .bind(ingestLedgerKey(), pending)
+      .run();
+  } catch (err) {
+    console.error('[ingest] ledger flush failed:', err);
+  }
+}
+
 export async function loadVesselStates(env: Env, mmsis: number[]): Promise<Map<number, VesselState>> {
   if (mmsis.length === 0) return new Map();
 
@@ -170,7 +205,7 @@ export async function commitScan(env: Env, vessels: VesselUpsert[], positions: P
   }
 
   if (stmts.length > 0) {
-    await env.VESSELS_DB.batch(stmts);
+    meterResults(await env.VESSELS_DB.batch(stmts));
   }
 }
 
@@ -235,7 +270,7 @@ export async function enrichStaticData(env: Env, updates: StaticUpdate[]): Promi
          )`
     ).bind(u.mmsi, u.name, u.vesselType, u.length, u.destination)
   );
-  await env.VESSELS_DB.batch(stmts);
+  meterResults(await env.VESSELS_DB.batch(stmts));
 }
 
 export interface ZoneObservation {
@@ -283,7 +318,7 @@ export async function commitZoneVisits(env: Env, obs: ZoneObservation[], throttl
       );
     }
   }
-  if (stmts.length > 0) await env.VESSELS_DB.batch(stmts);
+  if (stmts.length > 0) meterResults(await env.VESSELS_DB.batch(stmts));
 }
 
 export async function getCurrentVessels(env: Env, directTtlMs: number, localTtlMs: number, globalTtlMs: number): Promise<VesselRow[]> {
@@ -461,10 +496,10 @@ export async function getScanCursor(env: Env, key: string): Promise<number> {
 }
 
 export async function setScanCursor(env: Env, key: string, value: number): Promise<void> {
-  await env.VESSELS_DB
+  meterResults([await env.VESSELS_DB
     .prepare(`INSERT INTO scan_meta (key,value) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=?2`)
     .bind(key, value)
-    .run();
+    .run()]);
 }
 
 // ── AIS connection lock ──────────────────────────────────────────────────────
@@ -487,7 +522,7 @@ export async function acquireAisLock(env: Env, ttlMs: number, maxWaitMs: number,
   // matches 0 rows forever and every drain silently skips — the "crons fire but nothing is
   // written" stall in CLAUDE.md. Once per isolate is a rounding error; per acquire was not.
   if (!aisLockRowEnsured) {
-    await env.VESSELS_DB.prepare(`INSERT OR IGNORE INTO scan_meta (key,value) VALUES (?1, 0)`).bind(AIS_LOCK_KEY).run();
+    meterResults([await env.VESSELS_DB.prepare(`INSERT OR IGNORE INTO scan_meta (key,value) VALUES (?1, 0)`).bind(AIS_LOCK_KEY).run()]);
     aisLockRowEnsured = true;
   }
   const deadline = Date.now() + maxWaitMs;
@@ -498,6 +533,7 @@ export async function acquireAisLock(env: Env, ttlMs: number, maxWaitMs: number,
       .prepare(`UPDATE scan_meta SET value = ?2 WHERE key = ?1 AND value < ?3`)
       .bind(AIS_LOCK_KEY, token, now)
       .run();
+    ingestRowsWritten += res.meta.rows_written;
     if (res.meta.changes === 1) return token;
     if (Date.now() >= deadline) {
       console.log(`[aisstream] lock BUSY — ${holder} yielded after ${maxWaitMs}ms`);
@@ -508,10 +544,10 @@ export async function acquireAisLock(env: Env, ttlMs: number, maxWaitMs: number,
 }
 
 export async function releaseAisLock(env: Env, token: number): Promise<void> {
-  await env.VESSELS_DB
+  meterResults([await env.VESSELS_DB
     .prepare(`UPDATE scan_meta SET value = 0 WHERE key = ?1 AND value = ?2`)
     .bind(AIS_LOCK_KEY, token)
-    .run();
+    .run()]);
 }
 
 // Which (mmsi, zone_id) pairs already have a zone_visits row, for the heard MMSIs.
