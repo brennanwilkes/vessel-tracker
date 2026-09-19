@@ -220,15 +220,20 @@ budget redoing an identical first-N.
   slack above). The workflow gained a `budget` input (default 50k). `--dry-run` never
   budgets. Steady state converges (vessels already at the current version are skipped),
   so eventually a day's runs write ~nothing.
-- **`--regenerate` now CONVERGES instead of churning:** a fleet regenerate skips any
-  vessel whose stored segments all carry the current `GENERATOR_VERSION` AND still keep
-  the curve off land (`skipped_version` counter); `--mmsi` still forces a rebuild. So a
-  day-after-day re-dispatch advances the fleet rather than redoing the done first-N —
-  this is what makes the ~1029-vessel rebuild resumable across UTC days. Drive it once
-  per UTC day until `worker/scripts/db-trails` shows the new version fleet-wide and
-  `skipped_version` dominates. `worker/scripts/db-ledger` shows today's ingest + pc
-  spend. Watch for the classic trap: a run whose budget is already spent exits fast
-  with 0/RESERVED — that is the guard working, not a no-op to restart.
+- **`--regenerate` CONVERGES instead of churning, and version bumps now SELF-HEAL.**
+  A fleet regenerate skips any vessel whose stored segments all carry the current
+  `GENERATOR_VERSION` AND still keep the curve off land (`skipped_version` counter);
+  `--mmsi` still forces a rebuild. Separately, the freshness heuristic is version-aware:
+  any vessel holding at least one `inferred_segments` row older than the script's
+  `GENERATOR_VERSION` stays eligible (cheap `MIN(generator_version)` GROUP BY on the
+  sparse segment table), so a version bump rebuilds the fleet automatically on the
+  normal 6-hourly dispatch / daily cron — budget-bounded, day over day, no dispatches.
+  Vessels with ≥2 points but `skipped_version=0` still need `db-trails` verification.
+  Positions are READ lazily (`READ_AHEAD` 25 slices, fetched only after the budget
+  check), so a rebuild where every vessel is eligible (~1029) never pays ~2M rows of
+  reads per run against the 5M/day READ cap — reads scale with what a run actually
+  gets to write. Watch for the classic trap: a run whose budget is already spent exits
+  fast with 0/RESERVED — that is the guard working, not a no-op to restart.
 
 Tempting (a guaranteed 1-of-every-3 position rows) and repeatedly proposed. **It is a trap.**
 `INTEGER PRIMARY KEY AUTOINCREMENT` can only be dropped by REBUILDING the table, costing ~2N
@@ -476,7 +481,7 @@ loads only the home-bbox coastline + the ~2 km coarse layer, and regions load la
 a naive probe reports fine-covered areas as coarse and invents land defects that do not
 exist (this produced a confident wrong root cause once; `docs/known-issues.md` §4).
 
-| `db-trails [--mmsi N]` | Inferred-trail precompute state: waypoints/segments by `generator_version`, unroutable count, last run. Use it to confirm a precompute run actually LANDED rather than being skipped by the freshness heuristic — `--regenerate` is required to rebuild existing segments, so a version rollover is the proof. |
+| `db-trails [--mmsi N]` | Inferred-trail precompute state: waypoints/segments by `generator_version`, unroutable count, last run. Use it to confirm a precompute run actually LANDED rather than being skipped by the freshness heuristic — a version rollover is the proof. Version bumps self-heal now (version-aware freshness), so no `--regenerate` dispatch is needed; `--regenerate` remains only to force one. |
 
 Common flags: `--local` for local D1, `--db <name>` to change database, `--pretty` for
 tables. MMSI and numeric args are validated before SQL interpolation; search terms are

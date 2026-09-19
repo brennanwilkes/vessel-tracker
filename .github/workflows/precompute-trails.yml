@@ -82,18 +82,20 @@ jobs:
         # bounded by a cell-count budget; a worst-case long gap allocates dense rows*cols
         # typed arrays up to ~270 MB. Pin the heap so the budget is guaranteed, not reliant
         # on Node's RAM auto-sizing.
-        # The freshness heuristic skips any vessel whose last_pos_ts hasn't advanced, so
-        # a ROUTER change alone never rebuilds existing waypoints — they stay as the old
-        # generator left them. After changing the router, dispatch with regenerate=true.
-        # A bare regenerate is now SELF-LIMITING: the script reads today's shared
+        # The freshness heuristic is VERSION-AWARE (any vessel with stored segments older
+        # than GENERATOR_VERSION stays eligible), so a router/version bump self-heals on
+        # the normal dispatch cadence — no regenerate=true needed for fleet rebuilds.
+        # regenerate=true only forces an unconditional rebuild (e.g. --mmsi to clear one
+        # bad trail). Its work is SELF-LIMITING: the script reads today's shared
         # ingest+precompute D1 write ledger (scan_meta) and stops at its own
         # --write-budget (default 50000 rows, leaving room for ingestion under the 100k
-        # daily cap) or the 90000 shared ceiling — so it can never trip the write limit.
-        # A budget stop exits 0 with a WRITE BUDGET STOP log; resume with another
-        # dispatch and the run continues where the last left off (vessels whose stored
-        # segments already carry this generator_version are converged-skipped, so a
-        # rebuild advances day over day instead of redoing the first N). No offset
-        # batching required anymore. `limit`/`offset`/`mmsi` still work for fine control.
+        # daily cap) or the 90000 shared ceiling — so it can never trip the write limit,
+        # and positions are READ lazily so a budget stop never wastes the read budget.
+        # A budget stop exits 0 with a WRITE BUDGET STOP log; the next dispatch resumes
+        # where the last left off (vessels whose stored segments already carry this
+        # generator_version are converged-skipped, so a rebuild advances day over day
+        # instead of redoing the first N). No offset batching required anymore.
+        # `limit`/`offset`/`mmsi` still work for fine control.
         run: |
           node --max-old-space-size=4096 scripts/precompute-trails.mjs \
             ${{ inputs.regenerate && '--regenerate' || '' }} \

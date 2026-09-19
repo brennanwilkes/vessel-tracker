@@ -398,15 +398,20 @@ it off land. The Worker serves them unioned with live `positions` at `/track`
 (`getInferredTrack` in `storage.ts`); the **browser loads NO coastline** — it
 re-splines the union with the pure pipeline (`frontend/app/trail_spline.js`).
 
-- **A ROUTER CHANGE ALONE NEVER REBUILDS EXISTING WAYPOINTS.** The freshness heuristic
-  skips any vessel whose `last_pos_ts` hasn't advanced, and the skip happens BEFORE any
-  hashing — so bumping `GENERATOR_VERSION` only affects vessels that get *examined*.
-  Deploy a routing fix and the stored backlog keeps rendering the OLD geometry
-  indefinitely (and if ingestion is stalled, `last_pos_ts` never advances for anyone, so
-  NOTHING is re-examined). After changing the router, dispatch the workflow once with
-  **`regenerate: true`** (`workflow_dispatch` inputs `regenerate` + `limit` + `offset` +
-  `budget`). A bare `--regenerate` is now SAFE — it self-limits on the shared write
-  ledger (below) instead of running unbounded.
+- **Version bumps SELF-HEAL now (version-aware freshness).** The freshness heuristic
+  admits a vessel when its `last_pos_ts` advanced **OR** any of its stored
+  `inferred_segments` rows carry a `generator_version` older than the script's
+  `GENERATOR_VERSION` (cheap `SELECT mmsi FROM inferred_segments WHERE
+  generator_version < N GROUP BY mmsi`). So a router/version change (canal carve, spine
+  shape, tangent-context fix) no longer needs a manual `regenerate:true` dispatch: the
+  normal 6-hourly Worker dispatch + daily cron rebuild the stale backlog automatically,
+  budget-bounded, day over day. Stale-version vessels that are already land-free just
+  re-stamp their hash (the v5 hash ≠ v4, so the DELETE/INSERT path fires, no A*) and
+  converge; a stale 0-point "out of coverage" segment row has no `inferred_positions`
+  (invisible to the hash diff), so the script also runs an explicit `UPDATE
+  inferred_segments SET generator_version=N` for stale vessels to converge those.
+  Steady state is unchanged: current-version + land-free vessels skip as before.
+  `--regenerate` remains for force-rebuilds (`--mmsi` to clear one bad trail).
 - **The rebuild is rationed by a SHARED DAILY WRITE LEDGER, not `limit`/`offset`.**
   D1's free tier caps rows WRITTEN per UTC day at 100k, and the precompute shares that
   budget with live ingestion. On 2026-09-16 two bare v4 `--regenerate` runs died on
@@ -422,16 +427,21 @@ re-splines the union with the pure pipeline (`frontend/app/trail_spline.js`).
   (`PRECOMPUTE_DAILY_BUDGET` 50k rows/day, leaves headroom for ingestion) or the shared
   `ACCOUNT_SAFETY_CEILING` (90k, absorbs un-metered slack like the ledger upserts and
   a scan that dies mid-commit). `budget` workflow input overrides the 50k default.
-- **`--regenerate` now CONVERGES, not churns (version-converge skip).** Because a
-  budgeted rebuild stops mid-list and resumes on a later dispatch/day, a fleet
+- **`--regenerate` CONVERGES, not churns (version-converge skip), and reads LAZILY.**
+  A budgeted rebuild stops mid-list and resumes on a later dispatch/day, so a fleet
   regenerate skips any vessel whose stored segments all carry the current
   `GENERATOR_VERSION` AND still keep its curve off land (`skipped_version` counter) —
   otherwise each resumed run would re-route the first-N vessels the last run already
   upgraded and re-burn the daily budget on done work. `--mmsi` bypasses the skip
-  (still a forced rebuild). So drive a full rebuild by re-dispatching `regenerate=true`
-  once per UTC day until `db-trails` shows the new version fleet-wide; a run that finds
-  its budget already spent exits fast with a budget-stop and no writes (the guard
-  working). Bump `GENERATOR_VERSION` to force a rebuild of everything again.
+  (still a forced rebuild). With the self-healing freshness above, a version bump needs
+  NO dispatch at all; `regenerate=true` is only for forcing one. **Position reads are
+  lazy** — the script no longer bulk-reads all candidates' positions up front, but in
+  READ_AHEAD (25) slices as the loop reaches them, after the budget check. A
+  budget-exhausted run therefore reads ~nothing, and a run that stops after N vessels
+  has read at most N+25 — never the whole ~1029-vessel fleet (~2M rows) that the
+  write budget would let it touch only ~25 of. This is what keeps an every-eligible-
+  vessel rebuild inside the shared READ budget (5M rows/day) too; without it the
+  6-hourly dispatches alone would exhaust reads within days.
 - **Writes flush mid-run (`FLUSH_EVERY`)**, so a budget-stopped run keeps the vessels
   it finished — and because `last_seen DESC` orders candidates, those are the freshest,
   currently-on-the-map hulls first. `worker/scripts/db-ledger` shows today's
@@ -444,11 +454,13 @@ re-splines the union with the pure pipeline (`frontend/app/trail_spline.js`).
 - **Converge, don't churn (determinism):** the precompute is built over RAW reals
   (`computeControlPoints(..., {denoise:false})`) so the stored fakes and the client's
   re-splined curve agree exactly and stay water-tight (`tests/trail-precompute.test.mjs`).
-  A vessel is skipped — no A*, no D1 write — when EITHER its newest position hasn't
-  advanced since last run (`precompute_state.last_pos_ts_seen`) OR its already-stored
-  fakes still keep the curve off land (cheap spline + region-aware `isLand`, no A*).
-  Only a new land-crossing triggers a localized recompute; only changed segments are
-  written. `seg_hash` = bracketing real timestamps + length + `GENERATOR_VERSION`
+  A vessel is skipped — no A*, no D1 write — when its newest position hasn't advanced
+  since last run (`precompute_state.last_pos_ts_seen`) AND its stored segments are at
+  the current `GENERATOR_VERSION`, with already-stored fakes that keep the curve off
+  land (cheap spline + region-aware `isLand`, no A*). A stale-version vessel with a
+  land-free curve is NOT skipped (it must re-stamp its version and converge). Only a
+  new land-crossing triggers a localized recompute; only changed segments are written.
+  `seg_hash` = bracketing real timestamps + length + `GENERATOR_VERSION`
   (a script constant — bump it / pass `--regenerate` to force a full rebuild).
 - **Schema** (migration `006_inferred_positions.sql`): `inferred_positions(mmsi,
   seg_hash, seq, lat, lon, t, tier, dashed, generator_version)` (fakes carry an

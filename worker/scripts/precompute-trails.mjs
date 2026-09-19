@@ -23,21 +23,30 @@
 // run over run / day over day instead of re-burning its allowance on done vessels.
 // Bump GENERATOR_VERSION to force a full rebuild regardless (v4-vs-v3 hashes differ).
 //
-// I/O is BATCHED so the run is dominated by A* CPU, not DB round-trips: remote
-// uses the D1 HTTP query API (one fetch per chunk — no per-vessel process spawn,
-// and no `wrangler d1 execute --file` import-lock, which is what prints "your D1
-// will be unavailable"). All reads are chunked `IN(...)`; all writes accumulate
-// into one batched multi-statement flush at the end. `--local` falls back to
-// wrangler against the local dev DB. Needs CLOUDFLARE_API_TOKEN +
+// READ BUDGET is the same envelope's other half (5M rows/day). Positions are read
+// LAZILY in small slices as the loop reaches each vessel, so a budget-stop that
+// fires after N vessels has read only ~N (+ one slice) — never the whole fleet. A
+// rebuild where every vessel is stale must not pay ~2M rows of reads per dispatch.
+//
+// I/O is otherwise BATCHED so the run is dominated by A* CPU, not DB round-trips:
+// remote uses the D1 HTTP query API (one fetch per chunk — no per-vessel process
+// spawn, and no `wrangler d1 execute --file` import-lock, which is what prints
+// "your D1 will be unavailable"). All reads are chunked `IN(...)`; all writes
+// accumulate into one batched multi-statement flush at the end. `--local` falls
+// back to wrangler against the local dev DB. Needs CLOUDFLARE_API_TOKEN +
 // CLOUDFLARE_ACCOUNT_ID (the deploy workflow provides both).
 //
-// Converge, don't churn: a vessel is skipped (no A*, no write) when either its
-// newest position hasn't advanced since we last looked (precompute_state) OR its
-// already-stored fakes still keep the curve off land. Only a new land-crossing
-// triggers a recompute, and only changed segments are written. So the FIRST run
-// (empty state, every gapped vessel needs backfill) is the slow one; later runs
-// touch only the handful of vessels that moved into a new gap since. Bump
-// GENERATOR_VERSION (or pass --regenerate) to force a full rebuild.
+// SELF-HEALING, not just converging: a vessel is skipped (no A*, no write) when its
+// newest position hasn't advanced since we last looked (precompute_state) AND its
+// stored segments already carry this GENERATOR_VERSION. The version term is the new
+// part — a router/version bump leaves the whole fleet at old hashes with no new
+// movement to trigger re-examination, so without it the stored backlog renders the
+// OLD geometry forever. Marking stale-version vessels eligible turns the normal
+// dispatch/cron cadence into a budget-bounded fleet rebuild: each day's runs rebuild
+// as many vessels as the write allowance permits, land-free-but-stale vessels just
+// re-stamp their hash (cheap rewrite, no A*), and once current they are skipped as
+// before. Only a NEW land-crossing triggers a recompute; only changed segments are
+// written. Bump GENERATOR_VERSION (or pass --regenerate) to force a full rebuild.
 import { execFileSync } from 'node:child_process';
 import { writeFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -60,14 +69,16 @@ import { haversineKm, wrapLon } from '../../frontend/app/geo.js';
 // fake-run now include ONE adjacent real control each side in the simplify input
 // (Catmull-Rom's boundary tangents see adjacent controls, so simplifying each
 // run in isolation let the spline bow off the canal corridor). v4 Suez segments
-// can land outside the 0.6 km corridor; needs a `--regenerate` rebuild.
-// Bumping invalidates older hashes for any vessel that gets EXAMINED — but the
-// freshness heuristic skips unexamined vessels entirely, so a one-off `--regenerate`
-// dispatch is still required to rebuild the existing backlog.
+// can land outside the 0.6 km corridor. This bump is self-healing: the freshness
+// heuristic is now version-aware (vessel stays eligible while any stored segment
+// carries an older version), so the normal 6-hourly dispatch / daily cron rebuilds
+// the backlog automatically, budget-bounded, day over day — no `--regenerate`
+// dispatch required (except a one-off `--mmsi` clear of a specific bad trail).
 const GENERATOR_VERSION = 5;
 const DB_NAME = 'vessel-tracker';
 const API_BASE = 'https://api.cloudflare.com/client/v4';
 const READ_CHUNK = 60;   // mmsis per IN(...) read
+const READ_AHEAD = 25;   // lazily read positions in slices of this many (binds reads to writes)
 const WRITE_CHUNK = 50;  // statements per batched HTTP write
 const FLUSH_EVERY = 400; // flush accumulated writes mid-run past this many statements
 
@@ -282,10 +293,22 @@ async function main() {
   const lastSeenTs = new Map(stateRows.map(r => [r.mmsi, r.last_pos_ts_seen]));
   const lastRunAt  = new Map(stateRows.map(r => [r.mmsi, r.last_run_at]));
 
-  // Heuristic: examine only vessels whose newest position advanced since last run.
+  // Which vessels hold segments at an older GENERATOR_VERSION? Any such vessel is
+  // stale no matter how long ago it moved — its stored fakes were routed under
+  // different rules (a version bump is a router/scene change), so it must be
+  // EXAMINED to re-stamp/reroute, or the old geometry renders forever. Min version,
+  // so a vessel with mixed-version segments is stale. inferred_segments is the
+  // sparse per-segment table (present even at 0 points), so this is a small read.
+  const staleMmsis = new Set((await read(
+    `SELECT mmsi FROM inferred_segments WHERE generator_version < ${GENERATOR_VERSION} GROUP BY mmsi`
+  )).map(r => r.mmsi));
+
+  // Heuristic: examine only vessels whose newest position advanced since last run
+  // OR whose stored segments predate this GENERATOR_VERSION (self-healing rebuild).
   let skippedHeuristic = 0;
   const eligible = vessels.filter(v => {
-    const skip = !REGENERATE && lastSeenTs.has(v.mmsi) && v.last_pos_ts <= lastSeenTs.get(v.mmsi);
+    const skip = !REGENERATE && !staleMmsis.has(v.mmsi) &&
+      lastSeenTs.has(v.mmsi) && v.last_pos_ts <= lastSeenTs.get(v.mmsi);
     if (skip) skippedHeuristic++;
     return !skip;
   });
@@ -302,14 +325,10 @@ async function main() {
     eligible.sort((a, b) => (lastRunAt.get(a.mmsi) ?? -Infinity) - (lastRunAt.get(b.mmsi) ?? -Infinity));
   }
   const candidates = eligible.slice(OFFSET, LIMIT === Infinity ? undefined : OFFSET + LIMIT);
-  const mmsis = candidates.map(v => v.mmsi);
 
-  const posByMmsi = await readByMmsi(mmsis,
-    c => `SELECT mmsi, lat, lon, speed, ts, tier FROM positions WHERE mmsi IN (${c.join(',')}) ORDER BY mmsi, ts ASC`,
-    r => ({ lat: r.lat, lon: r.lon, speed: r.speed, t: r.ts, tier: r.tier }));
-  const infByMmsi = await readByMmsi(mmsis,
-    c => `SELECT mmsi, seg_hash, lat, lon, t, tier, dashed, generator_version FROM inferred_positions WHERE mmsi IN (${c.join(',')})`,
-    r => r);
+  const posSqlFor = c => `SELECT mmsi, lat, lon, speed, ts, tier FROM positions WHERE mmsi IN (${c.join(',')}) ORDER BY mmsi, ts ASC`;
+  const posRow = r => ({ lat: r.lat, lon: r.lon, speed: r.speed, t: r.ts, tier: r.tier });
+  const infSqlFor = c => `SELECT mmsi, seg_hash, lat, lon, t, tier, dashed, generator_version FROM inferred_positions WHERE mmsi IN (${c.join(',')})`;
 
   const writes = [];
   const now = Date.now();
@@ -317,6 +336,7 @@ async function main() {
   let pointsWritten = 0, segmentsDeleted = 0, flushedStatements = 0;
   let runRowsWritten = 0; // D1 rows this run has actually written (ledgered per flush)
   let budgetStopped = false;
+  let posByMmsi = new Map(), infByMmsi = new Map(); // lazily filled per slice in the loop
 
   // Shared daily write ledger at run start; ingestLatest is re-read periodically so a
   // long run sees ingestion spend live. pcAtStart + runRowsWritten == the PC ledger
@@ -349,15 +369,32 @@ async function main() {
   console.log(`[precompute] ${candidates.length} candidate(s) to examine of ${eligible.length} eligible` +
     ` (offset ${OFFSET}, ${skippedHeuristic} skipped by heuristic) | write budget ${WRITE_BUDGET}/day,` +
     ` spent today: pc ${pcAtStart} + ingest ${ingestAtStart}`);
-  for (const v of candidates) {
+  for (let i = 0; i < candidates.length; i++) {
     await maybeFlush();
     if (budgetExhausted()) { budgetStopped = true; break; }
+    // Read positions + stored fakes LAZILY in READ_AHEAD-sized slices, fetched only
+    // when the loop actually reaches them. The budget check above fires first, so a
+    // run that is already budget-exhausted reads NOTHING, and a run that stops after
+    // N vessels has read at most N + READ_AHEAD — not the whole fleet. This is what
+    // makes a version-rebuild (every vessel eligible, ~1029 of them) affordable on
+    // the READ side: up-front bulk reads would burn ~2M rows per dispatch against
+    // the 5M/day cap while writing only ~25 vessels each run.
+    if (i % READ_AHEAD === 0) {
+      const slice = candidates.slice(i, i + READ_AHEAD).map(v => v.mmsi);
+      [posByMmsi, infByMmsi] = await Promise.all([
+        readByMmsi(slice, posSqlFor, posRow),
+        readByMmsi(slice, infSqlFor, r => r),
+      ]);
+    }
+    const v = candidates[i];
     examined++;
     const points = posByMmsi.get(v.mmsi) ?? [];
     if (points.length < 2) { writes.push(stateUpsertSql(v.mmsi, v.last_pos_ts, now)); continue; }
 
     await ensureRegionsForExtent(extentOf(points));
     const existing = infByMmsi.get(v.mmsi) ?? [];
+
+    const versionCurrent = existing.every(r => r.generator_version === GENERATOR_VERSION);
 
     // --regenerate now CONVERGES instead of churning: a fleet rebuild driven in
     // budget-bounded increments advances across runs because any vessel whose stored
@@ -366,18 +403,35 @@ async function main() {
     // the previous run already upgraded and re-burns the daily budget on done work.
     // `--mmsi` bypasses on purpose ("clear a bad stored trail"). Bump
     // GENERATOR_VERSION to force a full rebuild of everything again.
-    if (REGENERATE && ONLY_MMSI === null && existing.length > 0 &&
-        existing.every(r => r.generator_version === GENERATOR_VERSION) &&
+    if (REGENERATE && ONLY_MMSI === null && existing.length > 0 && versionCurrent &&
         curveIsLandFree(points, existing)) {
       skippedVersion++;
       writes.push(stateUpsertSql(v.mmsi, v.last_pos_ts, now));
       continue;
     }
 
-    if (!REGENERATE && curveIsLandFree(points, existing)) {
+    // A STALE-version vessel must NOT skip here even if its curve is currently land
+    // free: it needs the write path to re-stamp its segments (the v5 hash differs from
+    // whatever it holds), or it stays stale forever and re-enters every run's eligible
+    // set. The rewrite is cheap (no A* for a land-free gap) and converges the vessel.
+    if (!REGENERATE && versionCurrent && curveIsLandFree(points, existing)) {
       skippedConverged++;
       writes.push(stateUpsertSql(v.mmsi, v.last_pos_ts, now));
       continue;
+    }
+
+    // A stale vessel that reached here is being re-examined under v5. Its 0-point
+    // "out of coverage" segment rows (markers with no inferred_positions) are INVISIBLE
+    // to the DELETE/INSERT hashing below — existing=[] means they are neither deleted
+    // nor reinserted — so without this they stay v4 forever and the vessel re-enters
+    // every run's eligible set. Re-stamp them; a 0-point straight bridge that actually
+    // crosses land can't reach this point (the curve check above would have let it
+    // fall through to re-routing), so stamping is genuinely convergent, never a skip
+    // of new routing work.
+    if (!versionCurrent) {
+      writes.push(
+        `UPDATE inferred_segments SET generator_version = ${GENERATOR_VERSION}` +
+        ` WHERE mmsi = ${v.mmsi} AND generator_version < ${GENERATOR_VERSION};`);
     }
 
     // Route every land-crossing segment; keep the minimal water-tight fakes.
