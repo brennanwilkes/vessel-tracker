@@ -1,10 +1,23 @@
 #!/usr/bin/env bash
+# Daily D1 write ledger: today's spend plus the recent history the precompute's
+# ingest reserve is sized from. Account cap is 100000 rows/day (resets 00:00 UTC);
+# ACCOUNT_SAFETY_CEILING in precompute-trails.mjs stops us at 50000, and an ingest
+# column at/over 40000 is the INGEST_TRIPWIRE — see root CLAUDE.md "Write-budget
+# round 5" for what to do about it.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/db-common"
 parse_common_flags "$@"
-today="$(date -u +%Y-%m-%d)"
+# Both key families end in the YYYY-MM-DD date, so the last 10 chars are the day —
+# a prefix-length substr would be wrong for one of the two families.
 d1_query "
-SELECT 'ingest_rows_written_today' as metric, COALESCE((SELECT value FROM scan_meta WHERE key = 'ingest_rows_written_${today}'), 0) as value;
-SELECT 'pc_rows_written_today' as metric, COALESCE((SELECT value FROM scan_meta WHERE key = 'pc_rows_written_${today}'), 0) as value;
+SELECT substr(key, -10) AS day,
+       MAX(CASE WHEN key LIKE 'ingest_rows_written_%' THEN value END) AS ingest,
+       MAX(CASE WHEN key LIKE 'pc_rows_written_%' THEN value END) AS precompute,
+       SUM(value) AS total
+  FROM scan_meta
+ WHERE key LIKE 'ingest_rows_written_%' OR key LIKE 'pc_rows_written_%'
+ GROUP BY day
+ ORDER BY day DESC
+ LIMIT 14;
 "

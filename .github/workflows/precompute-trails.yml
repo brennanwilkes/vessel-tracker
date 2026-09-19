@@ -25,7 +25,7 @@ on:
         type: string
         default: ""
       budget:
-        description: "Max D1 rows written this run (default 50000). The script also stops when today's shared ingest+precompute ledger hits the safety ceiling (90000). A budget stop is a controlled exit — resume with another dispatch; already-upgraded vessels are skipped."
+        description: "Upper bound on D1 rows written this run (default 25000). The real allowance is usually lower: the script derives it as the 50000 shared ceiling minus a reserve for a full day of live ingestion (its heaviest complete day in the last week). A budget stop is a controlled exit — resume with another dispatch; already-upgraded vessels are skipped."
         type: string
         default: ""
   # DAILY safety net only — the Worker's dispatch is the real trigger.
@@ -88,8 +88,9 @@ jobs:
         # regenerate=true only forces an unconditional rebuild (e.g. --mmsi to clear one
         # bad trail). Its work is SELF-LIMITING: the script reads today's shared
         # ingest+precompute D1 write ledger (scan_meta) and stops at its own
-        # --write-budget (default 50000 rows, leaving room for ingestion under the 100k
-        # daily cap) or the 90000 shared ceiling — so it can never trip the write limit,
+        # --write-budget cap (default 25000 rows) or the derived allowance — the 50000
+        # shared ceiling (half the 100k cap; this account runs other projects) minus a
+        # reserve for ingestion's whole day — so it can never trip the write limit,
         # and positions are READ lazily so a budget stop never wastes the read budget.
         # A budget stop exits 0 with a WRITE BUDGET STOP log; the next dispatch resumes
         # where the last left off (vessels whose stored segments already carry this

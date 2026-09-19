@@ -13,9 +13,10 @@
 // live ingestion. This script is self-limiting so a regenerate can never trip the
 // cap: it reads a shared daily ledger from scan_meta (ingest_rows_written_<date>,
 // maintained by the Worker; pc_rows_written_<date>, maintained here) and stops at
-// whichever comes first — its own `--write-budget` allowance (default 50k, leaving
-// headroom for ingestion under the 100k cap) or a combined safety ceiling (90k,
-// `ACCOUNT_SAFETY_CEILING`). The ledger is bumped after every flush, so a killed
+// whichever comes first — its own `--write-budget` cap (default 25k) or the DERIVED
+// allowance `ACCOUNT_SAFETY_CEILING (50k) - ingestReserve`, where the reserve is
+// ingestion's heaviest COMPLETE day over the last week (never its spend-so-far: see
+// the ACCOUNT_SAFETY_CEILING comment). The ledger is bumped after every flush, so a killed
 // run still accounts for what it wrote. A budget stop exits 0 (it is a controlled
 // stop, not a crash): the run logs how far it got, and the NEXT run resumes because
 // `--regenerate` now SKIPS vessels whose stored segments already carry this
@@ -83,11 +84,21 @@ const WRITE_CHUNK = 50;  // statements per batched HTTP write
 const FLUSH_EVERY = 400; // flush accumulated writes mid-run past this many statements
 
 // Shared daily D1 write budget (see header comment). The account caps TOTAL rows
-// written per UTC day at 100k; these two limits keep the precompute inside it while
-// leaving headroom for live ingestion. `--write-budget` overrides the precompute's
-// own allowance; the shared ceiling is fixed.
-const PRECOMPUTE_DAILY_BUDGET = 50000; // rows/day the precompute may write
-const ACCOUNT_SAFETY_CEILING = 90000;  // shared ingest+precompute stop line (< 100k cap)
+// written per UTC day at 100k; this account runs other projects too, so the stop line
+// is HALF the cap, not most of it. The precompute's own allowance is derived, not
+// fixed: `ACCOUNT_SAFETY_CEILING - ingestReserve`, where the reserve is what live
+// ingestion has historically needed for a WHOLE day. Comparing against ingestion's
+// spend-SO-FAR is the trap that produced the 91%-of-cap alert on 2026-09-18 — a run
+// starting at 01:02 UTC saw ingest at 4k, wrote 58k, and ingestion then spent its
+// remaining ~28k on top. `--write-budget` lowers the precompute's cap; it can never
+// raise it past the derived allowance.
+const PRECOMPUTE_DAILY_BUDGET = 25000; // hard upper bound on rows/day the precompute may write
+const ACCOUNT_SAFETY_CEILING = 50000;  // shared ingest+precompute stop line (50% of the 100k cap)
+const INGEST_RESERVE_DAYS = 7;         // lookback for sizing ingestion's full-day reserve
+const INGEST_RESERVE_FLOOR = 35000;    // used when the ledger has no completed day yet
+// Measured 2026-09-18: 58,493 rows over 19,804 statements = 2.95 rows/statement. Used
+// to price the PENDING (unflushed) buffer so a single heavy vessel can't overshoot.
+const ROWS_PER_STATEMENT_EST = 3;
 
 // Worker ledger keys (storage.ts flushIngestLedger writes ingest_rows_written_<date>;
 // this script bumps pc_rows_written_<date>). The D1 free-tier day rolls at 00:00 UTC.
@@ -221,6 +232,58 @@ async function readIngestLedger() {
   return Number(rows[0]?.value ?? 0);
 }
 
+// The last INGEST_RESERVE_DAYS COMPLETE UTC days of the shared ledger, newest first.
+// Today is excluded — it is still accumulating, and sizing anything off a partial day
+// is what produced the 91%-of-cap alert. One query for both series.
+async function readLedgerHistory() {
+  const dates = [];
+  for (let d = 1; d <= INGEST_RESERVE_DAYS; d++) {
+    dates.push(utcDateKey(new Date(Date.now() - d * 86400000)));
+  }
+  const keys = dates.flatMap(d => [sqlStr(`ingest_rows_written_${d}`), sqlStr(`pc_rows_written_${d}`)]);
+  const rows = await read(`SELECT key, value FROM scan_meta WHERE key IN (${keys.join(',')})`);
+  const byKey = new Map(rows.map(r => [r.key, Number(r.value)]));
+  return dates.map(date => {
+    const ingest = byKey.get(`ingest_rows_written_${date}`) ?? 0;
+    const pc = byKey.get(`pc_rows_written_${date}`) ?? 0;
+    return { date, ingest, pc, total: ingest + pc, complete: byKey.has(`ingest_rows_written_${date}`) };
+  });
+}
+
+// THE LONG-TERM TRIPWIRE. Ingestion's write rate scales with how many vessels are
+// currently being HEARD, and that set grows monotonically because
+// `of_interest AND first_direct_at IS NOT NULL` never retires a vessel that once
+// entered the window box (measured 2026-09-18: 1,032 tracked, 363 rendered, ~32k
+// rows/day). Nothing in the design bounds it, so the honest plan is to WATCH it and
+// revisit when it crosses. Printed every run; a crossing also emits a GitHub Actions
+// ::warning:: annotation so it shows on the run summary without reading the log.
+// When this fires, the options are in root CLAUDE.md → "Write-budget round 5".
+const INGEST_TRIPWIRE = 40000; // ingest rows/day that means "revisit the design"
+
+function logLedgerHistory(history, reserve) {
+  console.log(`[precompute] D1 daily write ledger — last ${INGEST_RESERVE_DAYS} complete UTC days` +
+    ` (account cap 100000, our ceiling ${ACCOUNT_SAFETY_CEILING}, ingest tripwire ${INGEST_TRIPWIRE}):`);
+  for (const d of history) {
+    if (!d.complete) continue;
+    const flags = [
+      d.total >= ACCOUNT_SAFETY_CEILING ? 'OVER CEILING' : null,
+      d.ingest >= INGEST_TRIPWIRE ? 'INGEST TRIPWIRE' : null,
+    ].filter(Boolean);
+    console.log(`[precompute]   ${d.date}  ingest ${String(d.ingest).padStart(6)}` +
+      `  pc ${String(d.pc).padStart(6)}  total ${String(d.total).padStart(6)}` +
+      `  (${Math.round((d.total / 100000) * 100)}% of cap)${flags.length ? '  ** ' + flags.join(' + ') : ''}`);
+  }
+  const worstIngest = Math.max(0, ...history.filter(d => d.complete).map(d => d.ingest));
+  if (worstIngest >= INGEST_TRIPWIRE) {
+    console.log(`::warning::D1 INGEST TRIPWIRE — live ingestion hit ${worstIngest} rows/day` +
+      ` (tripwire ${INGEST_TRIPWIRE}, ceiling ${ACCOUNT_SAFETY_CEILING}). The tracked-fleet set grows` +
+      ` monotonically; see root CLAUDE.md "Write-budget round 5" for the options.`);
+  }
+  if (reserve === INGEST_RESERVE_FLOOR && !history.some(d => d.complete)) {
+    console.log(`[precompute] (no complete ledger day yet — reserving the ${INGEST_RESERVE_FLOOR} floor)`);
+  }
+}
+
 // Bump the precompute side of the shared ledger by `rows`. Called after every
 // writeBatch flush so even a killed run accounts for everything it wrote. The bump
 // itself writes one scan_meta row (no secondary indexes) and is not recounted.
@@ -344,10 +407,21 @@ async function main() {
   // budget check below never double-counts this run.
   const pcAtStart = Number((await read(`SELECT value FROM scan_meta WHERE key = '${PC_LEDGER_KEY}'`))[0]?.value ?? 0);
   const ingestAtStart = await readIngestLedger();
+  const ledgerHistory = await readLedgerHistory();
+  // Max, not mean: the reserve exists to survive ingestion's heaviest day, and
+  // under-reserving is what trips the account cap.
+  const completeIngest = ledgerHistory.filter(d => d.complete).map(d => d.ingest);
+  const ingestReserve = completeIngest.length > 0 ? Math.max(...completeIngest) : INGEST_RESERVE_FLOOR;
   let ingestLatest = ingestAtStart;
-  const budgetExhausted = () => {
-    const pcSpent = pcAtStart + runRowsWritten;
-    return pcSpent >= WRITE_BUDGET || ingestLatest + pcSpent >= ACCOUNT_SAFETY_CEILING;
+  // The allowance is what is left of the shared ceiling once ingestion's WHOLE day is
+  // reserved, capped by the precompute's own bound. `pending` prices the unflushed
+  // buffer (see ROWS_PER_STATEMENT_EST) so the stop lands before those rows are sent.
+  const allowance = Math.max(0, Math.min(WRITE_BUDGET, ACCOUNT_SAFETY_CEILING - ingestReserve));
+  const budgetExhausted = (pending = 0) => {
+    const pcSpent = pcAtStart + runRowsWritten + pending * ROWS_PER_STATEMENT_EST;
+    // ingestLatest can exceed the reserve on an unusually heavy day; honour whichever
+    // is larger so the ceiling holds even when history under-predicts.
+    return pcSpent >= allowance || Math.max(ingestLatest, ingestReserve) + pcSpent >= ACCOUNT_SAFETY_CEILING;
   };
 
   // Flush completed-vessel writes mid-run so memory stays bounded as coverage
@@ -366,8 +440,10 @@ async function main() {
     await bumpPcLedger(rows);
   }
 
+  logLedgerHistory(ledgerHistory, ingestReserve);
   console.log(`[precompute] ${candidates.length} candidate(s) to examine of ${eligible.length} eligible` +
-    ` (offset ${OFFSET}, ${skippedHeuristic} skipped by heuristic) | write budget ${WRITE_BUDGET}/day,` +
+    ` (offset ${OFFSET}, ${skippedHeuristic} skipped by heuristic) | allowance ${allowance} rows` +
+    ` (ceiling ${ACCOUNT_SAFETY_CEILING} − ingest reserve ${ingestReserve}, own cap ${WRITE_BUDGET}),` +
     ` spent today: pc ${pcAtStart} + ingest ${ingestAtStart}`);
   for (let i = 0; i < candidates.length; i++) {
     await maybeFlush();
@@ -428,6 +504,12 @@ async function main() {
     // crosses land can't reach this point (the curve check above would have let it
     // fall through to re-routing), so stamping is genuinely convergent, never a skip
     // of new routing work.
+
+    // Everything pushed from here to the state upsert is THIS vessel's work, and it is
+    // discarded wholesale if it would breach the allowance (see the check below).
+    const boundaryLen = writes.length;
+    const boundaryCounts = [segmentsWritten, segmentsDeleted, pointsWritten];
+
     if (!versionCurrent) {
       writes.push(
         `UPDATE inferred_segments SET generator_version = ${GENERATOR_VERSION}` +
@@ -468,6 +550,18 @@ async function main() {
         ` VALUES (${v.mmsi}, ${sqlStr(h)}, ${fakes.length}, ${GENERATOR_VERSION}, ${now});`);
       segmentsWritten++;
     }
+    // Bound the overshoot to ZERO vessels instead of one. The top-of-loop check only
+    // sees FLUSHED rows, so a heavy trans-Pacific rebuild (measured: one vessel, ~8.5k
+    // rows) sailed straight past the allowance. Price this vessel's pending buffer and,
+    // if it would breach, drop its statements — the A* work is lost, not the rows — and
+    // stop. The next run redoes this vessel inside a fresh day's budget.
+    if (budgetExhausted(writes.length - boundaryLen)) {
+      writes.length = boundaryLen;
+      [segmentsWritten, segmentsDeleted, pointsWritten] = boundaryCounts;
+      examined--;
+      budgetStopped = true;
+      break;
+    }
     writes.push(stateUpsertSql(v.mmsi, v.last_pos_ts, now));
 
     if (examined % 25 === 0) {
@@ -493,10 +587,11 @@ async function main() {
   if (budgetStopped) {
     const remain = candidates.length - examined;
     const perVessel = examined > 0 ? runRowsWritten / examined : 0;
-    const estRuns = perVessel > 0 ? Math.max(1, Math.ceil((remain * perVessel) / WRITE_BUDGET)) : null;
+    const estRuns = perVessel > 0 && allowance > 0 ? Math.max(1, Math.ceil((remain * perVessel) / allowance)) : null;
     console.log(
       `[precompute] WRITE BUDGET STOP — ${examined} of ${candidates.length} candidate(s) examined, ` +
-      `spent ${pcSpent} pc / ${ingestLatest} ingest today (pc allowance ${WRITE_BUDGET}, shared ceiling ${ACCOUNT_SAFETY_CEILING}). ` +
+      `spent ${pcSpent} pc / ${ingestLatest} ingest today (allowance ${allowance} = ceiling ${ACCOUNT_SAFETY_CEILING} ` +
+      `− ingest reserve ${ingestReserve}, own cap ${WRITE_BUDGET}). ` +
       `At this rate the remaining ${remain} vessel(s) need ~${estRuns === null ? '?' : estRuns} more daily run(s). ` +
       `Already-upgraded vessels skip on resume; budget resets 00:00 UTC.`
     );

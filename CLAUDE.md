@@ -215,9 +215,9 @@ budget redoing an identical first-N.
   bumps `pc_rows_written_<date>` after EVERY `writeBatch` flush (so a killed run still
   accounts for itself), re-reads `ingest_rows_written_<date>` every 25 vessels (ingest
   continues under you), and stops — exiting 0 with `WRITE BUDGET STOP` — at whichever
-  comes first: its own `--write-budget` (`PRECOMPUTE_DAILY_BUDGET` 50k rows/day, leaves
-  room for ingestion) or the shared `ACCOUNT_SAFETY_CEILING` (90k, absorbs the unmetered
-  slack above). The workflow gained a `budget` input (default 50k). `--dry-run` never
+  comes first: its own `--write-budget` cap (`PRECOMPUTE_DAILY_BUDGET` 25k rows/day) or
+  the DERIVED allowance `ACCOUNT_SAFETY_CEILING - ingestReserve` (see round 5 below).
+  The workflow gained a `budget` input (default 25k). `--dry-run` never
   budgets. Steady state converges (vessels already at the current version are skipped),
   so eventually a day's runs write ~nothing.
 - **`--regenerate` CONVERGES instead of churning, and version bumps now SELF-HEAL.**
@@ -252,6 +252,78 @@ out, potentially after `DROP TABLE positions` — a half-applied schema change i
 paying the seq bump. `positions.id` only ever needs a unique rowid (`p.id = (SELECT id … ORDER
 BY ts DESC LIMIT 1)`), so plain `INTEGER PRIMARY KEY` would be semantically fine — the blocker
 is purely the migration cost. Revisit ONLY if `positions` is being rebuilt for another reason.
+
+## Write-budget round 5 — reserve ingestion's WHOLE day, not its spend-so-far (2026-09-18)
+
+Cloudflare alerted at **91% of the 100k/day cap** on UTC 2026-09-18 even though round 4's
+ledger was working. It was not a leak — it was the ledger's arithmetic plus a deliberately
+high ceiling:
+
+- Run `35293710594` (01:02 UTC) logged `write budget 50000/day, spent today: pc 0 +
+  ingest 4078`, then `rows_written=58493`. Ingestion spent its remaining ~32k over the
+  rest of the day → **~91k**.
+- **The ceiling compared against ingestion's spend SO FAR.** A run starting just after
+  00:00 UTC sees ingest near zero and is structurally free to eat ingestion's whole day.
+  The reserve must be a FULL DAY of ingestion, known in advance.
+- **The check ran only at the top of the vessel loop, so it saw only FLUSHED rows.** One
+  heavy trans-Pacific vessel emitted ~8.5k rows in the pending buffer and sailed past the
+  50k allowance to 58,493.
+
+Fixes in `precompute-trails.mjs`:
+- `ACCOUNT_SAFETY_CEILING` 90k → **50k**. The old 90k *was* a 90%-of-cap day by
+  construction, so the alert fired whenever the rebuild ran at full tilt. This account
+  runs other projects; the stop line is now half the cap, not most of it.
+- **`readIngestReserve()`** reads `ingest_rows_written_<date>` for the last
+  `INGEST_RESERVE_DAYS` (7) **complete** UTC days and takes the **max** (today excluded —
+  it is still accumulating and would under-reserve). `INGEST_RESERVE_FLOOR` 35k covers a
+  ledger with no complete day yet. Max, not mean: under-reserving is what trips the cap.
+  Trade-off to know: one anomalous ingest day suppresses the precompute for a week — the
+  startup log prints the reserve, so a stalled rebuild is diagnosable in one line.
+- Allowance is now DERIVED: `min(--write-budget, CEILING - ingestReserve)`, and the
+  runtime check still honours `max(ingestLatest, reserve)` so an unusually heavy live day
+  overrides history. At the measured ~32k ingest, the precompute gets ~18k/day.
+- **Overshoot bounded to ZERO vessels.** Each vessel's statements are bracketed
+  (`boundaryLen` + counter snapshot); if pricing the pending buffer at
+  `ROWS_PER_STATEMENT_EST` (3 — measured 58,493 rows / 19,804 statements = 2.95) would
+  breach the allowance, the vessel's statements are DISCARDED and the run stops. The A*
+  work is lost, not the rows; the next run redoes that vessel in a fresh day's budget.
+
+**The remaining backlog costs ~2,017 rows/vessel (58,493 ÷ 29 measured), so ~76 vessels
+is ~153k rows ≈ 9 days at an 18k/day allowance.** That is the intended shape: slow,
+bounded, self-resuming.
+
+### The long-term growth term — WATCHED, not fixed (decision 2026-09-18)
+
+Every round so far tuned the write RATE. What none of them bounds is the SIZE of the
+tracked fleet: `of_interest = 1 AND first_direct_at IS NOT NULL` means "has EVER entered
+the window box" and never retires a vessel. Ingestion's write rate scales with the subset
+currently being HEARD, so it grows with that set. Measured 2026-09-18 (public API +
+precompute log, no wrangler):
+
+| | |
+|---|---|
+| Tracked set (`first_direct_at IS NOT NULL`) | **~1,032** |
+| Rendered (`/current`, 72 h TTL) | **363** (direct 10 / local 187 / global 166) |
+| Ingest writes | **~32k/day = 32% of cap** |
+| Project age | 3.4 months (first commit 2026-06-07) |
+
+This is round 3's 7,193-to-render-344 defect one level down, and it is SLOW — recruitment
+among live vessels runs ~70–115/month after the June onboarding burst. **Decision: do not
+re-engineer it now.** The project is in maintenance mode; the fix costs a migration and a
+scan-targeting change for a problem that is years out.
+
+**Instead there is a tripwire in the log.** Every precompute run prints the last 7 complete
+UTC days of the shared ledger (ingest / pc / total / % of cap) before it starts, and emits a
+GitHub Actions `::warning::` annotation — visible on the run summary without opening the log
+— when any complete day's ingest crosses `INGEST_TRIPWIRE` (40k rows/day). `worker/scripts/db-ledger`
+prints the same 14-day table on demand. When it fires, the two real options are:
+1. **Retire stale visitors from global tracking** — add `last_direct_at`, drop a vessel from
+   `getOfInterestMmsis` when it has not entered the direct box in N months. `runLocalScan`
+   drains the local box without consulting that list, so a returning vessel re-recruits
+   itself for free. This makes the tracked set proportional to *recent* visitors: flat over
+   years instead of linear.
+2. **Workers Paid ($5/mo)** — 50M rows written + 25B read per month, ~16x today's headroom,
+   and the entire write-budget workstream stops being a thing.
 
 ## Write budget / maintenance mode (D1 free tier)
 
@@ -445,7 +517,6 @@ than land. It has no `{s}` subdomain shard and is native to z16, so the layer se
 
 ## Key reference docs
 
-- `docs/handoff.md` — session state, open tasks, operational traps (regenerate batching, pace); **start here after a break**
 - `docs/known-issues.md` — open defects with the evidence already gathered, so a session starts from measurements rather than re-deriving them
 - `docs/ocean-routing-study.md` — do real ships follow great circles? (the measurement behind `OCEAN_ROUTE`)
 - `docs/ais-reference.md` — aisstream message shapes, AIS vessel-type codes, bounding box
@@ -473,7 +544,7 @@ repo root: `worker/scripts/db-stats`.
 | `db-tiers` | Position stats per scan tier |
 | `db-search <term>` | Search vessels by MMSI or name fragment |
 | `db-diagnose` | Why has ingestion stopped? Freshness, AIS lock state, scan cursor, write probe |
-| `db-ledger` | Today's daily write-ledger spend: `ingest_rows_written_<date>` + `pc_rows_written_<date>` from scan_meta. Read this to see how much of the day's 100k budget ingestion and the trail precompute have used, and whether a precompute run's budget is already spent. |
+| `db-ledger` | The last 14 days of the shared daily write ledger (`ingest_rows_written_<date>` + `pc_rows_written_<date>` from scan_meta), one row per UTC day with ingest / precompute / total. Read this to see how much of the day's 100k budget each side has used, whether a precompute run's budget is already spent, and whether ingestion is trending toward the 40k `INGEST_TRIPWIRE` (see "The long-term growth term"). |
 **Auditing LIVE trails** (not fixtures): `node tests/audit-prod.mjs --all --top 30`, or
 per-vessel with span detail. Fetches what the browser receives and splines it with the
 client pipeline. **It loads `region_coast` regions explicitly** — `tests/lib.mjs` alone

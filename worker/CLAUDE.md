@@ -423,10 +423,15 @@ re-splines the union with the pure pipeline (`frontend/app/trail_spline.js`).
   via `flushIngestLedger`, wired with `.finally()` in `index.ts` so it runs on error
   paths too) and `pc_rows_written_<date>` (bumped here after EVERY `writeBatch` flush,
   so a killed run still accounts for what it wrote). It stops — exiting 0 with a
-  `WRITE BUDGET STOP` log — at whichever comes first: its own `--write-budget`
-  (`PRECOMPUTE_DAILY_BUDGET` 50k rows/day, leaves headroom for ingestion) or the shared
-  `ACCOUNT_SAFETY_CEILING` (90k, absorbs un-metered slack like the ledger upserts and
-  a scan that dies mid-commit). `budget` workflow input overrides the 50k default.
+  `WRITE BUDGET STOP` log — at whichever comes first: its own `--write-budget` cap
+  (`PRECOMPUTE_DAILY_BUDGET` 25k rows/day) or the DERIVED allowance
+  `ACCOUNT_SAFETY_CEILING (50k) - ingestReserve`, where `readIngestReserve()` takes the
+  MAX `ingest_rows_written_<date>` over the last 7 **complete** UTC days (today is still
+  accumulating; reserving only its spend-so-far is what produced the 91%-of-cap alert on
+  2026-09-18 — root cause in root `CLAUDE.md` → "Write-budget round 5"). A vessel's
+  pending statements are priced at `ROWS_PER_STATEMENT_EST` (3) and DISCARDED wholesale
+  rather than written if they would breach, so overshoot is zero vessels, not one.
+  `budget` workflow input lowers the 25k cap; it can never raise the derived allowance.
 - **`--regenerate` CONVERGES, not churns (version-converge skip), and reads LAZILY.**
   A budgeted rebuild stops mid-list and resumes on a later dispatch/day, so a fleet
   regenerate skips any vessel whose stored segments all carry the current
